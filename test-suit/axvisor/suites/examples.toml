@@ -5,3 +5,9 @@ cases = [
   "example/pass-report",
   "example/fail-report",
 ]
+
+[arches.riscv64]
+cases = [
+  "example/pass-report",
+  "example/fail-report",
+]
