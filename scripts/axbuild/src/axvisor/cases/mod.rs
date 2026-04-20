@@ -379,9 +379,15 @@ cases = ["example/pass-report"]
         };
         let artifacts = RunArtifacts {
             run_id: "run-1".to_string(),
-            run_dir: PathBuf::from("/tmp/run-1"),
-            target_rootfs: PathBuf::from("/tmp/run-1/rootfs.img"),
-            summary_path: PathBuf::from("/tmp/run-1/summary.json"),
+            run_dir: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1",
+            ),
+            target_rootfs: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/rootfs.img",
+            ),
+            summary_path: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/summary.json",
+            ),
         };
 
         let summary = serde_json::to_value(plan.to_summary(&artifacts)).unwrap();

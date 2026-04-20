@@ -35,8 +35,6 @@ const HOST_VM_CREATE_TIMEOUT_SECS: u64 = 15;
 const HOST_GUEST_EXIT_GRACE_SECS: u64 = 2;
 const HOST_VM_STOP_TIMEOUT_SECS: u64 = 3;
 const HOST_VM_STATE_POLL_INTERVAL_MILLIS: u64 = 200;
-const QEMU_ROOTFS_PLACEHOLDER_OLD: &str = "${workspaceFolder}/tmp/rootfs.img";
-const QEMU_ROOTFS_PLACEHOLDER_NEW: &str = "${workspaceFolder}/os/axvisor/tmp/rootfs.img";
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct RunExecution {
@@ -703,18 +701,54 @@ fn load_qemu_args(path: &Path, rootfs_override: Option<&Path>) -> anyhow::Result
 
     let mut args = config.args;
     if let Some(rootfs) = rootfs_override {
-        let rootfs = rootfs.display().to_string();
-        for arg in &mut args {
-            if arg.contains(QEMU_ROOTFS_PLACEHOLDER_OLD) {
-                *arg = arg.replace(QEMU_ROOTFS_PLACEHOLDER_OLD, &rootfs);
-            }
-            if arg.contains(QEMU_ROOTFS_PLACEHOLDER_NEW) {
-                *arg = arg.replace(QEMU_ROOTFS_PLACEHOLDER_NEW, &rootfs);
-            }
-        }
+        apply_rootfs_override(&mut args, rootfs)?;
     }
     let _ = config.to_bin;
     Ok(args)
+}
+
+fn apply_rootfs_override(args: &mut Vec<String>, rootfs: &Path) -> anyhow::Result<()> {
+    let replacement = format!("id=disk0,if=none,format=raw,file={}", rootfs.display());
+    let mut drive_replaced = false;
+    let mut disk0_device_index = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-device" if index + 1 < args.len() => {
+                let value = &args[index + 1];
+                if matches!(
+                    value.as_str(),
+                    "virtio-blk-device,drive=disk0" | "virtio-blk-pci,drive=disk0"
+                ) {
+                    disk0_device_index = Some(index);
+                }
+                index += 2;
+            }
+            "-drive" if index + 1 < args.len() => {
+                let value = &mut args[index + 1];
+                if value.starts_with("id=disk0,if=none,format=raw,file=") {
+                    *value = replacement.clone();
+                    drive_replaced = true;
+                }
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+
+    if drive_replaced {
+        return Ok(());
+    }
+
+    if let Some(device_index) = disk0_device_index {
+        let insert_pos = device_index + 2;
+        args.insert(insert_pos, "-drive".to_string());
+        args.insert(insert_pos + 1, replacement);
+        return Ok(());
+    }
+
+    bail!("QEMU config does not define a `disk0` block device")
 }
 
 fn write_cases_axvisor_build_config(
@@ -992,6 +1026,66 @@ mod tests {
     }
 
     #[test]
+    fn apply_rootfs_override_rewrites_existing_disk0_drive() {
+        let mut args = vec![
+            "-device".to_string(),
+            "virtio-blk-device,drive=disk0".to_string(),
+            "-drive".to_string(),
+            "id=disk0,if=none,format=raw,file=${workspace}/target/rootfs/rootfs-aarch64-alpine.img"
+                .to_string(),
+        ];
+
+        apply_rootfs_override(&mut args, Path::new("/tmp/run/rootfs.img")).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "-device".to_string(),
+                "virtio-blk-device,drive=disk0".to_string(),
+                "-drive".to_string(),
+                "id=disk0,if=none,format=raw,file=/tmp/run/rootfs.img".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_rootfs_override_inserts_drive_when_only_device_exists() {
+        let mut args = vec![
+            "-nographic".to_string(),
+            "-device".to_string(),
+            "virtio-blk-pci,drive=disk0".to_string(),
+            "-append".to_string(),
+            "root=/dev/vda rw init=/init".to_string(),
+        ];
+
+        apply_rootfs_override(&mut args, Path::new("/tmp/run/rootfs.img")).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "-nographic".to_string(),
+                "-device".to_string(),
+                "virtio-blk-pci,drive=disk0".to_string(),
+                "-drive".to_string(),
+                "id=disk0,if=none,format=raw,file=/tmp/run/rootfs.img".to_string(),
+                "-append".to_string(),
+                "root=/dev/vda rw init=/init".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_rootfs_override_errors_without_disk0_device() {
+        let mut args = vec![
+            "-device".to_string(),
+            "virtio-net-pci,netdev=net0".to_string(),
+        ];
+
+        let err = apply_rootfs_override(&mut args, Path::new("/tmp/run/rootfs.img")).unwrap_err();
+        assert!(err.to_string().contains("disk0"));
+    }
+
+    #[test]
     fn write_cases_axvisor_build_config_enables_fs_and_clears_vm_configs() {
         let dir = tempdir().unwrap();
         let workspace_root = dir.path().join("workspace");
@@ -1041,9 +1135,15 @@ vm_configs = ["vm.toml"]
         };
         let artifacts = RunArtifacts {
             run_id: "run-1".to_string(),
-            run_dir: PathBuf::from("/tmp/run-1"),
-            target_rootfs: PathBuf::from("/tmp/run-1/rootfs.img"),
-            summary_path: PathBuf::from("/tmp/run-1/summary.json"),
+            run_dir: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1",
+            ),
+            target_rootfs: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/rootfs.img",
+            ),
+            summary_path: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/summary.json",
+            ),
         };
         let summary = serde_json::to_value(plan.to_summary(&artifacts)).unwrap();
         assert_eq!(summary["arch"], "aarch64");

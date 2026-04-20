@@ -99,8 +99,12 @@ mod tests {
         };
         let artifacts = RunArtifacts {
             run_id: "run-1".to_string(),
-            run_dir: PathBuf::from("/tmp/run-1"),
-            target_rootfs: PathBuf::from("/tmp/run-1/rootfs.img"),
+            run_dir: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1",
+            ),
+            target_rootfs: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/rootfs.img",
+            ),
             summary_path: path.clone(),
         };
         let prepared = vec![PreparedCaseAssets {
@@ -110,22 +114,41 @@ mod tests {
             package: "axvisor-timer-basic".to_string(),
             target: "aarch64-unknown-none-softfloat".to_string(),
             build_info_path: PathBuf::from("/tmp/case/build-aarch64.toml"),
-            host_case_dir: PathBuf::from("/tmp/run-1/cases/timer.basic"),
-            staged_kernel_host_path: PathBuf::from("/tmp/run-1/cases/timer.basic/kernel.bin"),
-            rendered_vm_host_path: PathBuf::from("/tmp/run-1/cases/timer.basic/vm.toml"),
+            host_case_dir: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/cases/timer.\
+                 basic",
+            ),
+            staged_kernel_host_path: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/cases/timer.\
+                 basic/kernel.bin",
+            ),
+            rendered_vm_host_path: PathBuf::from(
+                "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/cases/timer.\
+                 basic/vm.toml",
+            ),
             guest_kernel_path: "/axcases/images/timer.basic/kernel.bin".to_string(),
             guest_vm_config_path: "/axcases/vm/timer.basic.toml".to_string(),
             runtime_artifact_path: PathBuf::from("/tmp/target/kernel.bin"),
         }];
         let execution = RunExecution {
-            axvisor_build_config: "/tmp/run-1/axvisor-cases-aarch64.toml".to_string(),
-            axvisor_host_log: "/tmp/run-1/target-host.raw.log".to_string(),
+            axvisor_build_config: "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/\
+                                   run-1/axvisor-cases-aarch64.toml"
+                .to_string(),
+            axvisor_host_log: "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/\
+                               run-1/target-host.raw.log"
+                .to_string(),
             passed: true,
             cases: vec![CaseExecutionRecord {
                 id: "timer.basic".to_string(),
                 asset_key: "timer.basic".to_string(),
-                raw_log_path: "/tmp/run-1/cases/timer.basic/target.raw.log".to_string(),
-                result_path: Some("/tmp/run-1/cases/timer.basic/target.result.json".to_string()),
+                raw_log_path: "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/\
+                               run-1/cases/timer.basic/target.raw.log"
+                    .to_string(),
+                result_path: Some(
+                    "/workspace/target/aarch64-unknown-none-softfloat/axvisor-cases/run-1/cases/\
+                     timer.basic/target.result.json"
+                        .to_string(),
+                ),
                 outcome: CaseOutcome::Passed,
                 detail: "guest passed".to_string(),
                 guest_result: Some(GuestResult {

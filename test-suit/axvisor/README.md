@@ -23,7 +23,7 @@ cargo axvisor test cases --case test-suit/axvisor/example/pass-report --guest-lo
 - `--case` 与 `--suite` 互斥，必须二选一。
 - 不显式指定 `--arch` 时默认使用 `aarch64`。
 - 单 case 默认显示 guest 串口输出；suite 默认不显示。
-- runner 输出位于 `os/axvisor/tmp/cases/<run-id>/`。
+- runner 输出位于 `target/<target>/axvisor-cases/<run-id>/`。
 
 ## 测例设计规范
 

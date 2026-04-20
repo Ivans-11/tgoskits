@@ -9,9 +9,12 @@ use std::{
 use anyhow::Context;
 use fatfs::{FileSystem, FsOptions, LossyOemCpConverter};
 
-use crate::axvisor::{cases::RunArtifacts, context::AxvisorContext, qemu_test};
+use crate::{
+    axvisor::{cases::RunArtifacts, context::AxvisorContext, qemu_test},
+    context::target_for_arch_checked,
+};
 
-const CASES_TMP_DIR: &str = "tmp/cases";
+const CASES_WORK_ROOT_NAME: &str = "axvisor-cases";
 const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xEF];
 const EXT4_MIN_FREE_BYTES_AFTER_INJECT: u64 = 4 * 1024 * 1024;
@@ -22,7 +25,13 @@ pub(super) async fn prepare_run_artifacts(
     arch: &str,
 ) -> anyhow::Result<RunArtifacts> {
     let run_id = generate_run_id()?;
-    let run_dir = ctx.axvisor_dir().join(CASES_TMP_DIR).join(&run_id);
+    let target = target_for_arch_checked(arch)?;
+    let run_dir = ctx
+        .workspace_root()
+        .join("target")
+        .join(target)
+        .join(CASES_WORK_ROOT_NAME)
+        .join(&run_id);
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("failed to create {}", run_dir.display()))?;
 
