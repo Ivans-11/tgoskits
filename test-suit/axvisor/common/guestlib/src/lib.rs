@@ -1,9 +1,9 @@
 #![cfg_attr(feature = "ax-std", no_std)]
 
-#[cfg(feature = "ax-std")]
-extern crate ax_std as std;
 #[cfg(all(target_arch = "riscv64", feature = "riscv64-qemu-virt-test"))]
 extern crate ax_plat_riscv64_qemu_virt_test;
+#[cfg(feature = "ax-std")]
+extern crate ax_std as std;
 
 #[cfg(feature = "ax-std")]
 use core::fmt;

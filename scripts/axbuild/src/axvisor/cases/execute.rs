@@ -848,23 +848,9 @@ impl QemuSession {
     }
 
     fn send_line(&mut self, line: &str) -> anyhow::Result<()> {
-        let echo_mark = self.buffer_len();
-        let mut sent = Vec::with_capacity(line.len());
-        for &byte in line.as_bytes() {
-            self.stdin
-                .write_all(&[byte])
-                .context("failed to write QEMU stdin byte")?;
-            self.stdin
-                .flush()
-                .context("failed to flush QEMU stdin byte")?;
-            sent.push(byte);
-            let sent_prefix = std::str::from_utf8(&sent)
-                .context("runner generated non-utf8 shell command bytes")?;
-            self.wait_until(echo_mark, Duration::from_secs(1), |slice| {
-                slice.contains(sent_prefix).then_some(())
-            })
-            .with_context(|| format!("timed out waiting for shell echo of `{sent_prefix}`"))?;
-        }
+        self.stdin
+            .write_all(line.as_bytes())
+            .context("failed to write QEMU line")?;
         self.stdin
             .write_all(b"\r")
             .context("failed to write QEMU carriage return")?;

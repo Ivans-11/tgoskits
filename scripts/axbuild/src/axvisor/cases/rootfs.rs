@@ -11,7 +11,7 @@ use fatfs::{FileSystem, FsOptions, LossyOemCpConverter};
 
 use crate::{
     axvisor::{cases::RunArtifacts, context::AxvisorContext},
-    context::target_for_arch_checked,
+    context::resolve_axvisor_arch_and_target,
     download,
 };
 
@@ -26,17 +26,17 @@ pub(super) async fn prepare_run_artifacts(
     arch: &str,
 ) -> anyhow::Result<RunArtifacts> {
     let run_id = generate_run_id()?;
-    let target = target_for_arch_checked(arch)?;
+    let (_, target) = resolve_axvisor_arch_and_target(Some(arch.to_string()), None)?;
     let run_dir = ctx
         .workspace_root()
         .join("target")
-        .join(target)
+        .join(&target)
         .join(CASES_WORK_ROOT_NAME)
         .join(&run_id);
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("failed to create {}", run_dir.display()))?;
 
-    let base_rootfs = download::extract_unified_rootfs_for_arch(ctx.workspace_root(), arch).await?;
+    let base_rootfs = download::ensure_rootfs_for_arch(ctx.workspace_root(), arch).await?;
     let target_rootfs = run_dir.join("rootfs.img");
     copy_file(&base_rootfs, &target_rootfs)?;
 

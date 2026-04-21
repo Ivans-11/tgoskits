@@ -17,7 +17,7 @@ use crate::{
         },
         context::AxvisorContext,
     },
-    context::{AppContext, target_for_arch_checked},
+    context::{AppContext, resolve_axvisor_arch_and_target},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub(super) async fn build_and_stage_cases(
         );
     }
 
-    let target = target_for_arch_checked(arch)?.to_string();
+    let (_, target) = resolve_axvisor_arch_and_target(Some(arch.to_string()), None)?;
     let mut prepared = Vec::with_capacity(cases.len());
 
     for (case, layout) in cases.iter().zip(layouts) {
