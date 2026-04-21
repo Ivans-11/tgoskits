@@ -1,4 +1,4 @@
-features = ["ax-std"]
+features = ["ax-std", "ax-std/myplat", "riscv64-qemu-virt-test"]
 log = "Warn"
 max_cpu_num = 1
 plat_dyn = false

@@ -108,7 +108,8 @@ members = [
     "test-suit/arceos/rust/memtest",
     "test-suit/arceos/rust/net/*",
     "test-suit/arceos/rust/task/*",
-    "test-suit/axvisor/common/*",
+    "test-suit/axvisor/common/guestlib",
+    "test-suit/axvisor/common/platform/*",
     "test-suit/axvisor/example/*",
 
     # os/axvisor

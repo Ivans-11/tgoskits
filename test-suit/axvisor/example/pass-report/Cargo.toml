@@ -5,7 +5,14 @@ edition.workspace = true
 
 [features]
 ax-std = ["dep:ax-std", "axvisor-guestlib/ax-std"]
+riscv64-qemu-virt-test = [
+    "dep:ax-plat-riscv64-qemu-virt-test",
+    "axvisor-guestlib/riscv64-qemu-virt-test",
+]
 
 [dependencies]
 ax-std = { workspace = true, optional = true }
 axvisor-guestlib = { path = "../../common/guestlib" }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+ax-plat-riscv64-qemu-virt-test = { path = "../../common/platform/axplat-riscv64-qemu-virt-test", optional = true }

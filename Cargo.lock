@@ -1337,6 +1337,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ax-plat-riscv64-qemu-virt-test"
+version = "0.5.11"
+dependencies = [
+ "ax-config-macros",
+ "ax-cpu",
+ "ax-kspin",
+ "ax-lazyinit",
+ "ax-plat",
+ "ax-riscv-plic",
+ "log",
+ "riscv 0.16.0",
+ "riscv_goldfish",
+ "sbi-rt",
+ "uart_16550 0.5.0",
+]
+
+[[package]]
 name = "ax-plat-x86-pc"
 version = "0.5.7"
 dependencies = [
@@ -1953,6 +1970,7 @@ dependencies = [
 name = "axvisor-example-fail-report"
 version = "0.1.0"
 dependencies = [
+ "ax-plat-riscv64-qemu-virt-test",
  "ax-std",
  "axvisor-guestlib",
 ]
@@ -1961,6 +1979,7 @@ dependencies = [
 name = "axvisor-example-pass-report"
 version = "0.1.0"
 dependencies = [
+ "ax-plat-riscv64-qemu-virt-test",
  "ax-std",
  "axvisor-guestlib",
 ]
@@ -1969,6 +1988,7 @@ dependencies = [
 name = "axvisor-guestlib"
 version = "0.1.0"
 dependencies = [
+ "ax-plat-riscv64-qemu-virt-test",
  "ax-std",
 ]
 

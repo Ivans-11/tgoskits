@@ -5,6 +5,10 @@ edition.workspace = true
 
 [features]
 ax-std = ["dep:ax-std"]
+riscv64-qemu-virt-test = ["dep:ax-plat-riscv64-qemu-virt-test"]
 
 [dependencies]
 ax-std = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+ax-plat-riscv64-qemu-virt-test = { path = "../platform/axplat-riscv64-qemu-virt-test", optional = true }
