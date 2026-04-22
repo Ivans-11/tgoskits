@@ -35,6 +35,7 @@ pub(super) struct RunArtifacts {
 pub(super) struct CasePlan {
     pub(super) arch: String,
     pub(super) guest_log: bool,
+    pub(super) host_dtb: Option<PathBuf>,
     pub(super) selection: Selection,
     pub(super) suite_name: Option<String>,
     pub(super) cases: Vec<manifest::LoadedCase>,
@@ -150,6 +151,15 @@ impl CasePlan {
         let guest_log = args
             .guest_log
             .unwrap_or(matches!(selection, Selection::Case(_)));
+        let host_dtb = args
+            .host_dtb
+            .as_ref()
+            .map(|path| resolve_cli_path(workspace_root, path));
+        if let Some(host_dtb) = &host_dtb
+            && !host_dtb.is_file()
+        {
+            bail!("host DTB does not exist: {}", host_dtb.display());
+        }
 
         let (suite_name, cases) = match &selection {
             Selection::Suite(path) => {
@@ -170,6 +180,7 @@ impl CasePlan {
         Ok(Self {
             arch,
             guest_log,
+            host_dtb,
             selection,
             suite_name,
             cases,
@@ -181,6 +192,10 @@ impl CasePlan {
             run_id: &artifacts.run_id,
             arch: &self.arch,
             guest_log: self.guest_log,
+            host_dtb: self
+                .host_dtb
+                .as_ref()
+                .map(|path| path.display().to_string()),
             run_dir: artifacts.run_dir.display().to_string(),
             target_rootfs: artifacts.target_rootfs.display().to_string(),
             selection: SummarySelectionRecord {
@@ -237,6 +252,13 @@ fn print_plan_overview(plan: &CasePlan) {
     }
     print_kv("arch", &plan.arch);
     print_kv("guest_log", plan.guest_log);
+    print_kv(
+        "host_dtb",
+        plan.host_dtb
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<default>".to_string()),
+    );
     print_kv("cases", plan.cases.len());
 }
 
@@ -274,6 +296,7 @@ struct SummaryRecord<'a> {
     run_id: &'a str,
     arch: &'a str,
     guest_log: bool,
+    host_dtb: Option<String>,
     run_dir: String,
     target_rootfs: String,
     selection: SummarySelectionRecord<'a>,
@@ -309,6 +332,7 @@ timeout_secs = 5
             arch: "aarch64".to_string(),
             suite: None,
             case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
+            host_dtb: None,
             guest_log: None,
         };
 
@@ -350,6 +374,7 @@ cases = ["example/pass-report"]
             arch: "aarch64".to_string(),
             suite: Some(PathBuf::from("test-suit/axvisor/suites/examples.toml")),
             case: None,
+            host_dtb: None,
             guest_log: None,
         };
 
@@ -360,10 +385,47 @@ cases = ["example/pass-report"]
     }
 
     #[test]
+    fn case_plan_resolves_host_dtb_against_workspace_root() {
+        let dir = tempdir().unwrap();
+        let workspace_root = dir.path();
+        let case_dir = workspace_root.join("test-suit/axvisor/example/pass-report");
+        fs::create_dir_all(&case_dir).unwrap();
+        fs::write(
+            case_dir.join("case.toml"),
+            r#"
+id = "example.pass"
+arch = ["riscv64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+
+        let args = ArgsTestCases {
+            arch: "riscv64".to_string(),
+            suite: None,
+            case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
+            host_dtb: Some(PathBuf::from(
+                "test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb",
+            )),
+            guest_log: None,
+        };
+
+        let plan = CasePlan::from_args(args, workspace_root).unwrap();
+        assert_eq!(
+            plan.host_dtb,
+            Some(
+                workspace_root
+                    .join("test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb")
+            )
+        );
+    }
+
+    #[test]
     fn case_plan_summary_contains_selection_and_case_metadata() {
         let plan = CasePlan {
             arch: "aarch64".to_string(),
             guest_log: false,
+            host_dtb: Some(PathBuf::from("/tmp/host.dtb")),
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,
             cases: vec![manifest::LoadedCase {
@@ -401,5 +463,9 @@ cases = ["example/pass-report"]
             Value::String("example.pass".to_string())
         );
         assert_eq!(summary["cases"][0]["timeout_secs"], Value::from(7_u64));
+        assert_eq!(
+            summary["host_dtb"],
+            Value::String("/tmp/host.dtb".to_string())
+        );
     }
 }

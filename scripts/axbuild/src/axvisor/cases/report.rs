@@ -84,6 +84,7 @@ mod tests {
         let plan = CasePlan {
             arch: "aarch64".to_string(),
             guest_log: true,
+            host_dtb: None,
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,
             cases: vec![LoadedCase {
