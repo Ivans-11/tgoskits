@@ -19,7 +19,7 @@ use crate::{
     axvisor::{
         build::{self as axvisor_build, AxvisorBoardFile},
         cases::{
-            CasePlan, RunArtifacts,
+            CasePlan, HostSessionMode, RunArtifacts,
             build::{PreparedCaseAssets, resolve_runtime_artifact_path},
             manifest::LoadedCase,
             session,
@@ -204,11 +204,50 @@ pub(super) async fn run(
     let runtime = runtime.to_path_buf();
     let qemu_config_path =
         qemu::default_qemu_config_template_path(&request.axvisor_dir, &request.arch);
+    let (records, host_log) = match plan.host_session_mode {
+        HostSessionMode::Shared => run_with_shared_host_session(
+            plan,
+            prepared_cases,
+            &request.arch,
+            &runtime,
+            &qemu_config_path,
+            &artifacts.target_rootfs,
+        )?,
+        HostSessionMode::FreshPerCase => run_with_fresh_host_per_case(
+            plan,
+            prepared_cases,
+            &request.arch,
+            &runtime,
+            &qemu_config_path,
+            &artifacts.target_rootfs,
+        )?,
+    };
+
+    let host_log_path = artifacts.run_dir.join("target-host.raw.log");
+    persist_text(&host_log_path, &host_log)?;
+
+    let passed = records.iter().all(|record| record.outcome.is_success());
+    Ok(RunExecution {
+        axvisor_build_config: axvisor_build_config.display().to_string(),
+        axvisor_host_log: host_log_path.display().to_string(),
+        cases: records,
+        passed,
+    })
+}
+
+fn run_with_shared_host_session(
+    plan: &CasePlan,
+    prepared_cases: &[PreparedCaseAssets],
+    arch: &str,
+    runtime: &Path,
+    qemu_config_path: &Path,
+    rootfs: &Path,
+) -> anyhow::Result<(Vec<CaseExecutionRecord>, String)> {
     let mut session = Some(spawn_target_session(
-        &request.arch,
-        &runtime,
-        &qemu_config_path,
-        &artifacts.target_rootfs,
+        arch,
+        runtime,
+        qemu_config_path,
+        rootfs,
         plan.host_dtb.as_deref(),
         plan.guest_log,
     )?);
@@ -254,10 +293,10 @@ pub(super) async fn run(
                 if !pending_cases.is_empty() {
                     session = Some(
                         spawn_target_session(
-                            &request.arch,
-                            &runtime,
-                            &qemu_config_path,
-                            &artifacts.target_rootfs,
+                            arch,
+                            runtime,
+                            qemu_config_path,
+                            rootfs,
                             plan.host_dtb.as_deref(),
                             plan.guest_log,
                         )
@@ -271,20 +310,54 @@ pub(super) async fn run(
         }
     }
 
-    let host_log_path = artifacts.run_dir.join("target-host.raw.log");
     if let Some(mut session) = session {
         append_session_log(&mut host_log, session.buffer(), None);
         session.terminate()?;
     }
-    persist_text(&host_log_path, &host_log)?;
+    Ok((records, host_log))
+}
 
-    let passed = records.iter().all(|record| record.outcome.is_success());
-    Ok(RunExecution {
-        axvisor_build_config: axvisor_build_config.display().to_string(),
-        axvisor_host_log: host_log_path.display().to_string(),
-        cases: records,
-        passed,
-    })
+fn run_with_fresh_host_per_case(
+    plan: &CasePlan,
+    prepared_cases: &[PreparedCaseAssets],
+    arch: &str,
+    runtime: &Path,
+    qemu_config_path: &Path,
+    rootfs: &Path,
+) -> anyhow::Result<(Vec<CaseExecutionRecord>, String)> {
+    let mut records = Vec::with_capacity(plan.cases.len());
+    let mut host_log = String::new();
+
+    for (case, prepared) in plan.cases.iter().zip(prepared_cases) {
+        let mut session = spawn_target_session(
+            arch,
+            runtime,
+            qemu_config_path,
+            rootfs,
+            plan.host_dtb.as_deref(),
+            plan.guest_log,
+        )
+        .with_context(|| {
+            format!(
+                "failed to launch AxVisor host for case `{}`",
+                case.manifest.id
+            )
+        })?;
+
+        let (record, action) = run_target_case(case, prepared, &mut session)?;
+        let note = match action {
+            HostSessionAction::KeepAlive => None,
+            HostSessionAction::RestartRequired { reason, .. } => Some(format!(
+                "host session terminated after case `{}`: {reason}",
+                case.manifest.id
+            )),
+        };
+        append_session_log(&mut host_log, session.buffer(), note.as_deref());
+        session.terminate()?;
+        records.push(record);
+    }
+
+    Ok((records, host_log))
 }
 
 fn run_target_case(
@@ -1132,6 +1205,12 @@ mod tests {
     }
 
     #[test]
+    fn host_session_mode_label_matches_summary_shape() {
+        assert_eq!(HostSessionMode::Shared.label(), "shared");
+        assert_eq!(HostSessionMode::FreshPerCase.label(), "fresh_per_case");
+    }
+
+    #[test]
     fn apply_rootfs_override_rewrites_existing_disk0_drive() {
         let mut args = vec![
             "-device".to_string(),
@@ -1265,6 +1344,7 @@ vm_configs = ["vm.toml"]
         let plan = CasePlan {
             arch: "aarch64".to_string(),
             guest_log: false,
+            host_session_mode: HostSessionMode::Shared,
             host_dtb: None,
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,

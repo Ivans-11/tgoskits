@@ -17,6 +17,9 @@ pub(crate) mod report;
 pub(crate) mod rootfs;
 pub(crate) mod session;
 
+const KV_LABEL_WIDTH: usize = 16;
+const SUB_KV_LABEL_WIDTH: usize = 14;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Selection {
     Suite(PathBuf),
@@ -35,10 +38,27 @@ pub(super) struct RunArtifacts {
 pub(super) struct CasePlan {
     pub(super) arch: String,
     pub(super) guest_log: bool,
+    pub(super) host_session_mode: HostSessionMode,
     pub(super) host_dtb: Option<PathBuf>,
     pub(super) selection: Selection,
     pub(super) suite_name: Option<String>,
     pub(super) cases: Vec<manifest::LoadedCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum HostSessionMode {
+    Shared,
+    FreshPerCase,
+}
+
+impl HostSessionMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::FreshPerCase => "fresh_per_case",
+        }
+    }
 }
 
 pub(crate) async fn run(
@@ -75,36 +95,24 @@ pub(crate) async fn run(
 
     print_section("Cases");
     for (index, case) in plan.cases.iter().enumerate() {
-        let case_index = format!("[{}]", index + 1).bold().blue();
-        println!(
-            "{} {} timeout={}s",
-            case_index, case.manifest.id, case.manifest.timeout_secs
-        );
-        println!("    dir           : {}", case.case_dir.display());
+        print_item_header(index + 1, plan.cases.len(), &case.manifest.id);
+        print_sub_kv("timeout", format!("{}s", case.manifest.timeout_secs));
+        print_sub_kv("dir", case.case_dir.display());
     }
 
     print_section("Artifacts");
     print_kv("run_id", &artifacts.run_id);
     print_kv("run_dir", artifacts.run_dir.display());
-    print_kv("target_rootfs", artifacts.target_rootfs.display());
     print_kv("summary", artifacts.summary_path.display());
     print_kv("axvisor_build", &execution.axvisor_build_config);
     print_kv("host_log", &execution.axvisor_host_log);
-    for (layout, prepared) in layouts.iter().zip(&prepared_cases) {
-        println!("- case {}", prepared.case_id);
-        print_kv("  package", &prepared.package);
-        print_kv("  target", &prepared.target);
-        print_kv("  asset_key", &prepared.asset_key);
-        print_kv("  build_config", prepared.build_info_path.display());
-        print_kv("  runtime", prepared.runtime_artifact_path.display());
-        print_kv("  vm_template", layout.vm_template.display());
-        print_kv(
-            "  staged_kernel",
-            prepared.staged_kernel_host_path.display(),
-        );
-        print_kv("  staged_vm", prepared.rendered_vm_host_path.display());
-        print_kv("  guest_kernel", &prepared.guest_kernel_path);
-        print_kv("  guest_vm", &prepared.guest_vm_config_path);
+    for (index, (layout, prepared)) in layouts.iter().zip(&prepared_cases).enumerate() {
+        print_item_header(index + 1, prepared_cases.len(), &prepared.case_id);
+        print_sub_kv("package", &prepared.package);
+        print_sub_kv("target", &prepared.target);
+        print_sub_kv("build_config", prepared.build_info_path.display());
+        print_sub_kv("runtime", prepared.runtime_artifact_path.display());
+        print_sub_kv("vm_template", layout.vm_template.display());
     }
 
     let passed = execution
@@ -151,6 +159,11 @@ impl CasePlan {
         let guest_log = args
             .guest_log
             .unwrap_or(matches!(selection, Selection::Case(_)));
+        let host_session_mode = if args.fresh_host {
+            HostSessionMode::FreshPerCase
+        } else {
+            HostSessionMode::Shared
+        };
         let host_dtb = args
             .host_dtb
             .as_ref()
@@ -180,6 +193,7 @@ impl CasePlan {
         Ok(Self {
             arch,
             guest_log,
+            host_session_mode,
             host_dtb,
             selection,
             suite_name,
@@ -192,6 +206,7 @@ impl CasePlan {
             run_id: &artifacts.run_id,
             arch: &self.arch,
             guest_log: self.guest_log,
+            host_session_mode: self.host_session_mode,
             host_dtb: self
                 .host_dtb
                 .as_ref()
@@ -235,7 +250,26 @@ fn print_phase(index: usize, total: usize, title: &str) {
 }
 
 fn print_kv(label: &str, value: impl std::fmt::Display) {
-    println!("{:<14}: {}", label.bold(), value);
+    println!(
+        "{:<width$}: {}",
+        label.bold(),
+        value,
+        width = KV_LABEL_WIDTH
+    );
+}
+
+fn print_sub_kv(label: &str, value: impl std::fmt::Display) {
+    println!(
+        "  {:<width$}: {}",
+        label.bold(),
+        value,
+        width = SUB_KV_LABEL_WIDTH
+    );
+}
+
+fn print_item_header(index: usize, total: usize, title: &str) {
+    let item = format!("[{index}/{total}]").bold().blue();
+    println!("{item} {}", title.bold());
 }
 
 fn print_plan_overview(plan: &CasePlan) {
@@ -252,6 +286,7 @@ fn print_plan_overview(plan: &CasePlan) {
     }
     print_kv("arch", &plan.arch);
     print_kv("guest_log", plan.guest_log);
+    print_kv("session_mode", plan.host_session_mode.label());
     print_kv(
         "host_dtb",
         plan.host_dtb
@@ -296,6 +331,7 @@ struct SummaryRecord<'a> {
     run_id: &'a str,
     arch: &'a str,
     guest_log: bool,
+    host_session_mode: HostSessionMode,
     host_dtb: Option<String>,
     run_dir: String,
     target_rootfs: String,
@@ -334,10 +370,12 @@ timeout_secs = 5
             case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
             host_dtb: None,
             guest_log: None,
+            fresh_host: false,
         };
 
         let plan = CasePlan::from_args(args, workspace_root).unwrap();
         assert!(plan.guest_log);
+        assert_eq!(plan.host_session_mode, HostSessionMode::Shared);
         assert_eq!(plan.cases.len(), 1);
     }
 
@@ -376,10 +414,12 @@ cases = ["example/pass-report"]
             case: None,
             host_dtb: None,
             guest_log: None,
+            fresh_host: false,
         };
 
         let plan = CasePlan::from_args(args, workspace_root).unwrap();
         assert!(!plan.guest_log);
+        assert_eq!(plan.host_session_mode, HostSessionMode::Shared);
         assert_eq!(plan.suite_name.as_deref(), Some("examples"));
         assert_eq!(plan.cases.len(), 1);
     }
@@ -408,6 +448,7 @@ timeout_secs = 5
                 "test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb",
             )),
             guest_log: None,
+            fresh_host: false,
         };
 
         let plan = CasePlan::from_args(args, workspace_root).unwrap();
@@ -421,10 +462,40 @@ timeout_secs = 5
     }
 
     #[test]
+    fn case_plan_parses_fresh_host_mode() {
+        let dir = tempdir().unwrap();
+        let workspace_root = dir.path();
+        let case_dir = workspace_root.join("test-suit/axvisor/example/pass-report");
+        fs::create_dir_all(&case_dir).unwrap();
+        fs::write(
+            case_dir.join("case.toml"),
+            r#"
+id = "example.pass"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+
+        let args = ArgsTestCases {
+            arch: "aarch64".to_string(),
+            suite: None,
+            case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
+            host_dtb: None,
+            guest_log: None,
+            fresh_host: true,
+        };
+
+        let plan = CasePlan::from_args(args, workspace_root).unwrap();
+        assert_eq!(plan.host_session_mode, HostSessionMode::FreshPerCase);
+    }
+
+    #[test]
     fn case_plan_summary_contains_selection_and_case_metadata() {
         let plan = CasePlan {
             arch: "aarch64".to_string(),
             guest_log: false,
+            host_session_mode: HostSessionMode::FreshPerCase,
             host_dtb: Some(PathBuf::from("/tmp/host.dtb")),
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,
@@ -463,6 +534,10 @@ timeout_secs = 5
             Value::String("example.pass".to_string())
         );
         assert_eq!(summary["cases"][0]["timeout_secs"], Value::from(7_u64));
+        assert_eq!(
+            summary["host_session_mode"],
+            Value::String("fresh_per_case".to_string())
+        );
         assert_eq!(
             summary["host_dtb"],
             Value::String("/tmp/host.dtb".to_string())

@@ -243,8 +243,6 @@ pub(super) fn load_or_create_build_info<T>(
 where
     T: Serialize + DeserializeOwned,
 {
-    println!("Using build config: {}", path.display());
-
     if path.exists() {
         info!("Found build config at {}", path.display());
     } else {

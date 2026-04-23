@@ -72,7 +72,7 @@ mod tests {
 
     use super::*;
     use crate::axvisor::cases::{
-        Selection,
+        HostSessionMode, Selection,
         execute::{CaseExecutionRecord, CaseOutcome, GuestResult},
         manifest::{CaseManifest, LoadedCase},
     };
@@ -84,6 +84,7 @@ mod tests {
         let plan = CasePlan {
             arch: "aarch64".to_string(),
             guest_log: true,
+            host_session_mode: HostSessionMode::Shared,
             host_dtb: None,
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,

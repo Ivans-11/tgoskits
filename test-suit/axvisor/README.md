@@ -11,6 +11,9 @@ cargo axvisor test cases --case test-suit/axvisor/example/pass-report
 # 运行一个测例集
 cargo axvisor test cases --suite test-suit/axvisor/suites/examples.toml
 
+# 运行一个测例集，并为每个 case 单独启动一次 AxVisor host
+cargo axvisor test cases --suite test-suit/axvisor/suites/examples.toml --fresh-host
+
 # 显式指定架构（默认为 aarch64）
 cargo axvisor test cases --arch aarch64 --suite test-suit/axvisor/suites/examples.toml
 
@@ -28,6 +31,8 @@ cargo axvisor test cases --arch riscv64 \
 - `--case` 与 `--suite` 互斥，必须二选一。
 - 不显式指定 `--arch` 时默认使用 `aarch64`。
 - 单 case 默认显示 guest 串口输出；suite 默认不显示。
+- 默认执行模式为共享 host：runner 会尽量复用同一个 AxVisor/QEMU host 会话串行跑完整个 suite。
+- `--fresh-host` 可切换到“每个 case 一个 host”模式：每跑完一个 case 就销毁当前 AxVisor/QEMU host，再为下一个 case 重新启动新的 host。
 - `--host-dtb` 可覆盖 host QEMU 使用的 DTB；当前主要用于 RISC-V host 固定 cold boot hart。
 - runner 输出位于 `target/<target>/axvisor-cases/<run-id>/`。
 

@@ -188,6 +188,9 @@ pub struct ArgsTestCases {
 
     #[arg(long, value_name = "BOOL", num_args = 1)]
     pub guest_log: Option<bool>,
+
+    #[arg(long)]
+    pub fresh_host: bool,
 }
 
 #[derive(Subcommand)]
@@ -466,6 +469,7 @@ mod tests {
                         ))
                     );
                     assert_eq!(args.guest_log, Some(false));
+                    assert!(!args.fresh_host);
                 }
                 _ => panic!("expected cases test command"),
             },
@@ -503,6 +507,7 @@ mod tests {
                     assert_eq!(args.suite, None);
                     assert_eq!(args.host_dtb, None);
                     assert_eq!(args.guest_log, None);
+                    assert!(!args.fresh_host);
                 }
                 _ => panic!("expected cases test command"),
             },
@@ -536,6 +541,40 @@ mod tests {
                         Some(PathBuf::from("test-suit/axvisor/example/fail-report"))
                     );
                     assert_eq!(args.suite, None);
+                    assert!(!args.fresh_host);
+                }
+                _ => panic!("expected cases test command"),
+            },
+            _ => panic!("expected test command"),
+        }
+    }
+
+    #[test]
+    fn command_parses_test_cases_fresh_host() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            command: Command,
+        }
+
+        let cli = Cli::try_parse_from([
+            "axvisor",
+            "test",
+            "cases",
+            "--suite",
+            "test-suit/axvisor/suites/examples.toml",
+            "--fresh-host",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Test(args) => match args.command {
+                TestCommand::Cases(args) => {
+                    assert_eq!(
+                        args.suite,
+                        Some(PathBuf::from("test-suit/axvisor/suites/examples.toml"))
+                    );
+                    assert!(args.fresh_host);
                 }
                 _ => panic!("expected cases test command"),
             },
