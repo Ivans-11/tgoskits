@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -119,7 +120,16 @@ struct QemuConfigFile {
 #[derive(Debug, Clone)]
 enum HostSessionAction {
     KeepAlive,
-    RestartRequired { reason: String },
+    RestartRequired {
+        reason: String,
+        cause: HostRestartCause,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostRestartCause {
+    VmCreateFailed,
+    VmCleanupFailed,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,7 +215,11 @@ pub(super) async fn run(
 
     let mut records = Vec::with_capacity(plan.cases.len());
     let mut host_log = String::new();
-    for (index, (case, prepared)) in plan.cases.iter().zip(prepared_cases).enumerate() {
+    let mut pending_cases: VecDeque<usize> = (0..plan.cases.len()).collect();
+    let mut session_case_ordinal = 0usize;
+    while let Some(case_index) = pending_cases.pop_front() {
+        let case = &plan.cases[case_index];
+        let prepared = &prepared_cases[case_index];
         let (record, action) = {
             let session_ref = session
                 .as_mut()
@@ -216,9 +230,16 @@ pub(super) async fn run(
         match action {
             HostSessionAction::KeepAlive => {
                 records.push(record);
+                session_case_ordinal += 1;
             }
-            HostSessionAction::RestartRequired { reason } => {
-                records.push(record);
+            HostSessionAction::RestartRequired { reason, cause } => {
+                let retry_case =
+                    should_retry_after_restart(&record, cause, session_case_ordinal == 0);
+                if retry_case {
+                    pending_cases.push_front(case_index);
+                } else {
+                    records.push(record);
+                }
 
                 let mut current = session
                     .take()
@@ -230,7 +251,7 @@ pub(super) async fn run(
                 );
                 current.terminate()?;
 
-                if index + 1 < plan.cases.len() {
+                if !pending_cases.is_empty() {
                     session = Some(
                         spawn_target_session(
                             &request.arch,
@@ -244,6 +265,7 @@ pub(super) async fn run(
                             format!("failed to relaunch AxVisor host after: {reason}")
                         })?,
                     );
+                    session_case_ordinal = 0;
                 }
             }
         }
@@ -316,6 +338,7 @@ fn run_target_case(
                         "failed to finalize VM[{cleanup_vm_id}] for `{}`",
                         case.manifest.id
                     ),
+                    cause: HostRestartCause::VmCleanupFailed,
                 },
             ),
         }
@@ -327,6 +350,7 @@ fn run_target_case(
                     "failed to create VM[{cleanup_vm_id}] for `{}`",
                     case.manifest.id
                 ),
+                cause: HostRestartCause::VmCreateFailed,
             },
         )
     };
@@ -399,6 +423,20 @@ fn classify_runner_error(message: &str) -> CaseOutcome {
     } else {
         CaseOutcome::Error
     }
+}
+
+fn should_retry_after_restart(
+    record: &CaseExecutionRecord,
+    cause: HostRestartCause,
+    is_first_case_in_session: bool,
+) -> bool {
+    if is_first_case_in_session {
+        return false;
+    }
+
+    cause == HostRestartCause::VmCleanupFailed
+        && record.outcome == CaseOutcome::TimedOut
+        && record.guest_result.is_none()
 }
 
 fn cleanup_vm(
@@ -1034,6 +1072,63 @@ mod tests {
         let (outcome, detail) = classify_guest_result(&result);
         assert_eq!(outcome, CaseOutcome::Skipped);
         assert_eq!(detail, "not supported");
+    }
+
+    fn sample_record(
+        outcome: CaseOutcome,
+        guest_result: Option<GuestResult>,
+    ) -> CaseExecutionRecord {
+        CaseExecutionRecord {
+            id: "sample.case".to_string(),
+            asset_key: "sample.case".to_string(),
+            raw_log_path: "/tmp/sample.raw.log".to_string(),
+            result_path: guest_result
+                .as_ref()
+                .map(|_| "/tmp/sample.result.json".to_string()),
+            outcome,
+            detail: "sample".to_string(),
+            guest_result,
+        }
+    }
+
+    #[test]
+    fn retry_after_restart_requires_timeout_without_result_and_cleanup_failure() {
+        let timed_out = sample_record(CaseOutcome::TimedOut, None);
+        assert!(should_retry_after_restart(
+            &timed_out,
+            HostRestartCause::VmCleanupFailed,
+            false
+        ));
+
+        let with_result = sample_record(
+            CaseOutcome::TimedOut,
+            Some(GuestResult {
+                case_id: "sample.case".to_string(),
+                status: "pass".to_string(),
+                message: None,
+                details: None,
+            }),
+        );
+        assert!(!should_retry_after_restart(
+            &with_result,
+            HostRestartCause::VmCleanupFailed,
+            false
+        ));
+        assert!(!should_retry_after_restart(
+            &timed_out,
+            HostRestartCause::VmCreateFailed,
+            false
+        ));
+    }
+
+    #[test]
+    fn retry_after_restart_skips_first_case_in_session() {
+        let timed_out = sample_record(CaseOutcome::TimedOut, None);
+        assert!(!should_retry_after_restart(
+            &timed_out,
+            HostRestartCause::VmCleanupFailed,
+            true
+        ));
     }
 
     #[test]
