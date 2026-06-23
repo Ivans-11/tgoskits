@@ -1,7 +1,12 @@
 use alloc::{boxed::Box, string::String};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use spin::RwLock;
+
+use super::time::{has_time_provider, wall_time};
 
 pub trait BlockTaskOps: Send + Sync {
     fn current_task_id(&self) -> Option<u64>;
@@ -13,6 +18,34 @@ pub trait BlockTaskOps: Send + Sync {
         while !condition() {
             self.task_wait();
         }
+    }
+    /// Wait until `condition` holds or `timeout` elapses, whichever comes first.
+    /// Returns `true` if the condition was observed, `false` on timeout.
+    ///
+    /// Default impl polls the condition with cooperative yields, bounded by the
+    /// wall clock. Runtimes with a timed wait queue should override this so the
+    /// task actually sleeps. Used by the block runtime to escape an IRQ-driven
+    /// completion wait when the completion IRQ never fires (e.g. a board whose
+    /// FDT→GIC routing leaves the controller IRQ undelivered) and fall back to
+    /// polling instead of hanging forever.
+    fn task_wait_until_timeout(&self, condition: &dyn Fn() -> bool, timeout: Duration) -> bool {
+        if !has_time_provider() {
+            // No clock to bound the wait: degrade to a single yield + recheck so
+            // the caller can decide to poll, rather than blocking unbounded here.
+            if condition() {
+                return true;
+            }
+            self.task_yield();
+            return condition();
+        }
+        let deadline = wall_time() + timeout;
+        while !condition() {
+            if wall_time() >= deadline {
+                return condition();
+            }
+            self.task_yield();
+        }
+        true
     }
     fn wake_task(&self, task_id: u64);
     fn notify_waiters(&self) {}
@@ -62,6 +95,20 @@ pub fn task_wait_until(condition: impl Fn() -> bool) {
         while !condition() {
             core::hint::spin_loop();
         }
+    }
+}
+
+/// Wait until `condition` holds or `timeout` elapses. Returns `true` if the
+/// condition was observed, `false` on timeout. Without registered task ops,
+/// spins on the condition (no clock available to time out against).
+pub fn task_wait_until_timeout(condition: impl Fn() -> bool, timeout: Duration) -> bool {
+    if let Some(ops) = TASK_OPS.read().as_ref() {
+        ops.task_wait_until_timeout(&condition, timeout)
+    } else {
+        while !condition() {
+            core::hint::spin_loop();
+        }
+        true
     }
 }
 

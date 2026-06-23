@@ -17,9 +17,19 @@ use super::{
 use crate::os::{
     BlockIrqOutcome, BlockIrqRegistration, current_task_id, dma_op, notify_drain,
     notify_drain_from_irq, notify_waiters, register_shared_block_irq, spawn_task,
-    sync::IrqMutex as SpinNoIrq, task_wait_until, task_yield, wait_for_drain_notification,
-    wake_task,
+    sync::IrqMutex as SpinNoIrq, task_wait_until, task_wait_until_timeout, task_yield,
+    wait_for_drain_notification, wake_task,
 };
+
+/// Max time to wait on an IRQ-driven completion before assuming the completion
+/// IRQ will never arrive (e.g. a board whose FDT→GIC routing leaves the block
+/// controller's IRQ undelivered, so the controller raises it but the handler
+/// never runs). On timeout the runtime permanently switches the device to
+/// polling — `is_irq_enabled()` only reflects the controller register, not
+/// whether the GIC actually delivers, so this is the only place the dead-IRQ
+/// case can be detected. Generous enough not to trip on a merely-slow device.
+const IRQ_COMPLETION_FALLBACK_TIMEOUT: core::time::Duration =
+    core::time::Duration::from_secs(2);
 
 const DEFAULT_MAX_TRANSFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_SUBMIT_WINDOW: usize = 32;
@@ -468,6 +478,21 @@ impl BlockDeviceHandle {
     pub fn set_completion_mode(&self, mode: BlockCompletionMode) {
         self.completion_mode
             .store(mode.as_usize(), Ordering::Release);
+    }
+
+    /// Permanently switch this device to polling completion. Called when an
+    /// IRQ-driven completion wait times out — the completion IRQ is presumed
+    /// undeliverable on this board, so every subsequent wait polls the hardware
+    /// status directly instead of sleeping for an IRQ that never arrives. Logged
+    /// once (the store is idempotent but we only want one warning).
+    fn demote_to_polling(&self) {
+        if self.completion_mode() != BlockCompletionMode::Polling {
+            self.set_completion_mode(BlockCompletionMode::Polling);
+            warn!(
+                "block device {}: completion IRQ did not fire within {:?}; falling back to polling",
+                self.name, IRQ_COMPLETION_FALLBACK_TIMEOUT
+            );
+        }
     }
 
     pub fn queue_ids(&self) -> Vec<usize> {
@@ -1261,10 +1286,21 @@ impl BlockDeviceHandle {
             return self.polling_wait_for_any_key(&keys);
         }
         if task_id != 0 {
-            task_wait_until(|| {
-                keys.iter()
-                    .any(|&key| self.pending.lock().result(key).is_some())
-            });
+            let completed = task_wait_until_timeout(
+                || {
+                    keys.iter()
+                        .any(|&key| self.pending.lock().result(key).is_some())
+                },
+                IRQ_COMPLETION_FALLBACK_TIMEOUT,
+            );
+            if !completed {
+                // The completion IRQ never arrived within the timeout. Treat the
+                // IRQ as undeliverable on this board and fall back to polling for
+                // the rest of the device's life so we don't pay the timeout on
+                // every wait.
+                self.demote_to_polling();
+                return self.polling_wait_for_any_key(&keys);
+            }
         } else {
             core::hint::spin_loop();
         }
@@ -1290,7 +1326,15 @@ impl BlockDeviceHandle {
             return Ok(self.polling_wait_for_queue_empty(queue_id));
         }
         if task_id != 0 {
-            task_wait_until(|| self.pending.lock().keys_for_queue(queue_id).is_empty());
+            let completed = task_wait_until_timeout(
+                || self.pending.lock().keys_for_queue(queue_id).is_empty(),
+                IRQ_COMPLETION_FALLBACK_TIMEOUT,
+            );
+            if !completed {
+                self.remove_queue_progress_waiter(queue_id, task_id);
+                self.demote_to_polling();
+                return Ok(self.polling_wait_for_queue_empty(queue_id));
+            }
         } else {
             core::hint::spin_loop();
         }
@@ -1358,13 +1402,22 @@ impl BlockDeviceHandle {
                         continue;
                     }
                     if task_id != 0 {
-                        task_wait_until(|| {
-                            self.pending
-                                .lock()
-                                .request(key)
-                                .and_then(|request| request.result())
-                                .is_some()
-                        });
+                        let completed = task_wait_until_timeout(
+                            || {
+                                self.pending
+                                    .lock()
+                                    .request(key)
+                                    .and_then(|request| request.result())
+                                    .is_some()
+                            },
+                            IRQ_COMPLETION_FALLBACK_TIMEOUT,
+                        );
+                        if !completed {
+                            // Completion IRQ never fired — switch to polling for
+                            // the device's lifetime and retry via the polling
+                            // branch on the next loop iteration.
+                            self.demote_to_polling();
+                        }
                     } else {
                         core::hint::spin_loop();
                     }
