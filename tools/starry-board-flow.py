@@ -37,6 +37,13 @@ DEFAULT_SERIAL = "/dev/tty.usbserial-0001"
 DEFAULT_BAUD = 1_500_000
 DEFAULT_STARRY_PROMPT = "root@starry:/root #"
 DEFAULT_FIT = WORKSPACE / "tmp/axbuild/image.fit"
+DEFAULT_ITS = WORKSPACE / "tmp/axbuild/orangepi-5-plus-image.its"
+DEFAULT_STARRY_BUILD_CONFIG = WORKSPACE / "os/StarryOS/configs/board/orangepi-5-plus.toml"
+DEFAULT_KERNEL_BIN = WORKSPACE / "target/aarch64-unknown-linux-musl/release/starryos.bin"
+DEFAULT_DTB = WORKSPACE / "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+DEFAULT_KERNEL_LOAD = "0x00400000"
+DEFAULT_FDT_LOAD = "0x0a100000"
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass
@@ -61,11 +68,24 @@ def log(message: str) -> None:
     print(f"[starry-board-flow] {message}", flush=True)
 
 
+def normalize_serial_text(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
 def resolve_workspace_path(path: str | Path, base: Path = WORKSPACE) -> Path:
     path = Path(path)
     if path.is_absolute():
         return path
     return (base / path).resolve()
+
+
+def workspace_path_text(path: Path) -> str:
+    path = path.resolve()
+    try:
+        return str(path.relative_to(WORKSPACE))
+    except ValueError:
+        return str(path)
 
 
 def read_toml(path: Path) -> dict[str, Any]:
@@ -345,6 +365,111 @@ sha256sum /boot/starry/image.fit
     sudo_script(board, script, timeout)
 
 
+def build_starry_kernel(config: Path, smp: int) -> None:
+    if not config.is_file():
+        raise SystemExit(f"missing StarryOS build config: {config}")
+    argv = [
+        "cargo",
+        "xtask",
+        "starry",
+        "build",
+        "--config",
+        workspace_path_text(config),
+        "--smp",
+        str(smp),
+    ]
+    log(f"local: {shlex.join(argv)}")
+    subprocess.run(argv, cwd=WORKSPACE, check=True)
+
+
+def write_fit_its(
+    its: Path,
+    kernel_bin: Path,
+    dtb: Path,
+    description: str,
+    kernel_load: str,
+    kernel_entry: str,
+    fdt_load: str,
+) -> None:
+    its.parent.mkdir(parents=True, exist_ok=True)
+    kernel_text = str(kernel_bin.resolve())
+    dtb_text = str(dtb.resolve())
+    its.write_text(
+        f"""/dts-v1/;
+
+/ {{
+    description = "{description}";
+    #address-cells = <1>;
+
+    images {{
+        kernel {{
+            description = "StarryOS kernel";
+            data = /incbin/("{kernel_text}");
+            type = "kernel";
+            arch = "arm64";
+            os = "linux";
+            compression = "none";
+            load = <{kernel_load}>;
+            entry = <{kernel_entry}>;
+            hash-1 {{
+                algo = "sha256";
+            }};
+        }};
+
+        fdt {{
+            description = "rk3588-orangepi-5-plus";
+            data = /incbin/("{dtb_text}");
+            type = "flat_dt";
+            arch = "arm64";
+            compression = "none";
+            load = <{fdt_load}>;
+            hash-1 {{
+                algo = "sha256";
+            }};
+        }};
+    }};
+
+    configurations {{
+        default = "conf-1";
+        conf-1 {{
+            description = "{description}";
+            kernel = "kernel";
+            fdt = "fdt";
+        }};
+    }};
+}};
+""",
+        encoding="utf-8",
+    )
+
+
+def build_fit_image(args: argparse.Namespace) -> None:
+    if getattr(args, "build_kernel", False):
+        build_starry_kernel(resolve_workspace_path(args.build_config), args.smp)
+
+    kernel_bin = resolve_workspace_path(args.kernel_bin)
+    dtb = resolve_workspace_path(args.dtb)
+    its = resolve_workspace_path(args.its)
+    fit = resolve_workspace_path(args.fit)
+    if not kernel_bin.is_file():
+        raise SystemExit(f"missing kernel bin: {kernel_bin}")
+    if not dtb.is_file():
+        raise SystemExit(f"missing dtb: {dtb}")
+    fit.parent.mkdir(parents=True, exist_ok=True)
+    write_fit_its(
+        its,
+        kernel_bin,
+        dtb,
+        args.fit_description,
+        args.kernel_load,
+        args.kernel_entry,
+        args.fdt_load,
+    )
+    argv = ["mkimage", "-f", workspace_path_text(its), workspace_path_text(fit)]
+    log(f"local: {shlex.join(argv)}")
+    run_command_capture(argv, args.timeout, env=os.environ.copy())
+
+
 def regex_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -475,7 +600,7 @@ def serial_run(
                     sys.stdout.buffer.flush()
                     buf.extend(data)
                     text = bytes(buf).decode(errors="ignore")
-                    match_text = text.replace("\r\n", "\n").replace("\r", "\n")
+                    match_text = normalize_serial_text(text)
 
                     if not injected and wait_for in match_text:
                         injected = True
@@ -542,6 +667,12 @@ def run_power_cycle(command: str | None) -> None:
     )
 
 
+def append_starry_reboot(command: str, reboot_command: str | None) -> str:
+    if not reboot_command:
+        return command
+    return f"{command.rstrip()}\nsync\n{reboot_command.rstrip()}\n"
+
+
 def make_board(args: argparse.Namespace) -> Board:
     password = args.ssh_password
     if password == "":
@@ -559,6 +690,21 @@ def add_common_board_args(parser: argparse.ArgumentParser) -> None:
 def add_common_case_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("case_dir", help="board case directory containing board-flow.toml")
     parser.add_argument("--board-config")
+
+
+def add_common_fit_build_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--build-kernel", action="store_true")
+    parser.add_argument("--build-config", default=str(DEFAULT_STARRY_BUILD_CONFIG))
+    parser.add_argument("--smp", type=int, default=1)
+    parser.add_argument("--kernel-bin", default=str(DEFAULT_KERNEL_BIN))
+    parser.add_argument("--dtb", default=str(DEFAULT_DTB))
+    parser.add_argument("--its", default=str(DEFAULT_ITS))
+    parser.add_argument("--fit", default=str(DEFAULT_FIT))
+    parser.add_argument("--fit-description", default="StarryOS Orange Pi 5 Plus")
+    parser.add_argument("--kernel-load", default=DEFAULT_KERNEL_LOAD)
+    parser.add_argument("--kernel-entry", default=DEFAULT_KERNEL_LOAD)
+    parser.add_argument("--fdt-load", default=DEFAULT_FDT_LOAD)
+    parser.add_argument("--timeout", type=int, default=600)
 
 
 def main() -> int:
@@ -585,6 +731,9 @@ def main() -> int:
     p.add_argument("--fit", default=str(DEFAULT_FIT))
     p.add_argument("--timeout", type=int, default=600)
 
+    p = sub.add_parser("build-fit")
+    add_common_fit_build_args(p)
+
     p = sub.add_parser("linux-test")
     add_common_board_args(p)
     add_common_case_args(p)
@@ -598,6 +747,10 @@ def main() -> int:
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--command")
     p.add_argument("--no-reboot", action="store_true")
+    p.add_argument("--wait-linux", action="store_true")
+    p.add_argument("--power-cycle-command")
+    p.add_argument("--starry-reboot-command", default="reboot -f")
+    p.add_argument("--no-starry-reboot", action="store_true")
     p.add_argument("--timeout", type=int, default=0)
     p.add_argument("--prompt-nudge-delay", type=float, default=10.0)
     p.add_argument("--no-prompt-nudge", action="store_true")
@@ -620,8 +773,19 @@ def main() -> int:
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--deploy-assets", action="store_true")
     p.add_argument("--build-assets", action="store_true")
+    p.add_argument("--build-fit", action="store_true")
+    p.add_argument("--build-kernel", action="store_true")
+    p.add_argument("--build-config", default=str(DEFAULT_STARRY_BUILD_CONFIG))
+    p.add_argument("--smp", type=int, default=1)
+    p.add_argument("--kernel-bin", default=str(DEFAULT_KERNEL_BIN))
+    p.add_argument("--dtb", default=str(DEFAULT_DTB))
+    p.add_argument("--its", default=str(DEFAULT_ITS))
     p.add_argument("--deploy-fit", action="store_true")
     p.add_argument("--fit", default=str(DEFAULT_FIT))
+    p.add_argument("--fit-description", default="StarryOS Orange Pi 5 Plus")
+    p.add_argument("--kernel-load", default=DEFAULT_KERNEL_LOAD)
+    p.add_argument("--kernel-entry", default=DEFAULT_KERNEL_LOAD)
+    p.add_argument("--fdt-load", default=DEFAULT_FDT_LOAD)
     p.add_argument("--side", choices=["both", "linux", "starry"], default="both")
     p.add_argument("--skip-linux", action="store_true")
     p.add_argument("--skip-starry", action="store_true")
@@ -629,6 +793,8 @@ def main() -> int:
     p.add_argument("--starry-command")
     p.add_argument("--power-cycle-command")
     p.add_argument("--wait-linux", action="store_true")
+    p.add_argument("--starry-reboot-command", default="reboot -f")
+    p.add_argument("--no-starry-reboot", action="store_true")
     p.add_argument("--timeout", type=int, default=600)
     p.add_argument("--prompt-nudge-delay", type=float, default=10.0)
     p.add_argument("--no-prompt-nudge", action="store_true")
@@ -646,6 +812,10 @@ def main() -> int:
 
     if args.cmd == "upload-fit":
         upload_fit(make_board(args), resolve_workspace_path(args.fit), args.timeout)
+        return 0
+
+    if args.cmd == "build-fit":
+        build_fit_image(args)
         return 0
 
     if args.cmd == "serial-run":
@@ -680,6 +850,8 @@ def main() -> int:
     if args.cmd == "starry-test":
         board = make_board(args)
         command, success, fail, config_timeout, prompt = starry_command_from_config(case, args.command)
+        if args.wait_linux and not args.power_cycle_command and not args.no_starry_reboot:
+            command = append_starry_reboot(command, args.starry_reboot_command)
         if not args.no_reboot:
             request_starry_boot(board, args.timeout or 60)
         serial_run(
@@ -692,6 +864,10 @@ def main() -> int:
             args.timeout or config_timeout,
             None if args.no_prompt_nudge else args.prompt_nudge_delay,
         )
+        if args.wait_linux:
+            if args.power_cycle_command or args.no_starry_reboot:
+                run_power_cycle(args.power_cycle_command)
+            wait_ssh(board, args.timeout or config_timeout)
         return 0
 
     if args.cmd == "run":
@@ -700,6 +876,8 @@ def main() -> int:
             if args.build_assets:
                 build_assets(case)
             upload_configured_assets(board, case, args.timeout)
+        if args.build_fit:
+            build_fit_image(args)
         if args.deploy_fit:
             upload_fit(board, resolve_workspace_path(args.fit), args.timeout)
         run_linux = args.side in ("both", "linux") and not args.skip_linux
@@ -708,6 +886,8 @@ def main() -> int:
             linux_test(board, case, args.timeout, args.linux_command)
         if run_starry:
             command, success, fail, config_timeout, prompt = starry_command_from_config(case, args.starry_command)
+            if args.wait_linux and not args.power_cycle_command and not args.no_starry_reboot:
+                command = append_starry_reboot(command, args.starry_reboot_command)
             request_starry_boot(board, 60)
             serial_run(
                 args.serial,
@@ -716,11 +896,12 @@ def main() -> int:
                 command,
                 success,
                 fail,
-                config_timeout,
+                args.timeout or config_timeout,
                 None if args.no_prompt_nudge else args.prompt_nudge_delay,
             )
             if args.wait_linux:
-                run_power_cycle(args.power_cycle_command)
+                if args.power_cycle_command or args.no_starry_reboot:
+                    run_power_cycle(args.power_cycle_command)
                 wait_ssh(board, args.timeout)
         return 0
 

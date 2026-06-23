@@ -340,7 +340,9 @@ sync
 sudo reboot
 ```
 
-当前 StarryOS 没有可用的软件 reboot/reset 路径；测试完成后需要手动断电/上电。因为 U-Boot 在启动 StarryOS 前已经把 bootfs 标记写回 `starry_boot=0`，所以下一次 U-Boot 会输出类似：
+StarryOS 已支持通过 `reboot -f` 触发 PSCI `SYSTEM_RESET`。因为 U-Boot 在启动
+StarryOS 前已经把 bootfs 标记写回 `starry_boot=0`，所以 StarryOS 测试完成后
+软件复位或手动断电/上电都会默认回 stock Linux。下一次 U-Boot 会输出类似：
 
 ```text
 STARRY_ONESHOT_WRAPPER_BEGIN
@@ -368,7 +370,7 @@ reading starry/image.fit
 
 - Linux 写 `starry_boot=0` 后 `sudo reboot`，U-Boot 回 stock Linux。
 - Linux 写 `starry_boot=1` 后 `sudo reboot`，U-Boot 先 `fatwrite` 清回 `starry_boot=0`，再启动 StarryOS。
-- StarryOS 不写回任何标记，手动断电/上电后，U-Boot 读取到 `starry_boot=0` 并回 stock Linux。
+- StarryOS 不写回任何标记，`reboot -f` 软件复位或手动断电/上电后，U-Boot 读取到 `starry_boot=0` 并回 stock Linux。
 - 最终 Linux 侧确认 `/boot/starry-boot.env` 内容为 `starry_boot=0`，修正后的 `/boot/boot.scr` 哈希为 `0d73b81a93160fb4e581efce2c52f940addb6d27960594129516aab23ea7c2c1`。
 
 ## 组合式自动化流程
@@ -377,6 +379,7 @@ reading starry/image.fit
 
 - `upload-path`：上传任意本地文件或目录到板端 Linux，用于临时传任何文件。
 - `upload-assets`：读取 `board-cases/<case>/board-flow.toml`，可先构建 app 资产，再打包上传到板端 Linux。
+- `build-fit`：用当前 StarryOS kernel bin 和 DTB 生成 `tmp/axbuild/image.fit`，也可先触发 StarryOS 构建。
 - `upload-fit`：把指定 FIT 上传为 `/boot/starry/image.fit`。
 - `linux-test`：通过 SSH 在 stock Linux 侧执行 app 声明的测试命令。
 - `starry-test`：通过 one-shot 标记重启进 StarryOS，用串口等待 shell，然后执行现有 `board-*.toml` 的 `shell_init_cmd`。
@@ -425,6 +428,11 @@ tools/starry-board-flow.py upload-path ./local/path /remote/path \
 tools/starry-board-flow.py upload-assets board-cases/orangepi5plus-rknn-yolo \
   --build --board-ip 192.168.10.2
 
+# 只构建 StarryOS 并生成 FIT
+tools/starry-board-flow.py build-fit --build-kernel \
+  --build-config os/StarryOS/configs/board/orangepi-5-plus.toml \
+  --smp 1
+
 # 只上传 FIT
 tools/starry-board-flow.py upload-fit \
   --fit tmp/axbuild/image.fit --board-ip 192.168.10.2
@@ -437,9 +445,10 @@ tools/starry-board-flow.py linux-test board-cases/orangepi5plus-rknn-yolo \
 tools/starry-board-flow.py starry-test board-cases/orangepi5plus-rknn-yolo \
   --serial /dev/tty.usbserial-0001 --board-ip 192.168.10.2
 
-# 组合流程：上传资产、上传 FIT、先 Linux 测试、再 Starry 测试
+# 组合流程：上传资产、生成并上传 FIT、先 Linux 测试、再 Starry 测试
 tools/starry-board-flow.py run board-cases/orangepi5plus-rknn-yolo \
-  --deploy-assets --build-assets --deploy-fit \
+  --deploy-assets --build-assets \
+  --build-kernel --build-fit --deploy-fit \
   --side both \
   --fit tmp/axbuild/image.fit \
   --serial /dev/tty.usbserial-0001 \
@@ -452,7 +461,10 @@ tools/starry-board-flow.py run board-cases/orangepi5plus-rknn-yolo \
   --board-ip 192.168.10.2
 ```
 
-如果要在 Starry 测试结束后等待 Linux 回来，加 `--wait-linux`。当前这块板子没有接入电源控制，且 StarryOS 软件 reboot/reset 路径不可用，因此脚本会提示手动断电/上电；由于 one-shot 标记已经在 U-Boot 启动 StarryOS 前清回 `starry_boot=0`，复位后默认回 stock Linux。如果后续接入可脚本化电源控制，可以用：
+如果要在 Starry 测试结束后等待 Linux 回来，加 `--wait-linux`。默认情况下工具会
+在 StarryOS 测试命令末尾追加 `reboot -f`，通过 PSCI reset 自动回 stock Linux。
+由于 one-shot 标记已经在 U-Boot 启动 StarryOS 前清回 `starry_boot=0`，复位后
+默认回 stock Linux。如果要改用可脚本化电源控制，可以用：
 
 ```bash
 tools/starry-board-flow.py run board-cases/<case> --side starry --wait-linux \

@@ -109,7 +109,28 @@ tools/starry-board-flow.py upload-assets board-cases/<case> \
   --board-ip 192.168.10.2
 ```
 
-## 上传 FIT
+## 生成和上传 FIT
+
+`build-fit` 不依赖 case 目录。默认使用：
+
+- kernel bin：`target/aarch64-unknown-linux-musl/release/starryos.bin`
+- dtb：`os/StarryOS/configs/board/orangepi-5-plus.dtb`
+- ITS：`tmp/axbuild/orangepi-5-plus-image.its`
+- FIT：`tmp/axbuild/image.fit`
+
+只重新打包已有 kernel bin：
+
+```bash
+tools/starry-board-flow.py build-fit
+```
+
+先构建 StarryOS，再打包 FIT：
+
+```bash
+tools/starry-board-flow.py build-fit --build-kernel \
+  --build-config os/StarryOS/configs/board/orangepi-5-plus.toml \
+  --smp 1
+```
 
 `upload-fit` 不依赖 case 目录。默认 FIT 路径是 `tmp/axbuild/image.fit`：
 
@@ -189,11 +210,12 @@ tools/starry-board-flow.py serial-run \
 
 ## 完整组合流程
 
-构建并上传资产、上传 FIT、先跑 Linux、再跑 StarryOS：
+构建并上传资产、生成并上传 FIT、先跑 Linux、再跑 StarryOS：
 
 ```bash
 tools/starry-board-flow.py run board-cases/<case> \
   --deploy-assets --build-assets \
+  --build-kernel --build-fit \
   --deploy-fit --fit tmp/axbuild/image.fit \
   --side both \
   --serial /dev/tty.usbserial-0001 \
@@ -235,7 +257,10 @@ tools/starry-board-flow.py run board-cases/<case> \
 3. U-Boot 再启动 `/boot/starry/image.fit`。
 4. 下一次复位默认回 stock Linux。
 
-因此 StarryOS 侧测试结束后，不要求 StarryOS 写回标记。当前板子没有接入自动电源控制，且 StarryOS 软件 reboot/reset 路径不可用，所以需要手动断电/上电。
+因此 StarryOS 侧测试结束后，不要求 StarryOS 写回标记。当前 StarryOS 已支持
+`reboot` 通过 PSCI `SYSTEM_RESET` 复位；工具在 `--wait-linux` 且未提供
+`--power-cycle-command` 时，会把 `reboot -f` 追加到 StarryOS 测试命令末尾，
+测试成功后自动复位并等待 stock Linux SSH 恢复。
 
 如果要让完整流程等待 Linux 回来：
 
@@ -243,6 +268,28 @@ tools/starry-board-flow.py run board-cases/<case> \
 tools/starry-board-flow.py run board-cases/<case> \
   --side starry \
   --wait-linux \
+  --serial /dev/tty.usbserial-0001 \
+  --board-ip 192.168.10.2
+```
+
+如需覆盖 StarryOS 侧复位命令：
+
+```bash
+tools/starry-board-flow.py run board-cases/<case> \
+  --side starry \
+  --wait-linux \
+  --starry-reboot-command 'busybox reboot -f' \
+  --serial /dev/tty.usbserial-0001 \
+  --board-ip 192.168.10.2
+```
+
+如果要临时禁用 StarryOS 软件 reboot，保留手动复位或外部电源控制路径：
+
+```bash
+tools/starry-board-flow.py run board-cases/<case> \
+  --side starry \
+  --wait-linux \
+  --no-starry-reboot \
   --serial /dev/tty.usbserial-0001 \
   --board-ip 192.168.10.2
 ```
@@ -276,6 +323,7 @@ YOLO 完整命令示例：
 ```bash
 tools/starry-board-flow.py run board-cases/orangepi5plus-rknn-yolo \
   --deploy-assets --build-assets \
+  --build-kernel --build-fit \
   --deploy-fit --fit tmp/axbuild/image.fit \
   --side both \
   --serial /dev/tty.usbserial-0001 \
@@ -287,6 +335,7 @@ MediaPipe pose 完整命令示例：
 ```bash
 tools/starry-board-flow.py run board-cases/orangepi5plus-mediapipe-pose \
   --deploy-assets --build-assets \
+  --build-kernel --build-fit \
   --deploy-fit --fit tmp/axbuild/image.fit \
   --side both \
   --serial /dev/tty.usbserial-0001 \
