@@ -323,6 +323,13 @@ clk_gate_table!(
     ACLK_USB => (74, 0),
     HCLK_USB => (74, 2),
 
+    // ========================================================================
+    // RGA2 时钟门控 (CLKGATE_CON45)
+    // ========================================================================
+    // RK3588 CLKGATE_CON45: bit7 hclk, bit8 aclk, bit9 core (clk-rk3588.c).
+    HCLK_RGA2 => (45, 7),
+    ACLK_RGA2 => (45, 8),
+    CLK_RGA2_CORE => (45, 9),
 );
 
 clk_pmu_gate_table!(
@@ -420,14 +427,15 @@ mod tests {
         // NPU: 22
         // PCIe/PHP: 57
         // USB: 21 main/php gates + 2 PMU composite gates
-        // 总计: 166
+        // RGA2: 3 (hclk/aclk/core)
+        // 总计: 169
         assert_eq!(
             CLK_GATE_TABLE.len()
                 + CLK_PMU_GATE_TABLE.len()
                 + CLK_PHP_GATE_TABLE.len()
                 + CLK_COMPOSITE_TABLE.len()
                 + CLK_PMU_COMPOSITE_TABLE.len(),
-            166
+            169
         );
     }
 
