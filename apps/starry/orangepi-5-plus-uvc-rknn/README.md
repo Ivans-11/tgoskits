@@ -44,23 +44,24 @@ capturing or synthesizing replacements. The benchmark board config expects the
 three image files and the matching committed `expected.txt` to be installed
 together.
 
-Build the image runner:
+Build the YOLO image runner:
 
 ```bash
-apps/starry/orangepi-5-plus-uvc-rknn/build-image-runner.sh
+apps/starry/orangepi-5-plus-uvc-rknn/build-image-runner.sh yolo
 ```
 
 Install it into the board Linux rootfs:
 
 ```bash
 export BOARD_IP=10.3.10.24
+export BOARD_PASSWORD='<password>'
 rsync -az --delete \
   apps/starry/orangepi-5-plus-uvc-rknn/rknn-yolov8-image/install/rk3588_linux_aarch64/rknn_yolov8_image/ \
   orangepi@${BOARD_IP}:/tmp/rknn_yolov8_image/
-ssh orangepi@${BOARD_IP} '
-  printf "%s\n" orangepi | sudo -S rm -rf /rknn_yolov8_image &&
-  printf "%s\n" orangepi | sudo -S mv /tmp/rknn_yolov8_image /rknn_yolov8_image &&
-  printf "%s\n" orangepi | sudo -S chown -R root:root /rknn_yolov8_image &&
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | ssh orangepi@${BOARD_IP} '
+  sudo -S rm -rf /rknn_yolov8_image &&
+  sudo mv /tmp/rknn_yolov8_image /rknn_yolov8_image &&
+  sudo chown -R root:root /rknn_yolov8_image &&
   sync
 '
 ```
@@ -68,10 +69,10 @@ ssh orangepi@${BOARD_IP} '
 Linux-side finite smoke test on the board:
 
 ```bash
-ssh orangepi@${BOARD_IP} '
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E -S \
     ./rknn_yolov8_stream --model model/yolov8.rknn --label model/coco_80_labels_list.txt \
       --device 0 --width 320 --height 240 --fps 30 --duration-sec 8 --infer-every 2 --max-inferences 3 \
       --http-port 8080 --http-fps 15 --jpeg-quality 80
@@ -82,10 +83,10 @@ Linux-side fixed-image validation should pass before the realtime UVC benchmark
 when the validation assets are present:
 
 ```bash
-ssh orangepi@${BOARD_IP} '
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E -S \
     ./rknn_yolov8_bench --validate-list validation/images.txt --expected validation/expected.txt \
       --min-confidence 25 --core-mask all --profile
 '
@@ -97,13 +98,76 @@ The validation command must print:
 UVC_RKNN_VALIDATE_PASS images=3
 ```
 
+Pose model bring-up is kept in a separate install tree from the YOLO assets.
+After installing `rknn-mediapipe-pose-image`, the fixed-image RKNN probe verifies
+that `model/pose_detector.rknn` and `model/pose_landmark_lite.rknn` load, reports
+their tensor layouts, runs inference, and can dump raw output statistics for
+implementing the next postprocess step. It does not implement MediaPipe Pose
+detector/landmark postprocess yet:
+
+```bash
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | ssh orangepi@${BOARD_IP} '
+  cd /rknn_mediapipe_pose_image &&
+  export LD_LIBRARY_PATH=/rknn_mediapipe_pose_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
+  sudo -E -S \
+    ./rknn_pose_image --detector-model model/pose_detector.rknn \
+      --landmark-model model/pose_landmark_lite.rknn \
+      --dump-output-stats validation/person.jpg
+'
+```
+
+Generate the two pose RKNN models on a native x86_64 Linux machine. The helper
+script creates a Python 3.10 virtualenv, installs RKNN-Toolkit2 and the pinned
+conversion dependencies, downloads OpenCV Zoo MediaPipe Pose ONNX assets, then
+writes the two RKNN files into the app model directory:
+
+```bash
+cd apps/starry/orangepi-5-plus-uvc-rknn
+tools/convert-mediapipe-pose-rknn-venv.sh
+```
+
+The default virtualenv path is `/tmp/rknn-pose-venv`. Override it or the Python
+binary when needed:
+
+```bash
+PYTHON=/usr/bin/python3.10 RKNN_POSE_VENV=/tmp/rknn-pose-venv \
+  tools/convert-mediapipe-pose-rknn-venv.sh
+```
+
+Expected outputs:
+
+```text
+rknn-mediapipe-pose-image/model/pose_detector.rknn
+rknn-mediapipe-pose-image/model/pose_landmark_lite.rknn
+```
+
+The repository carries known-good `.rknn` copies, following the YOLO model layout. If
+you intentionally update the pose model assets, regenerate them on a native
+x86_64 Linux host and commit the refreshed `.rknn` files:
+
+```bash
+apps/starry/orangepi-5-plus-uvc-rknn/build-image-runner.sh pose
+```
+
+Running `build-image-runner.sh` without arguments builds both `yolo` and `pose`,
+so it also requires the pose models to exist in the repository checkout.
+
+Native x86_64 Linux remains the recommended conversion path. The ONNX path has
+also been smoke-tested in an amd64 Docker container under qemu-user, but native
+x86_64 is still the more repeatable setup for RKNN-Toolkit2.
+
+The conversion intentionally uses ONNX inputs instead of MediaPipe TFLite. The
+MediaPipe TFLite assets hit unsupported `DENSIFY` handling in common conversion
+tools, and `rknn.load_tflite()` has been observed to segfault on both qemu-user
+and some native x86_64 hosts.
+
 Linux-side 60-second benchmark smoke can be shortened during setup:
 
 ```bash
-ssh orangepi@${BOARD_IP} '
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E -S \
     ./rknn_yolov8_bench --model model/yolov8.rknn --label model/coco_80_labels_list.txt \
       --device 0 --width 320 --height 240 --fps 30 --duration-sec 8 --infer-every 1 \
       --report-interval-sec 2 --min-confidence 25
@@ -114,10 +178,10 @@ For continuous manual testing with browser preview, use `--duration-sec 0
 --max-inferences 0` and stop the program with `Ctrl+C`:
 
 ```bash
-ssh orangepi@${BOARD_IP} '
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E -S \
     ./rknn_yolov8_stream --model model/yolov8.rknn --label model/coco_80_labels_list.txt \
       --device 0 --width 320 --height 240 --fps 30 --duration-sec 0 --infer-every 2 --max-inferences 0 \
       --http-port 8080 --http-fps 15 --jpeg-quality 80

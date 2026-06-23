@@ -1,0 +1,22 @@
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = '''
+echo YOLO_IMAGE_BEGIN &&
+cd /rknn_yolov8_image &&
+./rknn_yolov8_image validation/tennis-ball-close.jpg &&
+./rknn_yolov8_image validation/tennis-ball-black-box.jpg &&
+./rknn_yolov8_image validation/tennis-ball-plant.jpg &&
+echo YOLO_IMAGE_DONE
+'''
+success_regex = [
+  "(?m)^YOLO_IMAGE_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?m)^read_image fail!.*$",
+  "(?m)^inference_yolov8_model fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?i)(rknn_yolov8_image|sh): .*not found",
+]
+timeout = 120

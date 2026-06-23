@@ -1,0 +1,21 @@
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = '''
+echo POSE_IMAGE_BEGIN &&
+cd /rknn_mediapipe_pose_image &&
+./rknn_pose_image --detector-model model/pose_detector.rknn \
+  --landmark-model model/pose_landmark_lite.rknn \
+  --dump-output-stats validation/person.jpg &&
+echo POSE_IMAGE_DONE
+'''
+success_regex = [
+  "(?m)^POSE_IMAGE_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?m)^read_image fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?i)(rknn_pose_image|sh): .*not found",
+]
+timeout = 120

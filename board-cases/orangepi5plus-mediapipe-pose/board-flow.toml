@@ -1,0 +1,35 @@
+[case]
+name = "orangepi5plus-mediapipe-pose"
+app_dir = "../../apps/starry/orangepi-5-plus-uvc-rknn"
+
+[assets]
+build = ["./build-image-runner.sh pose"]
+
+[[assets.items]]
+source = "rknn-mediapipe-pose-image/install/rk3588_linux_aarch64/rknn_mediapipe_pose_image"
+target = "/rknn_mediapipe_pose_image"
+
+[linux]
+command = '''
+cd /rknn_mediapipe_pose_image &&
+export LD_LIBRARY_PATH=/rknn_mediapipe_pose_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
+printf "%s\n" "${BOARD_PASSWORD:?BOARD_PASSWORD is required for sudo}" | sudo -E -S \
+  ./rknn_pose_image --detector-model model/pose_detector.rknn \
+    --landmark-model model/pose_landmark_lite.rknn \
+    --dump-output-stats validation/person.jpg &&
+echo POSE_IMAGE_DONE
+'''
+success_regex = [
+  "(?m)^POSE_IMAGE_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?m)^read_image fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?i)(rknn_pose_image|sh): .*not found",
+]
+timeout = 120
+
+[starry]
+board_config = "board-orangepi-5-plus-pose.toml"

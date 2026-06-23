@@ -301,6 +301,192 @@ ps -ef | rg 'tg-xtask|cargo xtask|picocom|cu.usbserial' || true
 kill -INT <pid>
 ```
 
+### 本地 board service / ostool-server
+
+`cargo xtask board ls`、`cargo xtask board connect` 和
+`cargo xtask starry app board ...` 走的是 `ostool-server`。它和上面的
+`quick-start orangepi-5-plus run` 不是同一条入口：
+
+- `quick-start ... run` 是本地串口 + U-Boot + TFTP 直连路径，不需要
+  `ostool-server`。
+- `app board` 会先向 `ostool-server` 申请板卡 session，再通过
+  `ostool-server` 的串口 websocket 和 TFTP session 文件接口启动板子。
+- `ostool-server` 只负责内核/FIT 等运行产物和串口控制；RKNN 模型、验证图片、
+  动态库等要出现在 StarryOS rootfs 里的资产，仍需要先在板子 Linux 侧通过
+  SSH/rsync 写入 SD 卡 rootfs 并 `sync`。
+
+当前本地服务配置放在本地 `ostool` checkout，不在 `tgoskits-board` 仓库内：
+
+```text
+/home/wangyifan/lab/ostool/.ostool-server.toml
+/home/wangyifan/lab/ostool/.ostool-server/boards/orangepi5plus-1.toml
+```
+
+`ostool-server` 默认构建会编译 Web UI，需要 `pnpm`。如果只是使用板卡 API、
+串口和 TFTP 文件接口，可以用一个最小 Web dist 跳过前端构建：
+
+```bash
+mkdir -p /tmp/ostool-server-web-dist
+printf '<!doctype html><title>ostool-server</title><div>ostool-server</div>\n' \
+  > /tmp/ostool-server-web-dist/index.html
+
+cd /home/wangyifan/lab/ostool
+OSTOOL_SERVER_WEB_DIST_DIR=/tmp/ostool-server-web-dist \
+  cargo build -p ostool-server
+```
+
+服务配置示例：
+
+```toml
+listen_addr = "0.0.0.0:2999"
+data_dir = ".ostool-server"
+board_dir = ".ostool-server/boards"
+dtb_dir = ".ostool-server/dtbs"
+
+[http_boot]
+enabled = true
+root_dir = ".ostool-server/http-boot"
+
+[tftp]
+provider = "builtin"
+enabled = true
+root_dir = "/mnt/mac/private/tftpboot"
+bind_addr = "127.0.0.1:1069"
+
+[network]
+interface = "mac-tftp"
+
+[upload_limits]
+session_file_max_mib = 256
+```
+
+这里的 `bind_addr = "127.0.0.1:1069"` 是有意避开 macOS 系统 TFTP 的
+UDP 69。`ostool-server` 负责把 session 文件写入
+`/mnt/mac/private/tftpboot`，真正给板子下载文件的仍是 Mac 侧
+`192.168.10.1:69` 的系统 TFTP 服务。`interface = "mac-tftp"` 不是
+真实 OrbStack 网卡名；实际 `server_ip` 在板卡 boot profile 里固定。
+
+板卡注册示例：
+
+```toml
+id = "orangepi5plus-1"
+board_type = "OrangePi-5-Plus"
+tags = []
+disabled = false
+
+[serial]
+baud_rate = 1500000
+
+[serial.key]
+kind = "usb_path"
+value = "/dev/cu.usbserial-0001"
+
+[power_management]
+kind = "custom"
+power_on_cmd = "true"
+power_off_cmd = "true"
+
+[boot]
+kind = "uboot"
+use_tftp = true
+fit_load_addr = "0x82200000"
+bootm_addr = "0x82200000"
+network_mode = "static_ip"
+board_ip = "192.168.10.2"
+server_ip = "192.168.10.1"
+netmask = "255.255.255.0"
+gatewayip = "192.168.10.1"
+```
+
+上面的 `power_management` 只占位，不实际控制电源。需要自动上电/断电时，
+再改成真实继电器配置，例如中盛继电器的 `kind = "zhongsheng_relay"`。
+
+启动服务：
+
+```bash
+cd /home/wangyifan/lab/ostool
+setsid nohup target/debug/ostool-server --config .ostool-server.toml \
+  > /tmp/ostool-server.log 2>&1 < /dev/null &
+echo $! > /tmp/ostool-server.pid
+```
+
+验证：
+
+```bash
+cd /home/wangyifan/lab/tgoskits-board
+cargo xtask board ls --server 127.0.0.1 --port 2999
+```
+
+成功时应看到：
+
+```text
+BOARD TYPE       AVAILABLE  TOTAL  TAGS
+OrangePi-5-Plus          1      1  -
+```
+
+也可以用 API 检查：
+
+```bash
+curl -sS http://127.0.0.1:2999/api/v1/board-types
+curl -sS http://127.0.0.1:2999/api/v1/admin/tftp/status
+```
+
+创建临时 session 验证板卡 TFTP profile：
+
+```bash
+resp=$(curl -sS -X POST http://127.0.0.1:2999/api/v1/sessions \
+  -H 'content-type: application/json' \
+  -d '{"board_type":"OrangePi-5-Plus","required_tags":[],"client_name":"config-check"}')
+sid=$(printf '%s' "$resp" | sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p')
+curl -sS "http://127.0.0.1:2999/api/v1/sessions/$sid/tftp"
+curl -sS "http://127.0.0.1:2999/api/v1/sessions/$sid/serial"
+curl -sS -X DELETE "http://127.0.0.1:2999/api/v1/admin/sessions/$sid" >/dev/null
+```
+
+当前正常的关键返回值：
+
+```text
+tftp.available=true
+tftp.server_ip=192.168.10.1
+tftp.netmask=255.255.255.0
+serial.available=true
+serial.port=/dev/cu.usbserial-0001
+serial.baud_rate=1500000
+```
+
+连接串口并持有板卡 session：
+
+```bash
+cargo xtask board connect -b OrangePi-5-Plus --server 127.0.0.1 --port 2999
+```
+
+运行 Starry app board 用例：
+
+```bash
+cargo xtask starry app board -t orangepi-5-plus-uvc-rknn \
+  -b OrangePi-5-Plus \
+  --server 127.0.0.1 \
+  --port 2999
+```
+
+如果该 app board 路径也需要和 direct U-Boot 路径一样显式选择 `eth1`，把
+`uboot_cmd` 放到 app 的 board run config 中，而不是放到
+`ostool-server` 的板卡注册文件中：
+
+```toml
+uboot_cmd = [
+    "pci enum",
+    "net list",
+    "setenv ethact eth1",
+]
+```
+
+停止服务：
+
+```bash
+kill "$(cat /tmp/ostool-server.pid)"
+```
+
 ### picocom 串口验证
 
 ```bash
