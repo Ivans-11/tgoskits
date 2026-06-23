@@ -15,7 +15,8 @@ features = [
 ]
 log = "Warn"
 # The live pipeline runs the libuvc capture thread and the perception/control
-# loop on separate cores, so SMP helps end-to-end latency. 4 is a conservative
-# middle ground: set to 1 if StarryOS SMP boot is unstable on your board, or up
-# to 8 (the value the profiling branch uses for this board) for more headroom.
-max_cpu_num = 4
+# loop on separate cores, so SMP helps end-to-end latency. All 8 cores (4x A55 +
+# 4x A76) are enabled so the scheduler has the full RK3588 topology to place the
+# capture, perception, and control threads on; this is the baseline for the
+# scheduler/pipeline optimization work.
+max_cpu_num = 8

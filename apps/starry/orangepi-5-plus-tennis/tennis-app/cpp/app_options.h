@@ -22,6 +22,15 @@ struct Options {
     bool virtual_actuators = true; // the only supported actuator path for now
     int log_every = 1;             // emit per-frame lines every Nth frame (1 = all)
     std::string core_mask = "all"; // NPU core mask for live mode
+    // --- Deep profiling (mirrors the sibling uvc-rknn bench) ---
+    bool profile = false;          // --profile: collect per-stage timing + emit
+                                   // the PROFILE/PIPELINE/COLD_START/RES lines
+    int report_interval_sec = 5;   // --report-interval-sec: TENNIS_RES cadence
+    std::string profile_csv;       // --profile-csv <path>: one row per frame
+    std::string infer_affinity;    // --infer-affinity <cpulist>: pin the inference
+                                   // thread (e.g. 4-7 = RK3588 A76 big cores)
+    std::string validate_list;     // --validate-list <file>: fixed-image accuracy
+                                   // check (one image path per line)
     Config cfg;
 };
 

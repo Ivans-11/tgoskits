@@ -13,6 +13,10 @@
 // from a deterministic synthetic scene and emits the mandatory TENNIS_BENCH_RESULT
 // line, so the benchmark output is reproducible anywhere (and on the host build,
 // `cmake -DTENNIS_HOST_DRYRUN=ON`, it is the only available mode).
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // sched_* in profiling.h (Linux/StarryOS; stubbed elsewhere)
+#endif
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +28,7 @@
 #include "app_options.h"
 #include "bench/metrics.h"
 #include "controller.h"
+#include "profiling.h"
 #include "state_machine.h"
 #include "time_utils.h"
 #include "types.h"
@@ -129,29 +134,62 @@ static int run_dry_run(const Options &opts) {
     const int64_t frame_period_ns = 1000000000LL / fps;
     const size_t expected = static_cast<size_t>(opts.duration_sec * fps) + 16;
 
+    const int64_t t_proc_start = monotonic_ns();
     TraceMotorBackend motor;
     TraceArmBackend arm;
     Metrics metrics;
     metrics.reserve(expected);
+    if (opts.profile && !opts.profile_csv.empty()) {
+        metrics.open_csv(opts.profile_csv.c_str());
+    }
     Controller controller(cfg, motor, arm, metrics, opts.log_every);
     SyntheticScene scene(cfg);
 
     std::printf("TENNIS_BENCH_BEGIN mode=dry-run fps=%d duration_sec=%.3f "
-                "virtual_actuators=%d\n",
-                fps, opts.duration_sec, opts.virtual_actuators ? 1 : 0);
+                "virtual_actuators=%d profile=%d affinity=%s\n",
+                fps, opts.duration_sec, opts.virtual_actuators ? 1 : 0,
+                opts.profile ? 1 : 0,
+                opts.infer_affinity.empty() ? "none"
+                                            : opts.infer_affinity.c_str());
+
+    if (!opts.infer_affinity.empty()) {
+        apply_and_check_affinity(opts.infer_affinity.c_str());
+    }
 
     const int64_t start = monotonic_ns();
     const int64_t end = start + static_cast<int64_t>(opts.duration_sec * 1e9);
     uint64_t seq = 0;
     int64_t next_frame = start;
+    int64_t last_report = start;
+    int64_t t_first_cmd = 0;
 
     while (monotonic_ns() < end) {
         const int64_t capture_ts = monotonic_ns();
         metrics.on_capture();
         Detection det = scene.next(controller.perception_mode(),
                                    controller.state(), seq, capture_ts);
+        const int64_t t_ctrl0 = monotonic_ns();
         controller.process(det);
+        const int64_t t_ctrl1 = monotonic_ns();
+        if (t_first_cmd == 0) t_first_cmd = t_ctrl1;
         ++seq;
+
+        if (opts.profile) {
+            StageTiming st;
+            st.seq = det.seq;
+            st.queue_age_ms = ns_to_ms(t_ctrl0 - capture_ts);
+            st.control_ms = ns_to_ms(t_ctrl1 - t_ctrl0);
+            st.frame_to_detection_ms = ns_to_ms(det.detect_ts_ns - capture_ts);
+            st.frame_to_command_ms = ns_to_ms(t_ctrl1 - capture_ts);
+            metrics.on_stage_timing(st);
+            metrics.record_core(profiler_getcpu());
+            if (opts.report_interval_sec > 0 &&
+                ns_to_ms(t_ctrl1 - last_report) >=
+                    opts.report_interval_sec * 1000.0) {
+                metrics.sample_resource(ns_to_ms(t_ctrl1 - start) / 1000.0);
+                last_report = t_ctrl1;
+            }
+        }
 
         next_frame += frame_period_ns;
         const int64_t sleep = next_frame - monotonic_ns();
@@ -159,7 +197,22 @@ static int run_dry_run(const Options &opts) {
     }
 
     const double dur = ns_to_ms(monotonic_ns() - start) / 1000.0;
+    if (opts.profile) {
+        ColdStart cold;
+        if (t_first_cmd)
+            cold.time_to_first_command_ms = ns_to_ms(t_first_cmd - t_proc_start);
+        metrics.set_cold_start(cold);
+    }
     metrics.emit_result(dur);
+    if (opts.profile) {
+        metrics.emit_profile_result();
+        metrics.emit_pipeline_result();
+        metrics.emit_cold_start();
+        metrics.emit_core_hist(opts.infer_affinity.empty()
+                                   ? "none"
+                                   : opts.infer_affinity.c_str());
+        metrics.close_csv();
+    }
     std::printf("TENNIS_BENCH_DONE\n");
     return 0;
 }
@@ -167,7 +220,8 @@ static int run_dry_run(const Options &opts) {
 static void usage(const char *prog) {
     std::fprintf(
         stderr,
-        "usage: %s --mode <live|test-uvc|test-yolo|test-bucket|dry-run> [opts]\n"
+        "usage: %s --mode <live|test-uvc|test-yolo|test-bucket|validate|dry-run> [opts]\n"
+        "  --validate-list <file>   (validate mode) fixed-image accuracy check; one image path per line\n"
         "  --model <path>           .rknn model (default model/tennis.rknn)\n"
         "  --label <path>           labels file (default model/labels.txt)\n"
         "  --device <n>             UVC device index (default 0)\n"
@@ -179,7 +233,13 @@ static void usage(const char *prog) {
         "  --min-confidence <0-100> detection confidence threshold (default 50)\n"
         "  --log-every <n>          emit per-frame lines every Nth frame\n"
         "  --staleness-ms <n>       drop detections older than n ms (0 = never)\n"
-        "  --core-mask <m>          NPU core mask for live mode (default all)\n",
+        "  --core-mask <m>          NPU core mask for live mode (default all)\n"
+        "  --profile                collect per-stage timing + emit PROFILE/"
+        "PIPELINE/COLD_START/RES lines\n"
+        "  --report-interval-sec <n> TENNIS_RES cadence (default 5)\n"
+        "  --profile-csv <path>     write one CSV row per processed frame\n"
+        "  --infer-affinity <list>  pin inference thread to CPUs, e.g. 4-7 "
+        "(RK3588 A76 big cores)\n",
         prog);
 }
 
@@ -203,6 +263,11 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--model", o.model)) continue;
         if (arg_val(argc, argv, i, "--label", o.label)) continue;
         if (arg_val(argc, argv, i, "--core-mask", o.core_mask)) continue;
+        if (arg_val(argc, argv, i, "--profile-csv", o.profile_csv)) continue;
+        if (arg_val(argc, argv, i, "--infer-affinity", o.infer_affinity)) continue;
+        if (arg_val(argc, argv, i, "--validate-list", o.validate_list)) continue;
+        if (arg_val(argc, argv, i, "--report-interval-sec", v)) { o.report_interval_sec = std::atoi(v.c_str()); continue; }
+        if (std::strcmp(argv[i], "--profile") == 0) { o.profile = true; continue; }
         if (arg_val(argc, argv, i, "--device", v)) { o.device = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--width", v)) { o.width = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--height", v)) { o.height = std::atoi(v.c_str()); continue; }
@@ -246,6 +311,7 @@ int main(int argc, char **argv) {
     if (opts.mode == "test-uvc") return run_test_uvc(opts);
     if (opts.mode == "test-yolo") return run_test_yolo(opts);
     if (opts.mode == "test-bucket") return run_test_bucket(opts);
+    if (opts.mode == "validate") return run_validate(opts);
     std::fprintf(stderr, "TENNIS_ERROR unknown mode: %s\n", opts.mode.c_str());
     return 2;
 #else
