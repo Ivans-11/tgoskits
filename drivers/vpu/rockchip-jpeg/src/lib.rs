@@ -15,6 +15,7 @@
 extern crate std;
 
 pub mod command;
+pub mod mpp;
 pub mod parser;
 pub mod registers;
 pub mod status;
@@ -194,6 +195,50 @@ impl<M: JpuMmio> JpuCore<M> {
         let status = self.poll_complete(clock, timeout_us)?;
         self.clear_status();
         Ok(status)
+    }
+
+    /// Run a pre-built register array (as supplied over the MPP ABI, with the
+    /// enable bit already in `SWREG1`): program, start, wait for done-or-error,
+    /// then copy the whole register file into `readback`. On timeout, `readback`
+    /// is still populated for diagnostics before the error is returned.
+    pub fn run_raw<C: FnMut() -> u64>(
+        &mut self,
+        regs: &[u32; registers::REG_COUNT],
+        readback: &mut [u32; registers::REG_COUNT],
+        clock: &mut C,
+        timeout_us: u64,
+    ) -> Result<DecodeStatus, JpuError> {
+        self.program_and_start(regs);
+        let result = self.poll_terminal(clock, timeout_us);
+        self.read_regs(readback);
+        let status = result?;
+        self.clear_status();
+        Ok(status)
+    }
+
+    /// Copy the full register file into `out`.
+    pub fn read_regs(&self, out: &mut [u32; registers::REG_COUNT]) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.mmio.read32(offset(i));
+        }
+    }
+
+    /// Poll `SWREG1` until done OR error (returned as status); error only on timeout.
+    fn poll_terminal<C: FnMut() -> u64>(
+        &self,
+        clock: &mut C,
+        timeout_us: u64,
+    ) -> Result<DecodeStatus, JpuError> {
+        let start = clock();
+        loop {
+            let status = DecodeStatus::from_int(self.mmio.read32(offset(registers::REG_INT)));
+            if status.is_done() || status.error().is_some() {
+                return Ok(status);
+            }
+            if clock().wrapping_sub(start) >= timeout_us {
+                return Err(JpuError::DecodeTimeout);
+            }
+        }
     }
 }
 
@@ -465,6 +510,50 @@ mod tests {
         assert_eq!(core.mmio.reg(REG_HUFFVAL_BASE), 0x1000_0000 + 704);
         assert_eq!(core.mmio.reg(REG_STRM_BASE), 0x2000_0000 + 32);
         assert_eq!(core.mmio.reg(REG_DEC_OUT_BASE), 0x3000_0000);
+    }
+
+    #[test]
+    fn run_raw_programs_polls_and_reads_back() {
+        let fake = FakeMmio::new(std::vec![INT_IRQ | INT_RDY_STA]);
+        let mut core = JpuCore::new(fake);
+        let mut clock = ticking_clock();
+        let mut regs = [0u32; REG_COUNT];
+        regs[REG_PIC_SIZE] = 0x002f_003f;
+        regs[REG_QTBL_BASE] = 0x1000_0000;
+        regs[REG_INT] = INT_DEC_E;
+        let mut readback = [0u32; REG_COUNT];
+        let st = core
+            .run_raw(&regs, &mut readback, &mut clock, 1000)
+            .unwrap();
+        assert!(st.is_success());
+        assert_eq!(readback[REG_PIC_SIZE], 0x002f_003f);
+        assert_eq!(readback[REG_QTBL_BASE], 0x1000_0000);
+        assert_eq!(readback[REG_INT], INT_IRQ | INT_RDY_STA);
+    }
+
+    #[test]
+    fn run_raw_reports_hw_error_via_status() {
+        let fake = FakeMmio::new(std::vec![INT_ERROR_STA]);
+        let mut core = JpuCore::new(fake);
+        let mut clock = ticking_clock();
+        let mut readback = [0u32; REG_COUNT];
+        let st = core
+            .run_raw(&[0u32; REG_COUNT], &mut readback, &mut clock, 1000)
+            .unwrap();
+        assert_eq!(st.error(), Some(DecodeError::StreamError));
+        assert_eq!(readback[REG_INT], INT_ERROR_STA);
+    }
+
+    #[test]
+    fn run_raw_times_out() {
+        let fake = FakeMmio::new(std::vec![0]);
+        let mut core = JpuCore::new(fake);
+        let mut clock = ticking_clock();
+        let mut readback = [0u32; REG_COUNT];
+        assert_eq!(
+            core.run_raw(&[0u32; REG_COUNT], &mut readback, &mut clock, 5),
+            Err(JpuError::DecodeTimeout)
+        );
     }
 
     #[test]
