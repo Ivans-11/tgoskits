@@ -134,7 +134,8 @@ pub fn build_reg_array(info: &JpegInfo) -> [u32; registers::REG_COUNT] {
     // reg8: stream length (16-byte units, minus one) + start byte.
     let hw_strm_offset = info.strm_offset - info.strm_offset % 16;
     let start_byte = info.strm_offset % 16;
-    let stream_len = (align_up(info.pkt_len - hw_strm_offset, 16) - 1) >> 4;
+    let strm_bytes = info.pkt_len.saturating_sub(hw_strm_offset);
+    let stream_len = (align_up(strm_bytes, 16).saturating_sub(1)) >> 4;
     regs[registers::REG_STRM_LEN] = (start_byte & 0xf) | ((stream_len & 0x0fff_ffff) << 4);
 
     // reg14: stream error handling defaults (error_prc_mode=1, skip 0xffff/other marks).

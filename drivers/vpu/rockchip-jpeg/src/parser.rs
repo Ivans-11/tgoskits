@@ -260,6 +260,10 @@ pub fn parse(data: &[u8]) -> Result<JpegInfo, ParseError> {
                 let (body, next) = read_segment(data, pos)?;
                 parse_sos(body, &mut info)?;
                 info.strm_offset = next as u32;
+                // There must be entropy-coded data after the scan header.
+                if info.strm_offset >= info.pkt_len {
+                    return Err(ParseError::Truncated);
+                }
                 return Ok(info);
             }
             // APPn, COM, JPG, DNL, and anything else with a length payload.
@@ -697,6 +701,11 @@ mod tests {
         let info = parse(&bytes).unwrap();
         assert_eq!(info.strm_offset, off);
         assert_eq!(info.pkt_len, bytes.len() as u32);
+
+        // Truncate right at the scan offset: SOS is the final segment with no
+        // entropy data, so the parser must reject it (would otherwise underflow
+        // the stream-length computation).
+        assert_eq!(parse(&bytes[..off as usize]), Err(ParseError::Truncated));
     }
 
     #[test]

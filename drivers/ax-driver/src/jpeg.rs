@@ -67,15 +67,21 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     bypass_iommu(base);
 
     let dma = axklib::dma::device_with_mask(u32::MAX as u64);
-    let mut jpeg = RockchipJpeg::new(base, dma);
+    let jpeg = RockchipJpeg::new(base, dma);
 
     info!(
         "JPEG decoder probed: base={start_raw:#x} id={:#010x}",
         jpeg.read_id()
     );
 
+    // The self-test needs `&mut`; rebind as mutable only when that feature is on,
+    // so the normal build doesn't carry an unused `mut`.
     #[cfg(feature = "jpu-selftest")]
-    run_selftest(&mut jpeg);
+    let jpeg = {
+        let mut jpeg = jpeg;
+        run_selftest(&mut jpeg);
+        jpeg
+    };
 
     plat_dev.register(jpeg);
     info!("JPEG decoder registered");

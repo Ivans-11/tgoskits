@@ -4,9 +4,13 @@
 //! The crate is OS-independent (`#![no_std]`) and split into:
 //! - [`registers`]: the `RKDJPEG_SWREG*` register-file definitions.
 //! - [`status`]: pure decoding of the `SWREG1` interrupt/status word.
+//! - [`parser`]: a baseline JPEG header parser.
+//! - [`command`]: the 42-word register-array + 1280-byte quant/Huffman table
+//!   builder (reproduces the vendor MPP `hal_jpegd_rkv` programming).
+//! - [`mpp`]: the Rockchip MPP `/dev/mpp_service` wire ABI (session state machine).
 //!
-//! Higher layers (`command` register-array encoder, `parser` JPEG header parser,
-//! and the `JpuCore` MMIO/runtime) are added as the bring-up path is verified.
+//! [`JpuCore`] is the MMIO runtime (reset, program, poll, decode); [`RockchipJpeg`]
+//! is the probed device (engine + DMA capability + boot self-test).
 
 #![no_std]
 
@@ -192,9 +196,11 @@ impl<M: JpuMmio> JpuCore<M> {
         regs[registers::REG_STRM_BASE] = addrs.stream_phys + hw_strm_offset;
         regs[registers::REG_DEC_OUT_BASE] = addrs.output_phys;
         self.program_and_start(&regs);
-        let status = self.poll_complete(clock, timeout_us)?;
+        // Always clear the status bits (W1C) — even on error/timeout — so stale
+        // done/error bits can't be observed by the next decode.
+        let result = self.poll_complete(clock, timeout_us);
         self.clear_status();
-        Ok(status)
+        result
     }
 
     /// Run a pre-built register array (as supplied over the MPP ABI, with the
@@ -211,9 +217,9 @@ impl<M: JpuMmio> JpuCore<M> {
         self.program_and_start(regs);
         let result = self.poll_terminal(clock, timeout_us);
         self.read_regs(readback);
-        let status = result?;
+        // Always clear status (even on timeout) so stale bits don't leak.
         self.clear_status();
-        Ok(status)
+        result
     }
 
     /// Copy the full register file into `out`.
