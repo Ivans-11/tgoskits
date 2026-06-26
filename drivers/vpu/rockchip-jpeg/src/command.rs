@@ -6,8 +6,10 @@
 //! physical addresses. [`build_table_buffer`] writes the 1280-byte quantization
 //! + Huffman table buffer the hardware reads via `reg9/10/11`.
 
-use crate::parser::{JpegInfo, YuvMode};
-use crate::registers;
+use crate::{
+    parser::{JpegInfo, YuvMode},
+    registers,
+};
 
 /// Total table buffer size (quant + Huffman), bytes.
 pub const TABLE_SIZE: usize = 1280;
@@ -117,7 +119,10 @@ pub fn build_reg_array(info: &JpegInfo) -> [u32; registers::REG_COUNT] {
     };
     let (htbl_mincode_len, htbl_value_len) = match htables_sel {
         0 => (0, 0),
-        2 => ((info.nb_components as u32 - 1) * 6 - 1, htables_sel * 12 - 1),
+        2 => (
+            (info.nb_components as u32 - 1) * 6 - 1,
+            htables_sel * 12 - 1,
+        ),
         _ => (info.nb_components as u32 * 6 - 1, htables_sel * 12 - 1),
     };
     let y_hor_virstride_h = (y_hor_stride >> 16) & 1;

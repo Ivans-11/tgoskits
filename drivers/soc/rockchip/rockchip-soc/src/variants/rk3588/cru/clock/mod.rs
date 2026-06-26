@@ -378,6 +378,11 @@ clk_id_group!(
 );
 clk_id_group!(CLK_PCIE1L0_PIPE = 708, CLK_PCIE1L1_PIPE = 709,);
 
+// =============================================================================
+// JPEG 解码器 (VDPU) 时钟 ID（与设备树 jpegd 节点 aclk/hclk_vcodec = 436/437 一致）
+// =============================================================================
+clk_id_group!(ACLK_JPEG_DECODER = 436, HCLK_JPEG_DECODER = 437,);
+
 pub const PCLK_PHP_USBHOST3_0: ClkId = PCLK_PHP_ROOT;
 pub const CLK_PIPE_USBHOST3_0: ClkId = CLK_PIPEPHY2_PIPE_U3_G;
 pub const CLK_REF_USB3OTG0: ClkId = REF_CLK_USB3OTG0;
