@@ -146,3 +146,55 @@ fn page_aligned_region(start_raw: usize, size_raw: usize) -> (usize, usize, usiz
     let end = (start_raw + size_raw + page_size - 1) & !(page_size - 1);
     (start, end - start, offset)
 }
+
+// --- Kernel-facing accessors for the /dev/mpp_service node (mirror rknpu) ---
+
+pub use rockchip_jpeg::{JpuError, mpp, registers};
+
+/// Errors surfaced to the `/dev/mpp_service` node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// No JPEG decoder device is registered.
+    NotFound,
+    /// The device is busy (locked by another caller).
+    Busy,
+    /// The decode timed out.
+    Timeout,
+    /// The hardware reported a decode error.
+    Decode,
+}
+
+/// Whether a JPEG decoder device has been probed and registered.
+pub fn is_available() -> bool {
+    rdrive::get_one::<RockchipJpeg>().is_some()
+}
+
+/// Read the hardware id register (`prod_num` in the upper half).
+pub fn read_id() -> Result<u32, Error> {
+    let dev = rdrive::get_one::<RockchipJpeg>()
+        .ok_or(Error::NotFound)?
+        .try_lock()
+        .map_err(|_| Error::Busy)?;
+    Ok(dev.read_id())
+}
+
+/// Program a resolved MPP register array, run the decode, and copy the register
+/// file back into `readback`. `timeout_ns` bounds the polled wait.
+pub fn run_raw(
+    regs: &[u32; registers::REG_COUNT],
+    readback: &mut [u32; registers::REG_COUNT],
+    timeout_ns: u64,
+) -> Result<(), Error> {
+    let mut dev = rdrive::get_one::<RockchipJpeg>()
+        .ok_or(Error::NotFound)?
+        .try_lock()
+        .map_err(|_| Error::Busy)?;
+    let mut clock = axklib::time::monotonic_nanos;
+    dev.core()
+        .run_raw(regs, readback, &mut clock, timeout_ns)
+        .map(|_| ())
+        .map_err(|e| match e {
+            JpuError::DecodeTimeout => Error::Timeout,
+            _ => Error::Decode,
+        })
+}

@@ -24,6 +24,7 @@ memtrack = ["ax-feat/backtrace", "ax-alloc/tracking"]
 dma-heap = ["dep:dma-api", "dep:axklib"]
 rknpu = ["ax-driver/rknpu", "dma-heap"]
 rga = ["ax-driver/rga", "dep:rockchip-rga", "dma-heap"]
+jpeg = ["ax-driver/jpeg", "dma-heap"]
 std-compat = []
 k230-kpu = ["ax-feat/xuantie-c9xx", "dep:axklib", "dep:k230-kpu"]
 plat-dyn = [
