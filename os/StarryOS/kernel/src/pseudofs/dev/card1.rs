@@ -9,7 +9,8 @@ use core::{
 };
 
 use ax_driver::rknpu::{
-    self, GemCachePolicy, RknpuAction, RknpuMemCreate, RknpuMemMap, RknpuMemSync, RknpuSubmit,
+    self, GemCachePolicy, RknpuAction, RknpuMemCreate, RknpuMemDestroy, RknpuMemMap, RknpuMemSync,
+    RknpuSubmit,
 };
 use ax_errno::{AxError, AxResult};
 use ax_memory_addr::PhysAddrRange;
@@ -487,7 +488,14 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
         RknpuCmd::MemDestroy => {
-            info!("rknpu mem_destroy ioctl");
+            let mut mem_destroy = RknpuMemDestroy::default();
+            copy_from_user(
+                &mut mem_destroy as *mut _ as *mut u8,
+                arg as *const u8,
+                mem::size_of::<RknpuMemDestroy>(),
+            )?;
+            info!("rknpu mem_destroy ioctl: handle={}", mem_destroy.handle);
+            rknpu::mem_destroy(mem_destroy.handle).map_err(map_rknpu_err)?;
         }
         RknpuCmd::MemSync => {
             let mut mem_sync = RknpuMemSync::default();
