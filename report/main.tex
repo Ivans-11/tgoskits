@@ -501,6 +501,14 @@ profile-rknpu 计时特性 & NPU ioctl 各阶段计数 & 待提交\\
 
 \textbf{真机闭环}。许多内核问题只在真实硬件上才暴露。我们让迭代直接跑在开发板上，一只米家智能插座负责在内核卡死时给板子断电重启，使一次挂起不至于堵住整条流程；reboot 系统调用（见表~\ref{tab:contrib}，上游 PR \#1358）则用于在 Linux 与 Starry 之间切换，以同一份可执行文件作对照。由此迭代得以在真机上自动进行。
 
+上述真机闭环在板端通过 starry-board-flow 工具落地，具体流程如图~\ref{fig:board-flow} 所示。该工具把测试资产和内核镜像的构建与上传、Linux 与 Starry 的切换、串口命令注入、成功标记匹配以及日志回收组织为可复测可组合的自动流程，使真实硬件上的测试验证能够自动高效进行。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{../docs/figures/starry-board-flow.png}
+\caption{starry-board-flow 工作流程}\label{fig:board-flow}
+\end{figure}
+
 \textbf{测量驱动}。优化以第~\ref{sec:profiling}~节的剖析口径为准绳，针对实测的逐阶段数据下手而非凭推断。过程中若干基于推断的结论都被实测数据修正，“在同一份可执行文件上超过 Linux”这一设想也在测量面前被否定。
 
 \textbf{对抗式验证}。对每一个性能或正确性主张，我们以独立的复核流程主动尝试反驳，只有经得起反驳的结论才写入结果，从而过滤掉 AI 容易产生的过度断言。
