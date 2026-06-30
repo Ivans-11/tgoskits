@@ -170,7 +170,7 @@
 
 Starry 是一个以 Rust 语言实现、构建于 ArceOS 组件之上的操作系统。本工作的目标是将上述网球拾取机器人的内核由 Linux 迁移至 Starry，在 RK3588 开发板上实现或补全运行所需的系统调用、文件接口与关键外设驱动，打通基于 NPU 的推理链路，并以 Linux 为基线，在端到端时延、启动速度、推理帧率、资源占用与能耗比等方面开展系统级优化。整体工作沿三个阶段推进，先在开发板上打通推理链路，再补齐机器人本体的感知与执行驱动以完成实际拾球，最后以 Linux 为基线开展性能优化，分别对应本文第~\ref{sec:features}~节与第~\ref{sec:opt}~节。在这一过程中，我们也把 AI 辅助开发本身作为一项方法上的产出加以总结，见第~\ref{sec:ai}~节。
 
-图~\ref{fig:journey} 概括了本工作的优化历程，从默认配置出发逐步逼近 Linux，各步的具体数据在第~\ref{sec:opt}~节展开。
+图~\ref{fig:journey} 概括了本工作的优化历程，从最初配置出发逐步逼近 Linux，各步的具体数据在第~\ref{sec:opt}~节展开。
 
 \begin{figure}[H]
 \centering
@@ -305,14 +305,14 @@ NPU 调频 & ondemand 按需 \emph{vs} performance 最高频 & 19.30 \emph{vs} 1
 \end{tabularx}
 \end{table}
 
-在同一份程序、同一份模型的前提下，Starry 默认配置的实时端到端时延 p50 为 162.7\,ms，约为 Linux 的 6.3 倍，各阶段对照见表~\ref{tab:gap}。内核计时给出了第一个判断，提交 NPU 作业的内核开销平均仅 0.360\,ms，缓存维护单次仅 0.082\,ms，二者相对 20\,ms 量级的推理都微不足道，差距并不在 NPU 与内核路径之上。在排除采集与解码争用的固定图口径下，\texttt{run} 阶段的 p50 仅为 Linux 的 1.2 至 1.37 倍，可见 NPU 的计算本身在两侧相近，实时默认配置下 \texttt{run} 升到数倍，是同一小核上多项工作相互争用所致。perf 的计数（较高的 IPC 与很低的缓存缺失率）进一步显示推理受限于计算而非访存。
+在同一份程序、同一份模型的前提下，Starry 最初配置的实时端到端时延 p50 为 162.7\,ms，约为 Linux 的 6.3 倍，各阶段对照见表~\ref{tab:gap}。内核计时给出了第一个判断，提交 NPU 作业的内核开销平均仅 0.360\,ms，缓存维护单次仅 0.082\,ms，二者相对 20\,ms 量级的推理都微不足道，差距并不在 NPU 与内核路径之上。在排除采集与解码争用的固定图口径下，\texttt{run} 阶段的 p50 仅为 Linux 的 1.2 至 1.37 倍，可见 NPU 的计算本身在两侧相近，实时最初配置下 \texttt{run} 升到数倍，是同一小核上多项工作相互争用所致。perf 的计数（较高的 IPC 与很低的缓存缺失率）进一步显示推理受限于计算而非访存。
 
 \begin{table}[H]
 \centering
-\caption{Starry 默认配置与 Linux 的实时逐阶段对照（p50，单位 ms）}\label{tab:gap}
+\caption{Starry 最初配置与 Linux 的实时逐阶段对照（p50，单位 ms）}\label{tab:gap}
 \begin{tabularx}{\textwidth}{@{}l R R r@{}}
 \toprule
-\headrow \hdr{阶段} & \hdr{Linux} & \hdr{Starry 默认} & \hdr{倍率}\\
+\headrow \hdr{阶段} & \hdr{Linux} & \hdr{Starry 最初} & \hdr{倍率}\\
 \midrule
 \texttt{letterbox} & 1.38 & 75.5 & 55$\times$\\
 \texttt{run}（NPU）& 15.42 & 71.1 & 4.6$\times$\\
@@ -335,7 +335,7 @@ NPU 调频 & ondemand 按需 \emph{vs} performance 最高频 & 19.30 \emph{vs} 1
 \caption{推理亲和性对端到端时延的影响（640$\times$480 实时，p50，单位 ms）。infer\_fps 为推理环节的帧率}\label{tab:affinity}
 \begin{tabularx}{\textwidth}{@{}l R R R@{}}
 \toprule
-\headrow \hdr{阶段} & \hdr{默认} & \hdr{绑定 A55} & \hdr{绑定 A76}\\
+\headrow \hdr{阶段} & \hdr{最初} & \hdr{绑定 A55} & \hdr{绑定 A76}\\
 \midrule
 \texttt{run}（NPU）& 71.1 & 71.2 & 24.5\\
 \texttt{letterbox} & 75.5 & 74.9 & 26.4\\
@@ -346,7 +346,7 @@ infer\_fps & 4.3 & 4.6 & 8.6\\
 \end{tabularx}
 \end{table}
 
-核驻留直方图显示，默认与绑定 A55 时推理全部运行于 cpu0，绑定 A76 时全部运行于 cpu4，可见处理器亲和性在 Starry 上得到遵从。将推理绑定至 A76 后，端到端由 162.7\,ms 降至 55.2\,ms，约为原先的三分之一。采集帧率亦由 10.9 升至 17.7\,fps，原因是推理迁出 cpu0 之后，该 A55 核得以服务相机的传输线程。此时相对 Linux 的 25.81\,ms 已收敛到约 2.1 倍，残余差距主要落在 \texttt{letterbox} 的 26.4\,ms 之上，它仍是 CPU 缩放。
+核驻留直方图显示，最初与绑定 A55 时推理全部运行于 cpu0，绑定 A76 时全部运行于 cpu4，可见处理器亲和性在 Starry 上得到遵从。将推理绑定至 A76 后，端到端由 162.7\,ms 降至 55.2\,ms，约为原先的三分之一。采集帧率亦由 10.9 升至 17.7\,fps，原因是推理迁出 cpu0 之后，该 A55 核得以服务相机的传输线程。此时相对 Linux 的 25.81\,ms 已收敛到约 2.1 倍，残余差距主要落在 \texttt{letterbox} 的 26.4\,ms 之上，它仍是 CPU 缩放。
 
 \subsubsection*{以整数路径取回输出}
 
@@ -377,7 +377,7 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
 
 参考机器人的相机以 MJPEG 输出，即逐帧 JPEG 压缩的视频流，须先解码为像素才能交由后续处理。前述各步在 YUYV 模式下由 RGA 直接做色彩转换；改用相机原生的 MJPEG 模式后，这一解码若仍由 CPU 承担，单帧约 25\,ms，会重新成为时延的主项。接入 JPU 后，MJPEG 由硬件解码为 NV12，单帧约 1\,ms，再交 RGA 转色彩并直写 NPU 的输入缓冲，整条 MJPEG$\to$JPU$\to$RGA$\to$NPU 全程零拷贝。由此在机器人实际使用的 MJPEG 模式下，端到端 p50 为 9.06\,ms，约 29\,fps，吞吐仍受相机供帧速率限制，与 YUYV 路径的 9.65\,ms 基本相当。需说明的是，JPU 在此的作用是为相机原生的 MJPEG 模式提供硬件解码，使该步不致退回 CPU 的约 25\,ms，而非相对 YUYV 路径的进一步提速。其驱动实现见第~\ref{sec:kernelopt}~节。
 
-把上述优化叠加起来，差距被逐步压下。模型起初以 640$\times$640 的方形尺寸接收输入，在这一尺寸下，Starry 默认配置的端到端 p50 为 162.7\,ms，仅将推理放置到 A76 大核就降至 55.2\,ms（见表~\ref{tab:affinity}），对应的 Linux 基线为 25.8\,ms。把模型输入改为与相机输出一致的 480$\times$640 后，既省去了对方形输入的填充，也减少了检测头的计算量。图~\ref{fig:ladder} 给出这一输入尺寸下各步优化的端到端时延，默认为 30.6\,ms，叠加整数输出路径与大核放置后降至 11.75\,ms，与 Linux 在同一输入尺寸下的 11.4\,ms 持平；再以 RGA 零拷贝承担色彩转换降至 9.65\,ms，最后由 JPU 在硬件上解码相机原生的 MJPEG，端到端 p50 为 9.06\,ms，约 29\,fps，受相机供帧速率限制。640$\times$640 与 480$\times$640 是同一模型的两种输入尺寸，前者是优化前的方形输入，后者与相机输出一致、省去了填充，各组数应与对应尺寸下的 Linux 基线相比。
+把上述优化叠加起来，差距被逐步压下。模型起初以 640$\times$640 的方形尺寸接收输入，在这一尺寸下，Starry 最初配置的端到端 p50 为 162.7\,ms，仅将推理放置到 A76 大核就降至 55.2\,ms（见表~\ref{tab:affinity}），对应的 Linux 基线为 25.8\,ms。把模型输入改为与相机输出一致的 480$\times$640 后，既省去了对方形输入的填充，也减少了检测头的计算量。图~\ref{fig:ladder} 给出这一输入尺寸下各步优化的端到端时延，最初为 30.6\,ms，叠加整数输出路径与大核放置后降至 11.75\,ms，与 Linux 在同一输入尺寸下的 11.4\,ms 持平；再以 RGA 零拷贝承担色彩转换降至 9.65\,ms，最后由 JPU 在硬件上解码相机原生的 MJPEG，端到端 p50 为 9.06\,ms，约 29\,fps，受相机供帧速率限制。640$\times$640 与 480$\times$640 是同一模型的两种输入尺寸，前者是优化前的方形输入，后者与相机输出一致、省去了填充，各组数应与对应尺寸下的 Linux 基线相比。
 
 \begin{figure}[H]
 \centering
@@ -387,7 +387,7 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
   xbar, xmin=0, xmax=34, bar width=13pt,
   enlarge y limits=0.26,
   xlabel={\sffamily 端到端时延（ms，480$\times$640 输入，p50）},
-  symbolic y coords={＋JPU 硬件解码,＋RGA 零拷贝,＋整数输出与大核,Starry 默认},
+  symbolic y coords={＋JPU 硬件解码,＋RGA 零拷贝,＋整数输出与大核,Starry 最初},
   ytick=data,
   yticklabel style={font=\sffamily\small},
   xlabel style={font=\sffamily\small\color{ink}},
@@ -395,13 +395,13 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
   axis line style={rulecol}, tick style={rulecol},
   clip=false,
 ]
-\addplot[fill=ink,draw=none] coordinates {(30.6,Starry 默认) (11.75,＋整数输出与大核) (9.65,＋RGA 零拷贝) (9.06,＋JPU 硬件解码)};
+\addplot[fill=ink,draw=none] coordinates {(30.6,Starry 最初) (11.75,＋整数输出与大核) (9.65,＋RGA 零拷贝) (9.06,＋JPU 硬件解码)};
 \draw[ochre,semithick,dashed]
-  ({axis cs:11.4,Starry 默认}|-{rel axis cs:0,0}) -- ({axis cs:11.4,Starry 默认}|-{rel axis cs:0,1})
+  ({axis cs:11.4,Starry 最初}|-{rel axis cs:0,0}) -- ({axis cs:11.4,Starry 最初}|-{rel axis cs:0,1})
   node[above,font=\sffamily\scriptsize,ochre]{Linux 11.4};
 \end{axis}
 \end{tikzpicture}
-\caption{480$\times$640 输入下各步优化的端到端时延，自默认的 30.6\,ms 先降至与 Linux 11.4\,ms（赭色虚线）持平的 11.75\,ms，再由硬件零拷贝压到约 9\,ms（受相机供帧速率限制）。末两条对应 YUYV 与相机原生 MJPEG 两种相机模式，端到端相当，JPU 使 MJPEG 模式得以硬件解码而非相对 YUYV 的提速。横轴只覆盖该输入尺寸，640$\times$640 输入的收敛见表~\ref{tab:affinity}}\label{fig:ladder}
+\caption{480$\times$640 输入下各步优化的端到端时延，自最初的 30.6\,ms 先降至与 Linux 11.4\,ms（赭色虚线）持平的 11.75\,ms，再由硬件零拷贝压到约 9\,ms（受相机供帧速率限制）。末两条对应 YUYV 与相机原生 MJPEG 两种相机模式，端到端相当，JPU 使 MJPEG 模式得以硬件解码而非相对 YUYV 的提速。横轴只覆盖该输入尺寸，640$\times$640 输入的收敛见表~\ref{tab:affinity}}\label{fig:ladder}
 \end{figure}
 
 下列三项尝试经测量确认对当前负载没有收益，其原因也指明了各自适用的边界。
