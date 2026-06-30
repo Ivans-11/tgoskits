@@ -53,7 +53,7 @@
 | 设计方案等开发文档 | [`docs/设计方案（初赛）.pdf`](docs/设计方案（初赛）.pdf) 及 `docs/` 下各说明 | ✅ |
 | 项目源代码 | 本仓库内核树、上游合并请求与 `apps/` 应用 | ✅ |
 | 功能、性能与创新性分析（含类似项目对比）| 报告第三节与 [`docs/与类似项目对比分析.md`](docs/与类似项目对比分析.md) | ✅ |
-| 进展汇报幻灯片（含分工、进度与 AI 使用）| [`slides/进展汇报（初赛）.pdf`](slides/进展汇报（初赛）.pdf) | 已成稿，待补真机截图 |
+| 进展汇报幻灯片（含分工、进度与 AI 使用）| [`slides/进展汇报（初赛）.pdf`](slides/进展汇报（初赛）.pdf) | ✅ |
 | 演示视频 | [`video/演示视频说明.md`](video/演示视频说明.md) | ✅ |
 | 多次真实提交记录 | 本仓库提交历史与上游合并请求 | ✅ |
 
@@ -82,8 +82,9 @@
 | USB 串口驱动，机械臂控制器 `/dev/ttyUSB0` | `drivers/usb/` CP210x | [PR #1378](https://github.com/rcore-os/tgoskits/pull/1378)，已合并 |
 | reboot 系统调用，加速 Linux 与 Starry 的切换 | StarryOS 系统调用层 | [PR #1358](https://github.com/rcore-os/tgoskits/pull/1358)，已合并 |
 | rknpu DRM 整合与 GEM 缓冲修复 | `os/StarryOS/.../dev/card1.rs`、`drm.rs` | [PR #1351](https://github.com/rcore-os/tgoskits/pull/1351)、[#1364](https://github.com/rcore-os/tgoskits/pull/1364)，已合并 |
+| 图形与显示内核能力，使 Weston 合成器在 Starry 上运行 | DRM/KMS、evdev 输入、AF_UNIX/AF_NETLINK 套接字、memfd 封印、epoll 与 timerfd | [PR #506](https://github.com/rcore-os/tgoskits/pull/506)、[#509](https://github.com/rcore-os/tgoskits/pull/509)、[#513](https://github.com/rcore-os/tgoskits/pull/513)、[#514](https://github.com/rcore-os/tgoskits/pull/514) 等（#503 至 #516、[#1160](https://github.com/rcore-os/tgoskits/pull/1160)），已合并 |
 | RGA 驱动，`/dev/rga`，对齐 librga 接口 | `drivers/` rockchip-rga | [PR #1388](https://github.com/rcore-os/tgoskits/pull/1388)，开放中 |
-| JPU 驱动，`/dev/mpp_service`，对齐 MPP 接口 | `drivers/vpu/rockchip-jpeg/` | 待提交 |
+| JPU 驱动，`/dev/mpp_service`，对齐 MPP 接口 | `drivers/vpu/rockchip-jpeg/` | [PR #1456](https://github.com/rcore-os/tgoskits/pull/1456)，开放中 |
 | 块设备完成路径容错，中断超时回退轮询 | `os/arceos/modules/axfs-ng/` | 待提交（commit `5c36d90e3`）|
 | PWM 驱动，机械臂与底盘电机 | 机械臂与底盘电机驱动 | 待提交 |
 | profile-rknpu 计时特性，NPU ioctl 分阶段计数 | `card1.rs`（`RKNPU_KPROFILE`）| 待提交 |
@@ -92,7 +93,7 @@
 
 ## 后续工作
 
-系统层面有几处仍可推进。架构感知的调度将依据各核算力自动放置用户态与内核态的线程，免去手动绑核。NPU 的三核可独立工作，而当前的串行点在于设备锁在整个推理期间被持有，一个以每核队列与中断组织的并发完成路径，是进一步提升推理吞吐的结构前提。
+系统层面有几处仍可推进。架构感知的调度将依据各核算力自动放置用户态与内核态的线程，免去手动绑核。NPU 的三核可独立工作，而当前的串行点在于设备锁在整个推理期间被持有，一个以每核队列与中断组织的并发完成路径，是进一步提升推理吞吐的结构前提。本队为运行 Weston 合成器而实现的一组图形与显示内核能力，亦开出一条面向用户侧的方向，在开发板上原生呈现相机画面、检测框与机器人状态的监控界面，并把 Weston 的图层合成由 CPU 改交视觉流水线已用到的同一块 RGA 引擎承担。
 
 机器人应用层面规划了以下方向。
 
