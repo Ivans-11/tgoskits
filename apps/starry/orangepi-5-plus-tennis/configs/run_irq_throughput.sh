@@ -1,7 +1,7 @@
 #!/bin/sh
 # Throughput test for the USERSPACE capture-affinity sidestep (kernel keeps the
 # xHCI completion IRQ on cpu0 — USB_IRQ_TARGET_CPU=None — because routing it to a
-# big core cross-core-deadlocks the xHCI completion path; see RUN_LOG §21f). The
+# big core cross-core-deadlocks the xHCI completion path). The
 # bursty capture supply caps processed fps at ~14 on StarryOS because the whole
 # capture path (USB IRQ + URB worker + libuvc 614KB memcpy) piles on the single
 # loaded boot core cpu0. This test moves only the EXPENSIVE userspace half — the
