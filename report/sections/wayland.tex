@@ -1,0 +1,70 @@
+\section{面向边缘设备的图形与显示支持}\label{sec:wayland}
+
+一台在野外作业的拾取机器人，最终总要有一块屏幕把它正在看到与正在做的事呈现给人，而要让一套
+完整的图形界面在 Starry 上跑起来，远不只是画几个像素那么简单。本队成员洪世金选择以 Weston 14
+作为目标来检验这件事，它是 Wayland 的参考实现。Wayland 是一套显示服务器协议，用来取代历史悠久
+但层层叠加的 X 窗口系统，而所谓显示服务器或合成器，是介于内核与各个图形应用之间的那个进程，它独占
+显示硬件，从各应用收集各自绘制好的窗口缓冲，把它们叠合成一帧整屏画面再交给屏幕，同时把键盘、鼠标
+与触摸的输入分发回正确的窗口。让这样一个合成器在一套新内核上完整启动并接入一个真实客户端，等于
+一次性把 Linux 图形与进程间通信栈的一大片都拽上了台面，它对内核的要求横跨显示输出、输入设备发现、
+套接字传递文件描述符与事件循环四个互不相干的子系统，任何一处不合规，整套界面就立不起来。
+
+\paragraph{合成器依赖的四组内核接口}
+Weston 的四个子系统各自对应一组内核接口。显示后端 drm-backend 经由 libdrm 去操作
+\texttt{/dev/dri/card0}，它要协商设备能力、枚举 KMS（内核态显示模式设置）资源、分配显示缓冲，
+并以原子方式提交一次模式设置与翻页。输入这一面由 libinput 经 libudev 沿 sysfs 遍历去发现
+\texttt{/dev/input/eventN} 节点，再以一组 evdev ioctl 查询各设备的能力并读取事件。协议服务这一面
+由 wayland-server 在一个 AF\_UNIX 流式套接字上监听，接受客户端连接并接收它们提交的窗口缓冲，其中
+最吃紧的是要随消息原子地传递文件描述符。最后，整个合成器靠 epoll 与 timerfd 把上述三路事件汇到
+一个统一的事件循环里轮转。这四面任意一面缺了内核的对应支撑，Weston 要么开不了机，要么开了机也用不了。
+
+\paragraph{缺陷的三个层次与真正的代价}
+把这次适配遇到的问题摊开看，它们落在三个深浅不同的层次上，而这一分层正是这项工作的主轴。
+\begin{itemize}
+\item \textbf{接口缺失}。最浅的一层是接口干脆不存在，打开即以明确的错误码回绝，例如 drm-backend 发现 \texttt{/dev/dri/card0} 节点根本没有，evdev 的 \texttt{EVIOCGPROP} 与 \texttt{EVIOCGABS} 两个 ioctl 未实现，创建 \texttt{NETLINK\_ROUTE} 套接字直接返回 \texttt{EAFNOSUPPORT}，照着错误码补齐即可。
+\item \textbf{貌合神离的隐式约定}。难缠的是第二层，接口看上去都在，编译通过、打开也成功，行为却是错的且不报任何错。\texttt{/sys/class/input/} 必须是指向真实设备路径的符号链接，libudev 要靠 \texttt{realpath()} 与 \texttt{dirname()} 沿它回溯，做成普通目录回溯就在中途断掉；\texttt{/dev/input/eventN} 的次设备号必须自 \texttt{EVDEV\_MINOR\_BASE} 即 64 起编，否则 libinput 以 \texttt{fstat()} 的 \texttt{st\_rdev} 反查 \texttt{/sys/dev/char/} 时对不上号；memfd 的密封语义、以及套接字传递文件描述符时的字节标记，都属于这一类约定。这一层的失败是沉默的，libinput 只报一句跳过未配置的输入设备，要查出真因须回头去读用户态库的源码。
+\item \textbf{并发与性能}。最深的一层不挡启动却让人用不下去，epoll 的水平触发注册无条件唤醒等待方，造出每秒约 500 次的空转忙循环，输入若退回内核节拍驱动会带来约 16 毫秒的延迟，再叠上单核下中断上下文里的锁争用。
+\end{itemize}
+真正昂贵的从来不是写补丁，而是跨越 Weston、libdrm 与 libinput、libudev、sysfs 与 evdev 直到内核这五层，把一条条没有写在任何文档里的隐式约定逐一发掘出来。
+
+\paragraph{逐层补齐的内核改动}
+据此推进的内核改动覆盖了上述每一个面。DRM/KMS 这一面补上了 \texttt{/dev/dri/card0} 节点，
+既支持传统的 SETCRTC 路径，也支持原子化的 KMS 模式设置
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/506}{\#506}}），并以按缓冲粒度分配的 GEM dumb
+缓冲与带引用计数的 mmap 承载像素（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/514}{\#514}}）。
+输入这一面把多个 \texttt{eventN} 设备如实暴露出来，并实现了
+\texttt{EVIOCGPROP} 与 \texttt{EVIOCGABS}（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/513}{\#513}}），
+设备发现所依赖的 AF\_NETLINK 上的 rtnetlink、uevent 与 genl 几路也一并补全
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/512}{\#512}}）。第二层那些隐式约定集中落在
+一处修订里，sysfs 的类目录改为符号链接、evdev 次设备号改从 64 起编、并预先在 \texttt{/run/udev}
+下播下 udev 的初始化种子文件，libudev 才肯认为设备已配置好
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/508}{\#508}}）。memfd 的密封不能只守在
+\texttt{fcntl} 一处，\texttt{F\_SEAL\_SHRINK}、\texttt{F\_SEAL\_GROW} 与 \texttt{F\_SEAL\_WRITE}
+的检查被分布到截断、映射与写入各条路径上，缺一处密封就形同虚设
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/507}{\#507}} 与
+\textbf{\href{https://github.com/rcore-os/tgoskits/pull/515}{\#515}}）。Weston 的整体启动收尾、把输入接到
+中断唤醒以压下延迟、以及让 AF\_UNIX 流式套接字按字节标记原子地携带控制消息把文件描述符送达，
+都在一处合并里完成（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/509}{\#509}}）。最深的并发一层，
+则由把 epoll 的水平触发改为如实排干就绪事件来收敛那条 500 赫兹的空转
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/504}{\#504}}），并补上 timerfd 这一计时事件源
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/503}{\#503}}）。
+
+\paragraph{运行与验证}
+这套支撑最终被验证为可用。Weston 以 DRM 加 pixman 的后端起来后，一个客户端能连上来，一个 GTK4
+程序能把界面绘制出来并经 VNC 远程看到，一个自动化的用例会跑出 \texttt{WAYLAND\_TEST\_PASSED} 这一
+判据，并在四种体系结构上一致通过（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/1160}{\#1160}}）。
+为防回归，还引入了以黄金帧做视觉比对的持续集成哨兵守住这条线，连 Xwayland 也跑通了 xeyes 这个
+经典的 X 程序，使既有的 X 应用得以在 Wayland 之上运行
+（\textbf{\href{https://github.com/rcore-os/tgoskits/pull/516}{\#516}}）。这里必须如实交代它现在所处的位置，
+以上全部运行在 QEMU 的 virtio-gpu 之上，由 pixman 做纯软件合成，并没有点亮开发板那块物理屏幕上的
+真实显示控制器，软件渲染的画面经 VNC 间接呈现，而非由板上的显示硬件直接扫描输出。
+
+\paragraph{面向机器人的延伸方向}
+把图形栈在 Starry 上立起来，本身是一项与机器人视觉流水线相互独立的系统级贡献，但它顺带为机器人
+开出了一条用户侧的方向。有了合成器与窗口客户端这条通路，就可以在设备上做一个监控与可视化界面，
+把实时相机画面连同检测框与机器人状态一起显示出来，让现场的人直接看到它正在追踪哪一颗球、机械臂处在
+哪一步。更进一步，pixman 的纯 CPU 合成完全可以换成用 RGA 这块二维加速引擎来做，而它正是视觉流水线
+里负责色彩转换与缩放的同一块硬件（\ref{sec:rga}），让显示合成与图像准备复用同一个加速器。这两件事
+都留作后续工作。
+
+\repfig{wayland-weston.png}{Weston 14 在 Starry 上以 DRM 加 pixman 软件后端启动，客户端经 AF\_UNIX 套接字连入并提交窗口缓冲，输入沿 libinput 与 libudev 自 sysfs 与 evdev 发现，整套事件经 epoll 与 timerfd 汇聚轮转}{fig:wayland}

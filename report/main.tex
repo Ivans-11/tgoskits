@@ -64,6 +64,7 @@
 
 % 图与图表
 \usepackage{graphicx}
+\graphicspath{{../docs/figures/}{./diagrams/}}
 \usepackage{float}
 \usepackage{caption}
 \captionsetup{font=small,labelfont={sf,bf,color=ink},labelsep=quad,skip=6pt}
@@ -72,6 +73,15 @@
 \usepgfplotslibrary{statistics}
 \usepackage{tikz}
 \usetikzlibrary{calc,arrows.meta,positioning}
+
+% 图：存在则插图，缺失则画占位框，便于在图片生成前也能编译
+\newcommand{\repfig}[3]{%
+  \begin{figure}[H]\centering
+  \IfFileExists{../docs/figures/#1}{\includegraphics[width=\textwidth]{#1}}{%
+    \IfFileExists{./diagrams/#1}{\includegraphics[width=\textwidth]{#1}}{%
+      \setlength{\fboxsep}{0pt}%
+      \fcolorbox{rulecol}{tintbox}{\begin{minipage}[c][3.6cm][c]{0.96\textwidth}\centering\sffamily\color{ink!55}\small 示意图占位\quad\texttt{#1}\end{minipage}}}}%
+  \caption{#2}\label{#3}\end{figure}}
 
 % 代码
 \usepackage{listings}
@@ -150,7 +160,7 @@
 
 迁移工作分两个层次。前者补齐 Starry 运行该负载所缺的系统能力，包括块设备完成路径的容错、机械臂控制器所用的 USB 串口驱动、底盘电机所用的 PWM 控制与 reboot 系统调用，以及 Starry 此前没有的 RGA（二维图像缩放与色彩转换）和 JPU（JPEG 硬件解码）两个加速器驱动，使同一份可执行文件在 Starry 上得到与 Linux 一致的检测结果。后者建立可测量的剖析口径，在同一份程序上以 Linux 为基线逐阶段定位开销，并以一组优化将端到端推理时延逐步压低，最终在与相机输出一致的输入尺寸下达到 11.75\,ms，与 Linux 的 11.4\,ms 处于同一水平。
 
-工作过程中形成的若干通用能力已在内核中实现，其中基于硬件性能监控单元的原生 perf 工具与 RGA 驱动已作为合并请求进入主线仓库。
+工作过程中形成的若干通用能力已在内核中实现，其中基于硬件性能监控单元的原生 perf 工具与 RGA 驱动已作为合并请求进入主线仓库；面向边缘设备图形显示的一组内核能力，涵盖显示、输入、套接字与事件循环，亦已合并并使参考的 Weston 合成器得以在 Starry 上运行。
 
 \newpage
 {\sffamily\bfseries\large\color{ink}目录}
@@ -168,27 +178,56 @@
 
 目前此类应用大多构建于 Linux 之上。Linux 凭借完善的驱动与软件生态显著降低了开发门槛，但其面向通用场景的体系结构，在边缘设备上也引入了若干并非必要的开销，例如冗余的系统服务、较长的执行路径、较为复杂的调度，以及相对可观的内存占用。在算力受限的条件下，这些开销会反映到机器人的端到端时延与抖动之上。一个针对该场景深度定制的操作系统，因而有机会更充分地释放硬件性能。
 
-Starry 是一个以 Rust 语言实现、构建于 ArceOS 组件之上的操作系统。本工作的目标是将上述网球拾取机器人的内核由 Linux 迁移至 Starry，在 RK3588 开发板上实现或补全运行所需的系统调用、文件接口与关键外设驱动，打通基于 NPU 的推理链路，并以 Linux 为基线，在端到端时延、启动速度、推理帧率、资源占用与能耗比等方面开展系统级优化。整体工作沿三个阶段推进，先在开发板上打通推理链路，再补齐机器人本体的感知与执行驱动以完成实际拾球，最后以 Linux 为基线开展性能优化，分别对应本文第~\ref{sec:features}~节与第~\ref{sec:opt}~节。在这一过程中，我们也把 AI 辅助开发本身作为一项方法上的产出加以总结，见第~\ref{sec:ai}~节。
+Starry 是一个以 Rust 语言实现、构建于 ArceOS 组件之上的操作系统。本工作的目标是将上述网球拾取机器人的内核由 Linux 迁移至 Starry，在 RK3588 开发板上实现或补全运行所需的系统调用、文件接口与关键外设驱动，打通基于 NPU 的推理链路，并以 Linux 为基线，在端到端时延、启动速度、推理帧率、资源占用与能耗比等方面开展系统级优化。
+
+本文把这台机器人当作一个完整的系统来呈现。第~\ref{sec:overview-sys}~节给出硬件平台与端到端数据通路；第~\ref{sec:vision}~节自相机到 NPU 逐一展开视觉感知流水线的各个部件；第~\ref{sec:body}~节是底盘、机械臂与控制状态机这一机器人本体；第~\ref{sec:features}~节汇集支撑其运行的系统能力；第~\ref{sec:opt}~节以 Linux 为基线开展性能优化。在视觉负载之外，第~\ref{sec:wayland}~节是一项面向边缘设备图形显示的系统级工作。我们也把 AI 辅助开发本身作为一项方法上的产出加以总结，见第~\ref{sec:ai}~节。
 
 图~\ref{fig:journey} 概括了本工作的优化历程，从最初配置出发逐步逼近 Linux，各步的具体数据在第~\ref{sec:opt}~节展开。
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=\textwidth]{../docs/figures/optimization-journey-light.png}
-\caption{优化历程示意。前段为 640$\times$640 输入（对照 Linux 25.8\,ms），自约 30.6\,ms 起改用与相机输出一致的 480$\times$640 输入（对照 Linux 11.4\,ms），故曲线后段的下降兼含输入尺寸的变化}\label{fig:journey}
-\end{figure}
+\repfig{optimization-journey-light.png}{优化历程示意。前段为 640$\times$640 输入（对照 Linux 25.8\,ms），自约 30.6\,ms 起改用与相机输出一致的 480$\times$640 输入（对照 Linux 11.4\,ms），故曲线后段的下降兼含输入尺寸的变化}{fig:journey}
 
 为使两侧的比较具有意义，全篇采用同一份遵循 Linux ABI 的可执行文件。该文件在 Linux 与 Starry 上加载相同的推理运行时库 \texttt{librknnrt.so} 与相同的模型权重，使观察到的差异尽可能归结于操作系统本身。
 
-测试硬件为 OrangePi 5 Plus 开发板，主控为瑞芯微 RK3588。其处理器采用大小核异构结构（ARM big.LITTLE），含四个 Cortex-A55 小核，主频 1.8\,GHz，以及四个 Cortex-A76 大核，主频 2.256\,GHz。片上集成三核 NPU，单核主频 1.0\,GHz；另有硬件 RGA（Raster Graphic Accelerator，瑞芯微的二维图形加速引擎，可完成图像缩放、色彩空间转换与图层拼接等操作）与硬件 JPU（此处指 RK3588 的硬件 JPEG 解码单元 VDPU720，设备地址 \texttt{jpegd@fdb90000}）。内存为 8\,GB LPDDR4X。
+%
+\section{基础版本与增量贡献}\label{sec:base}
+
+本工作在若干开源项目的基础上展开，相关依赖在首次提交中即予标注。操作系统内核基于 \href{https://github.com/rcore-os/tgoskits}{rcore-os/tgoskits} 的 dev 分支（commit \texttt{73409e079}，2026-06-22）；机器人应用移植自 \href{https://github.com/pengzechen/aka-rk3588}{pengzechen/aka-rk3588}，我们将其改造为一个 tgoskits 应用；模型转换使用 airockchip/rknn-toolkit2。本队在此基础上的增量贡献见表~\ref{tab:contrib}，其中多项已作为合并请求提交至上游仓库 rcore-os/tgoskits。
+
+\begin{table}[H]
+\centering
+\caption{本队的增量贡献，PR 均提交至上游仓库 rcore-os/tgoskits}\label{tab:contrib}
+\begin{tabularx}{\textwidth}{@{}l X l@{}}
+\toprule
+\headrow \hdr{贡献} & \hdr{说明} & \hdr{上游提交}\\
+\midrule
+硬件 PMU perf & 按任务到大小核的原生 perf & PR \#1395，已合并\\
+USB 串口驱动 & 机械臂控制器的串口通信 & PR \#1378，已合并\\
+reboot 系统调用 & 加速 Linux 与 Starry 的切换 & PR \#1358，已合并\\
+rknpu 整合与缓冲修复 & DRM ioctl 整合、GEM 映射修复 & PR \#1351、\#1364，已合并\\
+图形与显示内核能力 & DRM/KMS、输入、套接字与事件循环，支撑 Weston & PR \#503 至 \#516、\#1160 等，已合并\\
+RGA 驱动 & \texttt{/dev/rga}，对齐 librga 接口 & PR \#1388，开放中\\
+JPU 驱动 & \texttt{/dev/mpp\_service}，对齐 MPP 接口 & PR \#1456，开放中\\
+块设备完成路径容错 & 使开发板得以稳定挂载启动 & 待提交\\
+PWM 驱动 & 底盘电机的 sysfs PWM 控制 & 待提交\\
+profile-rknpu 计时特性 & NPU ioctl 各阶段计数 & 待提交\\
+大小核负载均衡器（原型）& 架构感知调度的基础 & 待提交\\
+剖析工具链与基准应用 & 同一 ELF 的可测量剖析 & 随应用提交\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+%
+\section{系统总览}\label{sec:overview-sys}
+
+这台机器人由相机持续采集图像，经预处理后送入片上 NPU 运行 YOLOv8 检测网球，控制状态机据检测结果驱动差速底盘趋近目标、指挥机械臂抓取，再寻找回收桶并放球，如此往复构成一个从感知到执行的闭环。整机的硬件部件、片上的计算单元与其上的软件分层之间的关系见图~\ref{fig:sysoverview}。
+
+\repfig{sys-overview.png}{网球拾取机器人系统总览，左侧为本体部件，中部为 RK3588 主控芯片的计算单元，右侧为 Starry 上的软件分层，一条数据流自相机采集贯穿推理与决策直至执行器动作}{fig:sysoverview}
+
+测试硬件为 OrangePi 5 Plus 开发板，主控为瑞芯微 RK3588。其处理器采用大小核异构结构（ARM big.LITTLE），含四个 Cortex-A55 小核，主频 1.8\,GHz，以及四个 Cortex-A76 大核，主频 2.256\,GHz。片上集成三核 NPU，单核主频 1.0\,GHz；另有硬件 RGA（Raster Graphic Accelerator，瑞芯微的二维图形加速引擎，可完成图像缩放、色彩空间转换与图层拼接等操作）与硬件 JPU（此处指 RK3588 的硬件 JPEG 解码单元 VDPU720，设备地址 \texttt{jpegd@fdb90000}）。内存为 8\,GB LPDDR4X。这些计算单元彼此独立，能否让感知、解码与推理各自落到合适的硬件上而不彼此争抢，是本工作性能能否逼近 Linux 的关键。
 
 机器人程序的视觉流水线由若干阶段串联构成。相机的输出有两种格式，YUYV 是未压缩的像素流，只需做色彩空间转换即可得到 RGB；MJPEG 是逐帧 JPEG 压缩的视频流，需先经 JPEG 解码再转换。得到 RGB 后，图像经等比缩放与填充得到模型输入，随后写入 NPU 完成推理，取回输出做后处理得到检测框，最终交由控制环驱动机械臂与底盘完成拾取。整条流程如图~\ref{fig:workflow} 所示，从相机采集到机械臂执行构成一个闭环。表~\ref{tab:stages} 给出各阶段的命名与职责，是后文逐阶段数据与剖析所用的统一口径。两侧加载的是同一份模型权重，因此在功能层面具备可比性。所谓 RKNN，是瑞芯微 NPU 所用的运行时与模型格式，常见框架训练出的模型须先经 rknn-toolkit2 工具转换为该格式方可在 NPU 上加载。
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=\textwidth]{../docs/figures/app-workflow.png}
-\caption{用户态应用的完整工作流程，相机采集经图像预处理与 NPU 推理得到网球位置，控制状态机据此驱动机械臂与底盘完成拾取}\label{fig:workflow}
-\end{figure}
+\repfig{app-workflow.png}{用户态应用的完整工作流程，相机采集经图像预处理与 NPU 推理得到网球位置，控制状态机据此驱动机械臂与底盘完成拾取}{fig:workflow}
 
 \begin{table}[H]
 \centering
@@ -208,48 +247,41 @@ Starry 是一个以 Rust 语言实现、构建于 ArceOS 组件之上的操作�
 \end{table}
 
 %
+\section{视觉感知流水线}\label{sec:vision}
+
+视觉感知是这台机器人最重的负载，也是它与边缘智能这一主题最直接相关的部分。一帧图像自相机进入，经解码、缩放、推理与后处理，最终化为一个网球的位置。这一路上的每一步都可能落到 CPU 上拖慢整体，也都可对应到 RK3588 的一个专用单元。下文自相机起，逐一展开这条流水线上的部件，先讲清各自的架构，再说明本队为在 Starry 上把它跑通、跑快所做的工作，各部件之间如何共享内存以避免拷贝则集中在第~\ref{sec:dmaheap}~节。
+
+\repfig{vision-pipeline.png}{相机到控制的视觉流水线，各处理阶段自左向右串联，JPU、RGA 与 NPU 三者读写同一段共享缓冲，阶段之间不再发生内存拷贝}{fig:vispipe}
+
+\input{sections/vision-camera}
+\input{sections/vision-jpu}
+\input{sections/vision-rga}
+\input{sections/vision-npu}
+\input{sections/vision-dmaheap}
+
+%
+\section{机器人本体与控制}\label{sec:body}
+
+视觉给出网球的位置之后，机器人要靠本体的底盘与机械臂把球真正拾起。底盘负责趋近，机械臂负责抓取与释放，二者由一个控制状态机按当下的感知结果统一调度。下文展开这三部分，它们把第~\ref{sec:vision}~节得到的检测结果转化为电机与舵机的动作，闭合从感知到执行的回路。
+
+\input{sections/body-chassis}
+\input{sections/body-arm}
+\input{sections/body-fsm}
+
+%
 \section{支撑机器人运行的系统能力}\label{sec:features}
 
-将机器人程序在 Starry 上从无到有地跑起来，需要补齐一连串系统能力。本节介绍其中的块设备处理、外设驱动与系统调用，对应评审的第一与第二阶段，与性能优化直接相关的加速器驱动则在第~\ref{sec:opt}~节介绍。
+把机器人程序在 Starry 上从无到有地跑起来，除了视觉与本体的各部件驱动之外，还需要一连串底层的系统能力。从开发板上电到挂载根文件系统，从线程在大小核上的放置，到可测量优化效果的性能剖析，再到与机械臂控制器通信和在两套系统间快速切换，这些能力共同构成了机器人得以稳定运行与持续迭代的地基。
 
-\subsection{启动与根文件系统的接入}
-
-将开发板由上电运行至挂载根文件系统，是后续一切工作的前提。Starry 自 SD 卡挂载与 Linux 相同的 ext4 根文件系统，但在注册块设备之后，启动随即停滞。
-
-经排查，相关中断的路由与使能均无误，但该板的 dwmmc 控制器（DesignWare 的 SD/eMMC 主机控制器 IP）在完成一次数据传输后未能稳定拉起完成中断，因而判定问题在控制器一侧。块设备运行时以中断驱动方式等待该完成信号，一旦信号缺失便会一直等待下去，第一次 ext4 读取因此无法返回。
-
-我们在块设备的完成路径上加入了对中断可用性的判定与回退。当一次完成等待在限定时间内未等到中断时，运行时即判定该设备的完成中断当前不可用，转而以轮询方式确认传输是否结束，并对该设备后续的传输沿用这一方式，从而避免缺失的中断令挂载过程停滞。对于中断正常的设备，完成等待在中断到达时立即返回，不引入额外开销。引入这一处理之后，开发板能够稳定挂载根文件系统并进入 shell。
-
-\begin{lstlisting}[caption={块设备完成路径的中断可用性判定与回退（节选）},captionpos=b]
-// 完成等待加入中断可用性判定，限定时间内未等到完成中断，
-// 即判定该设备中断当前不可用，转为轮询确认传输结束
-match wait_for_completion(&dev, deadline) {
-    Ok(()) => { /* 中断如期到达，立即返回 */ }
-    Err(IrqUnavailable) => {
-        dev.use_polling_completion();   // 该设备后续改用轮询
-        poll_until_complete(&dev);
-    }
-}
-\end{lstlisting}
-
-\subsection{外设驱动与系统调用}
-
-机器人要真正完成拾球，本体的感知与执行须先接齐。相机以 USB 视频设备的形式接入，Starry 已有的 USB 主机栈在 USB3 端口上完成相机的枚举与取流，图像由此进入流水线。机械臂一侧的控制器经一颗 CP210x USB 转串口芯片与主机相连，我们为此实现了 USB 串口驱动，以 \texttt{/dev/ttyUSB0} 暴露一个串口设备，机器人程序据此读回机械臂状态并下发控制指令，从而完成定位与抓取。
-
-底盘使用两路直流电机，经 DRV8833 一类 H 桥驱动板接入开发板。每个电机由两根方向控制线决定正转、反转与停止，因而需要四路可输出占空比的 PWM 信号。为使机器人程序在 Linux 与 Starry 上使用同一套控制路径，我们在 Starry 的 \texttt{/sys/class/pwm} 中补齐与 Linux 兼容的 sysfs PWM 接口，并在 RK3588 平台侧接入相应的时钟、引脚复用与寄存器配置，使 OrangePi 5 Plus 40 针排针上可用的 PWM 通道能够被导出、设置周期与占空比、启停。
-
-开发初期仅有一块置于远端的开发板，需要在 Linux 与 Starry 之间反复切换以验证同一份程序。为缩短这一回路，我们实现了 reboot 系统调用，使两套系统之间的切换由人工插拔变为一条命令即可完成，明显提高了迭代效率。
-
-\subsection{NPU 推理链路的接入}
-
-视觉推理依赖片上 NPU。其设备节点与驱动是 StarryOS 已有的部分，我们将其在本负载上调通，以 rknn-toolkit2 将 YOLOv8 模型转换为 RKNN 格式在板上加载。为观察内核侧的开销，我们在该路径上加入了一个可选的计时特性，详见第~\ref{sec:profiling}~节，并修复了显存缓冲对象（GEM，图形子系统中用于管理这类缓冲的机制）在销毁与映射环节的若干问题，例如映射时的缺页处理与销毁时的引用计数，二者都会导致下一次推理失败。首次推理在固定图片输入下给出的检测结果与 Linux 完全一致，表明迁移之后模型与运行时的行为正确。
-
-经过本节的工作，机器人从相机感知到底盘运动与机械臂执行的完整回路在 Starry 上跑通。流水线还依赖 RGA 与 JPU 两个硬件加速器，Starry 此前并不支持它们，其驱动由本队实现，因与性能优化直接相关，放在第~\ref{sec:kernelopt}~节介绍。
+\input{sections/support-boot}
+\input{sections/support-sched}
+\input{sections/support-perf}
+\input{sections/support-serial-reboot}
 
 %
 \section{性能优化}\label{sec:opt}
 
-推理链路打通之后，工作转入以 Linux 为基线的性能优化，对应评审的第三阶段。本节先建立可测量的剖析口径与工具，再给出两侧的性能概览与差距来源，随后分别从用户态与内核侧展开优化。
+推理链路打通、各部件就位之后，工作转入以 Linux 为基线的性能优化，对应评审的第三阶段。本节先建立可测量的剖析口径与工具，再给出两侧的性能概览与差距来源，随后分别从用户态与内核侧展开优化。
 
 \subsection{剖析方法与测量工具}\label{sec:profiling}
 
@@ -257,7 +289,7 @@ match wait_for_completion(&dev, deadline) {
 
 应用层在每次推理上记录由相机帧到达主机至检测结果就绪的全链路时延，并给出 p50、p95、p99、p99.9 与 max 各分位，同时以逐帧 CSV 导出供离线分析。冷启动路径单独记录，将从进程启动到首次推理完成的时间拆分为模型初始化、采集初始化、首帧等待与首次推理四段。我们还把拷贝路径与零拷贝路径以同一前端编译为两个二进制，构成输入输出方式的 A/B 对照；所谓零拷贝，是让一段缓冲在各阶段之间不再被复制，而由硬件直接写入下游缓冲。NPU 内部的逐算子耗时以一次性诊断的方式采集，默认关闭，以免扰动 \texttt{run} 的主分位（p50、p95 等）数据。内核侧则加入一个可选的计时特性，以无锁原子计数聚合与 NPU 相关 ioctl 各阶段的调用次数与耗时，将原本只能推测的缓存同步与提交开销转化为可测量的内核耗时。
 
-为在 CPU 侧获得更细的归因，我们在 Starry 上实现了一套基于硬件性能监控单元（PMU，CPU 内提供周期、指令、缓存与分支等事件计数的部件）的原生 perf 工具，它对标 Linux 的 perf，读取这些硬件计数器对程序做性能剖析。该工具由按任务采集起步，扩展到对称多处理下的按核采集，再到感知大小核的形态，在两个簇上分别配置各自的 PMU 并对计数器做必要的复用与按核扇出，相关代码已作为合并请求 \href{https://github.com/rcore-os/tgoskits/pull/1395}{\#1395} 提交。该工具在本工作中有三处用途。
+为在 CPU 侧获得更细的归因，我们在 Starry 上实现了一套基于硬件性能监控单元的原生 perf 工具，其架构与实现见第~\ref{sec:perf}~节。该工具在本工作中有三处用途。
 \begin{itemize}
 \item 用每周期指令数（IPC，指单位时钟周期内执行完成的指令条数，越高越接近算力上限，此处并非进程间通信）与缓存计数，判断负载受限于计算还是访存。
 \item 把各阶段的开销落到周期与指令的尺度上。
@@ -322,7 +354,7 @@ NPU 调频 & ondemand 按需 \emph{vs} performance 最高频 & 19.30 \emph{vs} 1
 \end{tabularx}
 \end{table}
 
-差距集中在单个 A55 小核上的用户态工作，主要是缩放（\texttt{letterbox}）、输出张量重排（\texttt{outputs\_get}）与色彩空间转换（\texttt{decode}）这几步。其成因在于线程的放置。Starry 的运行队列在派生与唤醒线程时将其置于当前核，且默认没有负载均衡，而机器人程序自身未设置处理器亲和性（即未把线程绑定到指定的 CPU 核运行），于是采集、解码、缩放与推理提交全部落在 cpu0（一个 A55 小核）之上并相互串行。线程放置造成的串行是差距的一层原因，另一层是缩放等步骤尚未用上 RGA 等硬件加速器而仍由 CPU 承担。后续的优化分别针对这两层展开。
+差距集中在单个 A55 小核上的用户态工作，主要是缩放（\texttt{letterbox}）、输出张量重排（\texttt{outputs\_get}）与色彩空间转换（\texttt{decode}）这几步。其成因在于线程的放置，第~\ref{sec:sched}~节已说明 Starry 的运行队列在派生与唤醒线程时将其置于当前核且默认没有负载均衡，而机器人程序自身未设置处理器亲和性，于是采集、解码、缩放与推理提交全部落在 cpu0（一个 A55 小核）之上并相互串行。线程放置造成的串行是差距的一层原因，另一层是缩放等步骤尚未用上 RGA 等硬件加速器而仍由 CPU 承担。后续的优化分别针对这两层展开。
 
 \subsection{用户态优化}\label{sec:useropt}
 
@@ -350,7 +382,7 @@ infer\_fps & 4.3 & 4.6 & 8.6\\
 
 \subsubsection*{以整数路径取回输出}
 
-机器人所用的单类别检测模型，其输出原本以浮点方式取回。NPU 给出的输出是 INT8 整数，取回时需乘以量化尺度还原为浮点，这一步称为反量化。该模型每帧在输出网格上约有四十万个待还原的数值，其中绝大多数对应没有目标的背景。我们改为以整数方式取回原始输出，先在整数域用阈值筛掉这些背景单元，只对少数存活的单元才做反量化。由于反量化是单调变换，在整数域比较置信度与在浮点域等价，结果不受影响。如此每帧的反量化数量由约四十万降到数十，输出获取由约 12\,ms 降至约 1\,ms。结合大核放置与 480$\times$640 输入，端到端 p50 达到 11.75\,ms（见图~\ref{fig:ladder}），且在全部 285 张测试图片上检测结果与浮点路径逐一一致，没有精度损失。
+机器人所用的单类别检测模型，其输出原本以浮点方式取回。NPU 给出的输出是 INT8 整数，取回时需乘以量化尺度还原为浮点，这一步称为反量化。该模型每帧在输出网格上约有四十万个待还原的数值，其中绝大多数对应没有目标的背景。我们改为以整数方式取回原始输出，先在整数域用阈值筛掉这些背景单元，只对少数存活的单元才做反量化。由于反量化是单调变换，在整数域比较置信度与在浮点域等价，结果不受影响。如此每帧的反量化数量由约四十万降到数十，输出获取由约 12\,ms 降至约 1\,ms。结合大核放置与 480$\times$640 输入，端到端 p50 达到 11.75\,ms（见图~\ref{fig:ladder}），且在全部 285 张测试图片上检测结果与浮点路径逐一一致，没有精度损失。这一整数路径的实现细节见第~\ref{sec:npu}~节。
 
 与之配合的还有两处模型层面的准备。一是把模型按 480\,$\times$\,640 的实际输入尺寸导出，使其与相机输出一致，相对 640\,$\times$\,640 的方形输入省去了填充并减少约四分之一的检测头计算量。
 
@@ -371,11 +403,11 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
 
 \subsubsection*{以 RGA 承担解码与缩放}
 
-在缩放迁往大核之后，把相机帧由 YUYV 转为 RGB 的色彩空间转换成为 CPU 上最高的一项。RGA 既能承担这一转换，也能承担缩放与填充，还能把结果直接写入 NPU 的输入缓冲，从而把原本分离的解码、缩放与输入设置合并为一步。这里走的是真正的零拷贝路径，也就是让 RGA 直接写入 NPU 的输入缓冲，各阶段之间不再发生内存拷贝。其前提是 NPU 在关闭 IOMMU 的情况下运行。IOMMU 是设备侧的地址翻译部件，为外设提供从设备地址到物理地址的映射，将其关闭后外设直接以物理地址访存，于是 RGA 写出的物理缓冲可被 NPU 原样读取。经此一步，解码 p50 为 0.776\,ms，输入设置降为零，检测结果完全一致。让这条路径在开发板上真正跑通，依赖于我们为 Starry 实现的 RGA 驱动，其实现见第~\ref{sec:kernelopt}~节。
+在缩放迁往大核之后，把相机帧由 YUYV 转为 RGB 的色彩空间转换成为 CPU 上最高的一项。RGA 既能承担这一转换，也能承担缩放与填充，还能把结果直接写入 NPU 的输入缓冲，从而把原本分离的解码、缩放与输入设置合并为一步。这里走的是真正的零拷贝路径，其前提与实现见第~\ref{sec:rga}~节与第~\ref{sec:dmaheap}~节。经此一步，解码 p50 为 0.776\,ms，输入设置降为零，检测结果完全一致，自相机采集到控制指令就绪的整条回路 p50 为 9.65\,ms，受相机约 28\,fps 的供帧速率限制。
 
 \subsubsection*{以 JPU 在硬件上解码 MJPEG}
 
-参考机器人的相机以 MJPEG 输出，即逐帧 JPEG 压缩的视频流，须先解码为像素才能交由后续处理。前述各步在 YUYV 模式下由 RGA 直接做色彩转换；改用相机原生的 MJPEG 模式后，这一解码若仍由 CPU 承担，单帧约 25\,ms，会重新成为时延的主项。接入 JPU 后，MJPEG 由硬件解码为 NV12，单帧约 1\,ms，再交 RGA 转色彩并直写 NPU 的输入缓冲，整条 MJPEG$\to$JPU$\to$RGA$\to$NPU 全程零拷贝。由此在机器人实际使用的 MJPEG 模式下，端到端 p50 为 9.06\,ms，约 29\,fps，吞吐仍受相机供帧速率限制，与 YUYV 路径的 9.65\,ms 基本相当。需说明的是，JPU 在此的作用是为相机原生的 MJPEG 模式提供硬件解码，使该步不致退回 CPU 的约 25\,ms，而非相对 YUYV 路径的进一步提速。其驱动实现见第~\ref{sec:kernelopt}~节。
+参考机器人的相机以 MJPEG 输出，即逐帧 JPEG 压缩的视频流，须先解码为像素才能交由后续处理。前述各步在 YUYV 模式下由 RGA 直接做色彩转换；改用相机原生的 MJPEG 模式后，这一解码若仍由 CPU 承担，单帧约 25\,ms，会重新成为时延的主项。接入 JPU 后，MJPEG 由硬件解码为 NV12，单帧约 1\,ms，再交 RGA 转色彩并直写 NPU 的输入缓冲，整条 MJPEG$\to$JPU$\to$RGA$\to$NPU 全程零拷贝。由此在机器人实际使用的 MJPEG 模式下，端到端 p50 为 9.06\,ms，约 29\,fps，吞吐仍受相机供帧速率限制，与 YUYV 路径的 9.65\,ms 基本相当。需说明的是，JPU 在此的作用是为相机原生的 MJPEG 模式提供硬件解码，使该步不致退回 CPU 的约 25\,ms，而非相对 YUYV 路径的进一步提速，其驱动实现见第~\ref{sec:jpu}~节。
 
 把上述优化叠加起来，差距被逐步压下。模型起初以 640$\times$640 的方形尺寸接收输入，在这一尺寸下，Starry 最初配置的端到端 p50 为 202.9\,ms，仅将推理放置到 A76 大核就降至 65.1\,ms（见表~\ref{tab:affinity}），对应的 Linux 基线为 25.8\,ms。把模型输入改为与相机输出一致的 480$\times$640 后，既省去了对方形输入的填充，也减少了检测头的计算量。图~\ref{fig:ladder} 给出这一输入尺寸下各步优化的端到端时延，最初为 30.6\,ms，叠加整数输出路径与大核放置后降至 11.75\,ms，与 Linux 在同一输入尺寸下的 11.4\,ms 持平；再以 RGA 零拷贝承担色彩转换降至 9.65\,ms，最后由 JPU 在硬件上解码相机原生的 MJPEG，端到端 p50 为 9.06\,ms，约 29\,fps，受相机供帧速率限制。640$\times$640 与 480$\times$640 是同一模型的两种输入尺寸，前者是优化前的方形输入，后者与相机输出一致、省去了填充，各组数应与对应尺寸下的 Linux 基线相比。
 
@@ -430,70 +462,25 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
 \end{tabularx}
 \end{table}
 
-不降频的取舍也有代价，体现在尾部而非中位。Starry 的端到端时延偶有数百毫秒的停顿，最坏一帧达 487\,ms，而 Linux 为 22\,ms，并因此丢弃约一成的帧；其根源是多核之间的唤醒时延，与第~\ref{sec:kernelopt}~节所述的调度方向直接相关，已提交的空闲唤醒竞态修复是其中一步，尾部表明调度仍有工作要做。此外，Starry 的模型冷启动明显更慢，\texttt{.rknn} 加载约 2.2\,s，而 Linux 约 0.16\,s；常驻内存则反而更省，约 19\,MB 对 31\,MB。在 60 张固定图的校验下两侧检测结果一致，Starry 为 60/60，Linux 为 59/60，平均置信度 0.880 与 0.875。
+不降频的取舍也有代价，体现在尾部而非中位。Starry 的端到端时延偶有数百毫秒的停顿，最坏一帧达 487\,ms，而 Linux 为 22\,ms，并因此丢弃约一成的帧；其根源是多核之间的唤醒时延，与第~\ref{sec:sched}~节所述的调度方向直接相关，已提交的空闲唤醒竞态修复是其中一步，尾部表明调度仍有工作要做。此外，Starry 的模型冷启动明显更慢，\texttt{.rknn} 加载约 2.2\,s，而 Linux 约 0.16\,s；常驻内存则反而更省，约 19\,MB 对 31\,MB。在 60 张固定图的校验下两侧检测结果一致，Starry 为 60/60，Linux 为 59/60，平均置信度 0.880 与 0.875。
 
-\subsection{内核侧的优化支撑与调度展望}\label{sec:kernelopt}
+\subsection{内核侧的优化支撑}\label{sec:kernelopt}
 
-性能优化中作用于内核侧的部分，关键是让流水线能够把计算从 CPU 交给专用硬件。Starry 此前并不支持 RGA 与 JPU 这两个硬件加速器，让流水线变快首先需要由本队实现它们的内核驱动。
-
-我们为 Starry 实现的 RGA 驱动以 \texttt{/dev/rga} 暴露设备节点，应用经其用户态库 librga 发起缩放与色彩空间转换等操作。实现它涉及几层工作。底层是 RGA2 引擎的寄存器级驱动，包括开启该模块的时钟、在访问寄存器前解除其软复位、以主模式配置引擎，并以提交、轮询、应答、复位这一状态机驱动每一次操作。其上一层把 librga 的请求结构 \texttt{rga\_req} 按其真实的二进制布局在内核侧镜像出来，再翻译成驱动内部的操作描述，从而无需改动机器人程序即可对接。
-
-把这条路径在开发板上跑通，遇到过三处有代表性的障碍。
-\begin{itemize}
-\item \textbf{跨分配器的缓冲导入}。相机与 NPU 的缓冲分属不同的分配器，其句柄无法直接导入，最终改为按物理地址导入才成功。
-\item \textbf{RGA 核的选择}。设备树为 RGA 暴露了三个核，其中一个并不支持所需的操作，最初误锁到该核导致提交失败，修正为按操作选择合适的核。
-\item \textbf{单位旋转矩阵的误判}。librga 在每个请求里都会填入一个表示“不旋转”的单位旋转矩阵，驱动的解析逻辑却把它当成非法的旋转参数拒绝，改为仅在旋转模式非零时才按旋转处理后即解决。
-\end{itemize}
-驱动的五项基本操作在开发板上以逐像素校验通过自测，相关代码已作为合并请求 \href{https://github.com/rcore-os/tgoskits/pull/1388}{\#1388} 提交。在 Linux 上的受控对照中，以 RGA 替代 CPU 可将解码由 5.7\,ms 降至 0.77\,ms；Starry 接入这条路径后，解码 p50 同样为 0.776\,ms，缩放也接近归零。
-
-JPU 的驱动以 \texttt{/dev/mpp\_service} 暴露，遵循瑞芯微多媒体框架 MPP（Media Process Platform）的用户态接口，为 MJPEG 输入提供硬件解码。其标准解码测试程序 \texttt{mpi\_dec\_test} 在 Starry 上的输出与 Linux 逐字节一致，校验和同为 \texttt{2712426383}；接入机器人程序后，相机的 MJPEG 流亦由 JPU 在硬件上解码，并与 RGA、NPU 共用同一段经 dma-heap 分配的缓冲，构成前述的 MJPEG$\to$JPU$\to$RGA$\to$NPU 零拷贝流水线。两个驱动都采用既有库的真实接口而非自定义的 ioctl 约定，这是它们得以与未经改动的机器人程序对接的关键。
-
-第~\ref{sec:profiling}~节所述基于硬件 PMU 的 perf 工具，是另一项在整个优化过程中都用到的内核能力，它让各阶段的开销可以被测量。
-
-线程放置是内核侧仍有空间的一处。第~\ref{sec:overview}~节指出，默认情况下采集、解码与推理都落在同一个小核上相互串行，本工作通过用户态绑核把推理迁往大核解决了当前负载的放置。一个更一般的做法是在内核中实现架构感知的调度，依据各核的算力自动放置线程，使繁重的工作无需手动绑核即可落到大核，并使内核侧的服务线程，例如服务相机传输的 USB 处理线程，也获得合适的放置。我们为此实现了一个感知大小核的负载均衡器原型，它从设备树读取各核的算力权重并据此放置线程，在 QEMU 多核环境下通过了亲和性迁移、抢占与竞态等调度测试，迁移逻辑得到验证。对当前这一单线程且已手动绑核的负载，它不改变运行结果，因此本工作仍采用手动绑核，而将其发展为完整的架构感知调度列为后续方向，详见第~\ref{sec:future}~节。
+性能优化中作用于内核侧的部分，关键是让流水线把计算从 CPU 交给专用硬件，并让线程落到合适的核上。前者依赖本队为 Starry 实现的 RGA 与 JPU 两个加速器驱动，二者此前在 Starry 上并不存在，其架构与实现已分别见第~\ref{sec:rga}~节与第~\ref{sec:jpu}~节，它们以 \texttt{/dev/rga} 与 \texttt{/dev/mpp\_service} 对齐既有用户态库的真实接口，使未经改动的机器人程序即可把解码与缩放交给硬件，并经第~\ref{sec:dmaheap}~节的 dma-heap 共享缓冲构成零拷贝流水线。后者依赖线程放置，本工作以用户态绑核把推理迁往大核解决了当前负载，而更一般的架构感知调度由第~\ref{sec:sched}~节的负载均衡器原型承接。贯穿整个优化过程的测量，则由第~\ref{sec:perf}~节基于硬件 PMU 的 perf 提供。这些内核能力合在一起，构成了上述用户态优化得以成立的基础。
 
 \begin{keybox}
 机器人从相机感知到机械臂抓取的完整回路已在 Starry 上跑通，检测结果与 Linux 一致。端到端推理时延在 640$\times$640 输入下由 202.9\,ms 收敛至 65.1\,ms，在与相机输出一致的 480$\times$640 输入下达到 11.75\,ms，与 Linux 处于同一水平。RGA 与 JPU 两个加速器的驱动、基于硬件 PMU 的 perf，以及块设备完成路径的容错等能力都已在内核中实现，可继续支撑 Starry 承载其它边缘智能负载。
 \end{keybox}
 
-
 %
-\section{基础版本与增量贡献}\label{sec:base}
-
-本工作在若干开源项目的基础上展开，相关依赖在首次提交中即予标注。操作系统内核基于 \href{https://github.com/rcore-os/tgoskits}{rcore-os/tgoskits} 的 dev 分支（commit \texttt{73409e079}，2026-06-22）；机器人应用移植自 \href{https://github.com/pengzechen/aka-rk3588}{pengzechen/aka-rk3588}，我们将其改造为一个 tgoskits 应用；模型转换使用 airockchip/rknn-toolkit2。本队在此基础上的增量贡献见表~\ref{tab:contrib}，其中多项已作为合并请求提交至上游仓库 rcore-os/tgoskits。
-
-\begin{table}[H]
-\centering
-\caption{本队的增量贡献，PR 均提交至上游仓库 rcore-os/tgoskits}\label{tab:contrib}
-\begin{tabularx}{\textwidth}{@{}l X l@{}}
-\toprule
-\headrow \hdr{贡献} & \hdr{说明} & \hdr{上游提交}\\
-\midrule
-硬件 PMU perf & 按任务到大小核的原生 perf & PR \#1395，已合并\\
-USB 串口驱动 & 机械臂控制器的串口通信 & PR \#1378，已合并\\
-reboot 系统调用 & 加速 Linux 与 Starry 的切换 & PR \#1358，已合并\\
-rknpu 整合与缓冲修复 & DRM ioctl 整合、GEM 映射修复 & PR \#1351、\#1364，已合并\\
-RGA 驱动 & \texttt{/dev/rga}，对齐 librga 接口 & PR \#1388，开放中\\
-JPU 驱动 & \texttt{/dev/mpp\_service}，对齐 MPP 接口 & 待提交\\
-块设备完成路径容错 & 使开发板得以稳定挂载启动 & 待提交\\
-PWM 驱动 & 底盘电机的 sysfs PWM 控制 & 待提交\\
-profile-rknpu 计时特性 & NPU ioctl 各阶段计数 & 待提交\\
-大小核负载均衡器（原型）& 架构感知调度的基础 & 待提交\\
-剖析工具链与基准应用 & 同一 ELF 的可测量剖析 & 随应用提交\\
-\bottomrule
-\end{tabularx}
-\end{table}
+\input{sections/wayland}
 
 %
 \section{面向 AIOS 的 AI 辅助开发方法}\label{sec:ai}
 
 把一个研究型操作系统从能跑做到与 Linux 同档，涉及大量驱动、系统调用与调优工作。我们在其中系统性地使用了 AI 工具，并围绕一个问题组织整个流程，即怎样让 AI 产出真正可靠的操作系统代码，而不是看似合理却未必正确的代码。我们的做法是把“正确”变成可由机器判定的闸门，让 AI 的每一处改动都先通过闸门才被接受，再以真机闭环与实测数据驱动迭代，而系统架构与最终验收始终在人这一侧。整个过程如图~\ref{fig:method} 所示。
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=\textwidth]{../docs/figures/methodology-loop.png}
-\caption{AI 辅助开发的闭环。人给定规格与架构、并负责最终验收（深色块）；AI 在规格内实现与调试，每次改动须通过板上或 QEMU 的正确性闸门（赭色边框）方可入库，未通过则反馈修改。一只米家智能插座在内核卡死时给开发板断电重启，reboot 系统调用用于切换 Linux 与 Starry，记忆系统在多次会话间承接决策与上下文。}\label{fig:method}
-\end{figure}
+\repfig{methodology-loop.png}{AI 辅助开发的闭环。人给定规格与架构、并负责最终验收（深色块）；AI 在规格内实现与调试，每次改动须通过板上或 QEMU 的正确性闸门（赭色边框）方可入库，未通过则反馈修改。一只米家智能插座在内核卡死时给开发板断电重启，reboot 系统调用用于切换 Linux 与 Starry，记忆系统在多次会话间承接决策与上下文。}{fig:method}
 
 这一方法由几条相互支撑的原则构成。
 
@@ -503,11 +490,7 @@ profile-rknpu 计时特性 & NPU ioctl 各阶段计数 & 待提交\\
 
 上述真机闭环在板端通过 starry-board-flow 工具落地，具体流程如图~\ref{fig:board-flow} 所示。该工具把测试资产和内核镜像的构建与上传、Linux 与 Starry 的切换、串口命令注入、成功标记匹配以及日志回收组织为可复测可组合的自动流程，使真实硬件上的测试验证能够自动高效进行。
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=\textwidth]{../docs/figures/starry-board-flow.png}
-\caption{starry-board-flow 工作流程}\label{fig:board-flow}
-\end{figure}
+\repfig{starry-board-flow.png}{starry-board-flow 工作流程}{fig:board-flow}
 
 \textbf{测量驱动}。优化以第~\ref{sec:profiling}~节的剖析口径为准绳，针对实测的逐阶段数据下手而非凭推断。过程中若干基于推断的结论都被实测数据修正，“在同一份可执行文件上超过 Linux”这一设想也在测量面前被否定。
 
@@ -531,7 +514,7 @@ profile-rknpu 计时特性 & NPU ioctl 各阶段计数 & 待提交\\
 \toprule
 \headrow \hdr{成员} & \hdr{负责模块与交付物}\\
 \midrule
-洪世金 & 剖析方法与基线、用户态优化、RGA 与 JPU 驱动、硬件 PMU perf、块设备完成路径容错、报告撰写\\
+洪世金 & 剖析方法与基线、用户态优化、RGA 与 JPU 驱动、硬件 PMU perf、块设备完成路径容错、图形与显示支持（Weston 使能）、报告撰写\\
 王乙凡 & USB 串口驱动、reboot 系统调用、PWM 驱动\\
 徐子航 & 模型训练与数据集准备、系统测试与现场验证\\
 \bottomrule
@@ -550,6 +533,7 @@ profile-rknpu 计时特性 & NPU ioctl 各阶段计数 & 待提交\\
 \toprule
 \headrow \hdr{阶段} & \hdr{主要工作}\\
 \midrule
+图形与显示支持 & DRM/KMS、输入、套接字与事件循环，使 Weston 在 Starry 上运行\\
 剖析口径搭建 & 在同一份程序与内核中补齐观测能力\\
 Linux 基线 & 在开发板上完成基线的深度剖析\\
 Starry 使能 & 块设备完成路径容错，首次跑通 NPU 推理\\
@@ -581,7 +565,9 @@ Starry 使能 & 块设备完成路径容错，首次跑通 NPU 推理\\
 \end{tabularx}
 \end{table}
 
-其余可推进的方向亦较清晰。第~\ref{sec:kernelopt}~节所述的架构感知调度是其中之一，它将依据各核算力自动放置用户态与内核态的线程，免去手动绑核。NPU 的三核可独立工作，而当前的串行点在于设备锁在整个推理期间被持有，一个以每核队列与中断组织的并发完成路径，是进一步提升推理吞吐的结构前提。此外，多核唤醒时延造成的端到端尾部停顿有待随上述调度工作一并收敛；块设备完成中断的底层成因也有待进一步分析，当前的容错处理已能保证稳定挂载。
+其余可推进的方向亦较清晰。第~\ref{sec:sched}~节所述的架构感知调度是其中之一，它将依据各核算力自动放置用户态与内核态的线程，免去手动绑核。NPU 的三核可独立工作，而当前的串行点在于设备锁在整个推理期间被持有，一个以每核队列与中断组织的并发完成路径，是进一步提升推理吞吐的结构前提。此外，多核唤醒时延造成的端到端尾部停顿有待随上述调度工作一并收敛；块设备完成中断的底层成因也有待进一步分析，当前的容错处理已能保证稳定挂载。
+
+第~\ref{sec:wayland}~节的图形与显示能力也开出一条面向用户侧的方向。一个在开发板上原生运行的监控界面，可把相机画面、检测框与机器人状态实时呈现给操作者，便于现场调试与演示；而 Weston 的合成当前由 pixman 在 CPU 上完成，可改由视觉流水线已经用到的同一块 RGA 引擎承担，把图层合成也交给硬件。
 
 在机器人应用层面，我们还规划了若干方向。
 \begin{itemize}

@@ -458,6 +458,15 @@ run（NPU）& 10.89 & 4.76\\
 \keyline{代价在尾部：Starry 端到端最坏 487 ms（Linux 22），丢帧约一成，冷启动更慢；常驻内存反更省（19 比 31 MB），检测精度一致。}
 \end{frame}
 
+% 24c 图形与显示支持（Wayland/Weston）
+\begin{frame}{面向边缘设备的图形与显示支持}
+\small
+把 Weston 这一主流 Wayland 合成器的参考实现在 Starry 上跑通，等于补齐了 Linux 图形与 IPC 栈的一大片。其四个子系统各自落到一类内核接口，显示后端经 libdrm 到 DRM/KMS 的 /dev/dri/card0，输入经 libudev 到 sysfs 与 /dev/input/eventN，协议服务经 AF\_UNIX 套接字并以 SCM\_RIGHTS 传递文件描述符，事件循环依赖 epoll 与 timerfd。
+\vskip4pt
+\textbf{难在隐式契约}\quad 费力的不是缺设备节点这类显式缺口，而是能打开却行为不对的隐式约定，例如 sysfs 类目须为符号链接以让 libudev 的路径回溯成立、evdev 次设备号须自 64 起、memfd 封印语义与 SCM\_RIGHTS 的字节标记。真正的成本在于跨 Weston、libdrm/libinput、libudev、sysfs/evdev 到内核这五层之间把这些契约逐一定位出来。
+\keyline{Weston 在 DRM/pixman 后端跑通，客户端连接、GTK4 经 VNC 出图，四架构自动化测试与金帧回归守护；DRM/KMS、evdev、套接字与事件循环等内核能力已合并（PR \#506、\#509、\#513、\#514 等）。当前运行在 QEMU virtio-gpu 的 pixman 软件渲染上，尚非板上物理显示。}
+\end{frame}
+
 % 25 基础版本与增量
 \begin{frame}{基础版本与增量贡献}
 \footnotesize
@@ -471,8 +480,10 @@ run（NPU）& 10.89 & 4.76\\
 USB 串口驱动 & PR \#1378，已合并\\
 reboot 系统调用 & PR \#1358，已合并\\
 rknpu 整合与 GEM 修复 & PR \#1351、\#1364，已合并\\
+图形与显示内核能力（Weston）& PR \#503 至 \#516、\#1160，已合并\\
 RGA 驱动 & PR \#1388，开放中\\
-JPU、块设备容错、PWM、profile-rknpu、负载均衡器原型 & 待提交\\
+JPU 驱动 & PR \#1456，开放中\\
+块设备容错、PWM、profile-rknpu、负载均衡器原型 & 待提交\\
 \bottomrule
 \end{tabular}
 \end{frame}
@@ -505,7 +516,7 @@ OSComp proj311 & ArceOS / Rust & 飞腾派 & 未接 NPU & HID 到电机\\
 \toprule
 \headrow \hdr{成员} & \hdr{负责模块与交付物}\\
 \midrule
-洪世金 & 剖析方法与基线、用户态优化、RGA 与 JPU 驱动、硬件 PMU perf、块设备完成路径容错、报告撰写\\
+洪世金 & 剖析方法与基线、用户态优化、RGA 与 JPU 驱动、硬件 PMU perf、块设备完成路径容错、图形与显示支持（Weston 使能）、报告撰写\\
 王乙凡 & USB 串口驱动、reboot 系统调用、PWM 驱动\\
 徐子航 & 模型训练与数据集准备、系统测试与现场验证\\
 \bottomrule
@@ -519,6 +530,7 @@ OSComp proj311 & ArceOS / Rust & 飞腾派 & 未接 NPU & HID 到电机\\
 \toprule
 \headrow \hdr{阶段} & \hdr{主要工作} & \hdr{状态}\\
 \midrule
+图形与显示支持 & DRM/KMS、输入、套接字与事件循环，使 Weston 在 Starry 上运行 & 完成\\
 剖析口径搭建 & 在同一份程序与内核中补齐观测能力 & 完成\\
 Linux 基线 & 在板上完成基线深度剖析 & 完成\\
 Starry 使能 & 块设备容错，首次跑通 NPU 推理 & 完成\\
@@ -567,7 +579,7 @@ ChatGPT 图像生成 & GPT-4o 图像生成 & 仅方法论示意图\\
 \begin{itemize}
 \item 完整机器人回路在一个研究型 Rust 操作系统上跑通。
 \item 端到端推理在 480×640 下追平 Linux（11.75 与 11.4 ms），另在 640×640 下由 202.9 降至 65.1。
-\item RGA、JPU、硬件 perf 等已实现，多项合并上游。
+\item RGA、JPU、硬件 perf 等已实现，多项合并上游；图形与显示一组内核能力使 Weston 合成器在 Starry 上跑通。
 \item 提出并实践了一套机器可判定闸门加真机闭环的 AI 辅助操作系统开发方法。
 \end{itemize}
 \end{frame}
@@ -576,7 +588,7 @@ ChatGPT 图像生成 & GPT-4o 图像生成 & 仅方法论示意图\\
 \begin{frame}{后续工作与可复现性}
 \textbf{\color{ink}后续}
 \begin{itemize}\small
-\item 系统：架构感知调度免去手动绑核；NPU 三核并发，突破设备锁串行。
+\item 系统：架构感知调度免去手动绑核；NPU 三核并发，突破设备锁串行；以 Weston 在板上做相机与检测的实时监控界面，并把合成交给 RGA。
 \item 应用：ACT 动作分块模仿学习、语音输入、接近百分之百的抓取策略、里程计记住回收桶位置。
 \end{itemize}
 \vskip2pt
