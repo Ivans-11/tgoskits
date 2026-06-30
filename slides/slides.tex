@@ -107,7 +107,7 @@
 \begin{frame}{主要工作与结果}
 \begin{itemize}
 \item 相机经 NPU（片上神经网络推理加速器）检测、再驱动机械臂的完整拾球回路在 Starry 上跑通，检测结果与 Linux 一致。
-\item 在与相机一致的 480×640 输入下，端到端推理由最初 30.6 ms 优化到 \textbf{11.75 ms}，与 Linux 的 11.4 ms 持平；另在 640×640 下由 162.7 降至 55.2 ms。
+\item 在与相机一致的 480×640 输入下，端到端推理由最初 30.6 ms 优化到 \textbf{11.75 ms}，与 Linux 的 11.4 ms 持平；另在 640×640 下由 202.9 降至 65.1 ms。
 \item 实现块设备容错、USB 串口、reboot、RGA、JPU 等内核能力与硬件 PMU perf，其中五项已合并进上游，RGA 在审。
 \end{itemize}
 \keyline{两种输入尺寸计算量不同，各与对应尺寸的 Linux 基线比较；推理时延的结论是与 Linux 持平。}
@@ -307,8 +307,8 @@ postprocess & 1.06 & 1.19 & 1.25 & 1.86\\
 \keyline{run 约占除解码外各阶段之和的 79\%（15.42 / 19.4），卷积类算子占 NPU 时间约 72\%，故 run 由模型决定。消融排除了调度饥饿与内存带宽两项因素。}
 \end{frame}
 
-% 16 Starry 最初 6.3x
-\begin{frame}{Starry 最初配置较 Linux 慢 6.3 倍，差距不在内核与 NPU}
+% 16 Starry 最初 7.9x
+\begin{frame}{Starry 最初配置较 Linux 慢 7.9 倍，差距不在内核与 NPU}
 \small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
@@ -317,7 +317,7 @@ postprocess & 1.06 & 1.19 & 1.25 & 1.86\\
 letterbox & 1.38 & 75.5 & 55×\\
 run（NPU）& 15.42 & 71.1 & 4.6×\\
 outputs\_get & 1.30 & 14.3 & 11×\\
-端到端 & 25.81 & 162.7 & 6.3×\\
+端到端 & 25.81 & 202.9 & 7.9×\\
 \bottomrule
 \end{tabular}
 \hfill（实时，模型输入 640×640，p50，单位 ms）
@@ -344,12 +344,12 @@ outputs\_get & 1.30 & 14.3 & 11×\\
 run（NPU）& 71.1 & 71.2 & 24.5\\
 letterbox & 75.5 & 74.9 & 26.4\\
 outputs\_get & 14.3 & 14.3 & 2.7\\
-端到端 & 162.7 & 162.8 & 55.2\\
+端到端 & 202.9 & 204.3 & 65.1\\
 \bottomrule
 \end{tabular}
 \hfill（实时，模型输入 640×640，p50，单位 ms）
 \vskip5pt
-\small 核驻留直方图显示推理由 cpu0 迁到 cpu4，亲和性被遵从；采集帧率 10.9 升至 17.7。此时相对 Linux 25.8 仍约 2.1 倍，残余主要在 letterbox（仍走 CPU）。亲和性须在 NPU 与 USB 初始化之后设置，否则二级核挂起。
+\small 核驻留直方图显示推理由 cpu0 迁到 cpu4，亲和性被遵从；采集帧率 10.9 升至 17.7。此时相对 Linux 25.8 仍约 2.5 倍，残余主要在 letterbox（仍走 CPU）。亲和性须在 NPU 与 USB 初始化之后设置，否则二级核挂起。
 \end{frame}
 
 % 19 整数路径
@@ -400,7 +400,7 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 \addplot[ochre, dashed, thick, forget plot] coordinates {(0.8,25.8) (2.5,25.8)};
 \addplot[ochre, dashed, thick, forget plot] coordinates {(2.6,11.4) (6,11.4)};
 \addplot[ink, very thick, mark=*, mark options={fill=white,draw=ink,line width=0.8pt}]
-  coordinates {(1,162.7)[162.7] (2,55.2)[55.2] (3,30.6)[30.6] (4,11.75)[11.75] (5,9.65)[9.65] (6,9.06)[9.06]};
+  coordinates {(1,202.9)[202.9] (2,65.1)[65.1] (3,30.6)[30.6] (4,11.75)[11.75] (5,9.65)[9.65] (6,9.06)[9.06]};
 \end{semilogyaxis}
 \end{tikzpicture}
 \par\vskip1pt
@@ -566,7 +566,7 @@ ChatGPT 图像生成 & GPT-4o 图像生成 & 仅方法论示意图\\
 \begin{frame}{主要贡献与创新点}
 \begin{itemize}
 \item 完整机器人回路在一个研究型 Rust 操作系统上跑通。
-\item 端到端推理在 480×640 下追平 Linux（11.75 与 11.4 ms），另在 640×640 下由 162.7 降至 55.2。
+\item 端到端推理在 480×640 下追平 Linux（11.75 与 11.4 ms），另在 640×640 下由 202.9 降至 65.1。
 \item RGA、JPU、硬件 perf 等已实现，多项合并上游。
 \item 提出并实践了一套机器可判定闸门加真机闭环的 AI 辅助操作系统开发方法。
 \end{itemize}
