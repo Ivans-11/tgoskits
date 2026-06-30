@@ -23,7 +23,7 @@
 |---|---|
 | 设计方案文档（初赛）| 📄 [`docs/设计方案（初赛）.pdf`](docs/设计方案（初赛）.pdf) |
 | 进展汇报幻灯片 | 📑 [`slides/进展汇报（初赛）.pdf`](slides/进展汇报（初赛）.pdf) |
-| 作品演示视频 | 🎬 [`video/演示视频说明.md`](video/演示视频说明.md) |
+| 作品演示视频 | 🎬 [百度网盘](https://pan.baidu.com/s/1h1XYYQY2sgXvKzJpxdhcLw?pwd=tuc4)（提取码 `tuc4`），说明见 [`video/演示视频说明.md`](video/演示视频说明.md) |
 
 ## 基础版本
 
