@@ -479,9 +479,34 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                 fs.clone(),
                 NodeType::CharacterDevice,
                 dma_heap::DMA_HEAP_CMA_DEVICE_ID,
-                heap,
+                heap.clone(),
             ),
         );
+        // librockchip_mpp enumerates these node names (including the `-dma32` and
+        // `-uncached` variants) at startup and picks one by buffer flags. Expose
+        // each as an alias over the same contiguous allocator so MPP finds its
+        // preferred heap instead of falling back to a fragile dup-a-sibling path.
+        for (i, name) in [
+            "system-uncached",
+            "system-dma32",
+            "system-uncached-dma32",
+            "cma-uncached",
+            "cma-dma32",
+            "cma-uncached-dma32",
+        ]
+        .iter()
+        .enumerate()
+        {
+            dma_heap_dir.add(
+                *name,
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    DeviceId::new(252, 8 + i as u32),
+                    heap.clone(),
+                ),
+            );
+        }
         root.add(
             "dma_heap",
             SimpleDir::new_maker(fs.clone(), Arc::new(dma_heap_dir)),
