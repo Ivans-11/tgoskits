@@ -115,7 +115,7 @@ stdin:
 
 ```bash
 ssh orangepi@${BOARD_IP} "
-  printf '%s\n' orangepi | sudo -S install -m 0755 \
+  sudo install -m 0755 \
     ~/tgoskits-uvc-fps/target/release/uvc-fps \
     /usr/bin/uvc-fps
 "
@@ -128,7 +128,7 @@ because `/dev/bus/usb` is not writable by the default `orangepi` user:
 ssh orangepi@${BOARD_IP} "
   rm -rf /tmp/uvc-frames &&
   mkdir -p /tmp/uvc-frames &&
-  printf '%s\n' orangepi | sudo -S \
+  sudo \
     /usr/bin/uvc-fps \
       --device 0 \
       --format mjpeg \
