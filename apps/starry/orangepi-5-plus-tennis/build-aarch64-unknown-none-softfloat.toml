@@ -12,6 +12,8 @@ features = [
   "ax-driver/rockchip-sdhci",
   "ax-driver/rockchip-dwmmc",
   "rknpu",
+  "rga",
+  "jpeg",
 ]
 log = "Warn"
 # The live pipeline runs the libuvc capture thread and the perception/control
