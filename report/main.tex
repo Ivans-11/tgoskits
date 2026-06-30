@@ -373,17 +373,21 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
 
 在缩放迁往大核之后，把相机帧由 YUYV 转为 RGB 的色彩空间转换成为 CPU 上最高的一项。RGA 既能承担这一转换，也能承担缩放与填充，还能把结果直接写入 NPU 的输入缓冲，从而把原本分离的解码、缩放与输入设置合并为一步。这里走的是真正的零拷贝路径，也就是让 RGA 直接写入 NPU 的输入缓冲，各阶段之间不再发生内存拷贝。其前提是 NPU 在关闭 IOMMU 的情况下运行。IOMMU 是设备侧的地址翻译部件，为外设提供从设备地址到物理地址的映射，将其关闭后外设直接以物理地址访存，于是 RGA 写出的物理缓冲可被 NPU 原样读取。经此一步，解码 p50 为 0.776\,ms，输入设置降为零，检测结果完全一致。让这条路径在开发板上真正跑通，依赖于我们为 Starry 实现的 RGA 驱动，其实现见第~\ref{sec:kernelopt}~节。
 
-把上述优化叠加起来，差距被逐步压下。模型起初以 640$\times$640 的方形尺寸接收输入，在这一尺寸下，Starry 默认配置的端到端 p50 为 162.7\,ms，仅将推理放置到 A76 大核就降至 55.2\,ms（见表~\ref{tab:affinity}），对应的 Linux 基线为 25.8\,ms。把模型输入改为与相机输出一致的 480$\times$640 后，既省去了对方形输入的填充，也减少了检测头的计算量。图~\ref{fig:ladder} 给出这一输入尺寸下各步优化的端到端时延，默认为 30.6\,ms，叠加整数输出路径与大核放置后降至 11.75\,ms，与 Linux 在同一输入尺寸下的 11.4\,ms 持平；再接入 RGA 零拷贝解码后，自相机帧到达主机至控制指令就绪的时延 p50 为 9.65\,ms，约 28\,fps，受相机供帧速率限制。640$\times$640 与 480$\times$640 是同一模型的两种输入尺寸，输入越大计算量越大，故各组数应与对应尺寸下的 Linux 基线相比。
+\subsubsection*{以 JPU 在硬件上解码 MJPEG}
+
+参考机器人的相机以 MJPEG 输出，即逐帧 JPEG 压缩的视频流，须先解码为像素才能交由后续处理。前述各步在 YUYV 模式下由 RGA 直接做色彩转换；改用相机原生的 MJPEG 模式后，这一解码若仍由 CPU 承担，单帧约 25\,ms，会重新成为时延的主项。接入 JPU 后，MJPEG 由硬件解码为 NV12，单帧约 1\,ms，再交 RGA 转色彩并直写 NPU 的输入缓冲，整条 MJPEG$\to$JPU$\to$RGA$\to$NPU 全程零拷贝。由此在机器人实际使用的 MJPEG 模式下，端到端 p50 为 9.06\,ms，约 29\,fps，吞吐仍受相机供帧速率限制，与 YUYV 路径约 9\,ms 的水平相当。其驱动实现见第~\ref{sec:kernelopt}~节。
+
+把上述优化叠加起来，差距被逐步压下。模型起初以 640$\times$640 的方形尺寸接收输入，在这一尺寸下，Starry 默认配置的端到端 p50 为 162.7\,ms，仅将推理放置到 A76 大核就降至 55.2\,ms（见表~\ref{tab:affinity}），对应的 Linux 基线为 25.8\,ms。把模型输入改为与相机输出一致的 480$\times$640 后，既省去了对方形输入的填充，也减少了检测头的计算量。图~\ref{fig:ladder} 给出这一输入尺寸下各步优化的端到端时延，默认为 30.6\,ms，叠加整数输出路径与大核放置后降至 11.75\,ms，与 Linux 在同一输入尺寸下的 11.4\,ms 持平；再以 RGA 零拷贝承担色彩转换降至 9.65\,ms，最后由 JPU 在硬件上解码相机原生的 MJPEG，端到端 p50 为 9.06\,ms，约 29\,fps，受相机供帧速率限制。640$\times$640 与 480$\times$640 是同一模型的两种输入尺寸，前者是优化前的方形输入，后者与相机输出一致、省去了填充，各组数应与对应尺寸下的 Linux 基线相比。
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
-  width=0.82\textwidth, height=4.4cm,
-  xbar, xmin=0, xmax=34, bar width=14pt,
-  enlarge y limits=0.38,
+  width=0.82\textwidth, height=5.6cm,
+  xbar, xmin=0, xmax=34, bar width=13pt,
+  enlarge y limits=0.26,
   xlabel={\sffamily 端到端时延（ms，480$\times$640 输入，p50）},
-  symbolic y coords={＋RGA 零拷贝,＋整数输出与大核,Starry 默认},
+  symbolic y coords={＋JPU 硬件解码,＋RGA 零拷贝,＋整数输出与大核,Starry 默认},
   ytick=data,
   yticklabel style={font=\sffamily\small},
   xlabel style={font=\sffamily\small\color{ink}},
@@ -391,13 +395,13 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
   axis line style={rulecol}, tick style={rulecol},
   clip=false,
 ]
-\addplot[fill=ink,draw=none] coordinates {(30.6,Starry 默认) (11.75,＋整数输出与大核) (9.65,＋RGA 零拷贝)};
+\addplot[fill=ink,draw=none] coordinates {(30.6,Starry 默认) (11.75,＋整数输出与大核) (9.65,＋RGA 零拷贝) (9.06,＋JPU 硬件解码)};
 \draw[ochre,semithick,dashed]
   ({axis cs:11.4,Starry 默认}|-{rel axis cs:0,0}) -- ({axis cs:11.4,Starry 默认}|-{rel axis cs:0,1})
   node[above,font=\sffamily\scriptsize,ochre]{Linux 11.4};
 \end{axis}
 \end{tikzpicture}
-\caption{480$\times$640 输入下各步优化的端到端时延，自默认的 30.6\,ms 降至与 Linux（11.4\,ms，赭色）同一水平。横轴只覆盖该输入尺寸，640$\times$640 输入的收敛见表~\ref{tab:affinity}}\label{fig:ladder}
+\caption{480$\times$640 输入下各步优化的端到端时延，自默认的 30.6\,ms 先降至与 Linux 11.4\,ms（赭色虚线）持平的 11.75\,ms，再由 RGA 与 JPU 的硬件零拷贝压到约 9\,ms（受相机供帧速率限制）。横轴只覆盖该输入尺寸，640$\times$640 输入的收敛见表~\ref{tab:affinity}}\label{fig:ladder}
 \end{figure}
 
 下列三项尝试经测量确认对当前负载没有收益，其原因也指明了各自适用的边界。
@@ -407,9 +411,9 @@ ReLU & 0.881 & 0.887 & 0.998\,--\,1.000\\
 \item \textbf{锁定 NPU 调频}。它没有带来变化，因为 NPU 在整个运行中已稳定运行在 1.0\,GHz。
 \end{itemize}
 
-\subsection{完整零拷贝流水线与 Linux 的对照}\label{sec:zerocopy}
+\subsubsection*{与 Linux 的整体对照}
 
-JPU 与 RGA 两个驱动都接入之后，相机的 MJPEG 流可由 JPU 在硬件上解码为 NV12，再由 RGA 做色彩空间转换并直接写入 NPU 的输入缓冲，整条 MJPEG$\to$JPU$\to$RGA$\to$NPU 在两个系统上都以零拷贝实现，单帧解码 p50 约 1 至 2\,ms，逐帧之间不再发生内存拷贝。我们在同一开发板、同一相机与同一份程序上，对 Linux 与 Starry 各跑一组实时采集，逐阶段对照见表~\ref{tab:zerocopy}。
+把优化后的完整流水线放到 Linux 上以同一份程序对照，逐阶段见表~\ref{tab:zerocopy}。在各自的默认调频策略下，Starry 的中位时延更低，但这来自调频策略而非两侧硬件的快慢。Starry 把 NPU、RGA 与 JPU 的时钟直接设为最高且不做动态调频，而 Linux 默认的 ondemand 策略在持续负载下会把 NPU 降频。一组固定图的连续推理可看清这一点，Linux 的单次 \texttt{run} 由约 4.7\,ms 随时间升至约 10.6\,ms，而 Starry 始终稳定在约 4.8\,ms。也就是说，在同一时钟下两侧的 NPU 推理本就相当，约 4.7\,ms，这与 480$\times$640 下 11.75 与 11.4\,ms 的持平相互印证；把 Linux 切到最高频策略即可消除中位上的差距。
 
 \begin{table}[H]
 \centering
@@ -426,11 +430,7 @@ JPU 与 RGA 两个驱动都接入之后，相机的 MJPEG 流可由 JPU 在硬�
 \end{tabularx}
 \end{table}
 
-中位数上的差异主要来自调频策略而非硅片本身。Starry 把 NPU、RGA 与 JPU 的时钟直接设为最高且不做动态调频，而 Linux 默认的 ondemand 策略在持续负载下会把 NPU 的时钟降下来。一组固定图的连续推理可以看清这一点，Linux 的单次 \texttt{run} 由起始的约 4.7\,ms 随时间升至约 10.6\,ms，而 Starry 始终稳定在约 4.8\,ms。也就是说，在同一时钟下两侧的 NPU 推理本就相当，约 4.7\,ms，这与图~\ref{fig:ladder} 中 480$\times$640 下 11.75 与 11.4\,ms 的持平相互印证；Starry 在默认配置下的中位数更低，是因为它不降频，而非推理本身更快，把 Linux 切到 performance 最高频策略即可消除这一差距。
-
-不降频的取舍也有代价，体现在尾部而非中位。Starry 的端到端时延偶有数百毫秒的停顿，最坏一帧达 487\,ms，而 Linux 为 22\,ms，并因此丢弃约一成的帧。其根源是多核之间的唤醒时延，即一个线程等待另一核上的工作时偶尔吃到一次很长的丢失唤醒，这与第~\ref{sec:kernelopt}~节所述的调度方向直接相关，已提交的空闲唤醒竞态修复是其中一步，而尾部表明调度仍有工作要做。此外，Starry 的模型冷启动明显更慢，\texttt{.rknn} 的加载约 2.2\,s，而 Linux 约 0.16\,s；常驻内存则反而更省，约 19\,MB 对 31\,MB。在 60 张固定图的校验下两侧检测结果一致，Starry 为 60/60，Linux 为 59/60，平均置信度 0.880 与 0.875。
-
-还有一处差异落在 RGA 的缩放上。当模型输入为 640$\times$640、需要把 640$\times$480 的相机帧放大时，Starry 的 RGA 驱动尚未实现缩放，这一步回退到 CPU，解码升至约 25\,ms，而 Linux 以硬件完成，约 2.3\,ms；同尺寸的 NV12$\to$RGB 转换两侧都走硬件，约 1\,ms。这是一处明确的驱动缺口，补齐 RGA2 的缩放寄存器即可，列入第~\ref{sec:future}~节的后续方向。
+不降频的取舍也有代价，体现在尾部而非中位。Starry 的端到端时延偶有数百毫秒的停顿，最坏一帧达 487\,ms，而 Linux 为 22\,ms，并因此丢弃约一成的帧；其根源是多核之间的唤醒时延，与第~\ref{sec:kernelopt}~节所述的调度方向直接相关，已提交的空闲唤醒竞态修复是其中一步，尾部表明调度仍有工作要做。此外，Starry 的模型冷启动明显更慢，\texttt{.rknn} 加载约 2.2\,s，而 Linux 约 0.16\,s；常驻内存则反而更省，约 19\,MB 对 31\,MB。在 60 张固定图的校验下两侧检测结果一致，Starry 为 60/60，Linux 为 59/60，平均置信度 0.880 与 0.875。
 
 \subsection{内核侧的优化支撑与调度展望}\label{sec:kernelopt}
 
@@ -446,7 +446,7 @@ JPU 与 RGA 两个驱动都接入之后，相机的 MJPEG 流可由 JPU 在硬�
 \end{itemize}
 驱动的五项基本操作在开发板上以逐像素校验通过自测，相关代码已作为合并请求 \href{https://github.com/rcore-os/tgoskits/pull/1388}{\#1388} 提交。在 Linux 上的受控对照中，以 RGA 替代 CPU 可将解码由 5.7\,ms 降至 0.77\,ms；Starry 接入这条路径后，解码 p50 同样为 0.776\,ms，缩放也接近归零。
 
-JPU 的驱动以 \texttt{/dev/mpp\_service} 暴露，遵循瑞芯微多媒体框架 MPP（Media Process Platform）的用户态接口，为 MJPEG 输入提供硬件解码。其标准解码测试程序 \texttt{mpi\_dec\_test} 在 Starry 上的输出与 Linux 逐字节一致，校验和同为 \texttt{2712426383}；接入机器人程序后，相机的 MJPEG 流亦由 JPU 在硬件上解码，并与 RGA、NPU 共用同一段经 dma-heap 分配的缓冲，构成第~\ref{sec:zerocopy}~节的零拷贝流水线。两个驱动都采用既有库的真实接口而非自定义的 ioctl 约定，这是它们得以与未经改动的机器人程序对接的关键。
+JPU 的驱动以 \texttt{/dev/mpp\_service} 暴露，遵循瑞芯微多媒体框架 MPP（Media Process Platform）的用户态接口，为 MJPEG 输入提供硬件解码。其标准解码测试程序 \texttt{mpi\_dec\_test} 在 Starry 上的输出与 Linux 逐字节一致，校验和同为 \texttt{2712426383}；接入机器人程序后，相机的 MJPEG 流亦由 JPU 在硬件上解码，并与 RGA、NPU 共用同一段经 dma-heap 分配的缓冲，构成前述的 MJPEG$\to$JPU$\to$RGA$\to$NPU 零拷贝流水线。两个驱动都采用既有库的真实接口而非自定义的 ioctl 约定，这是它们得以与未经改动的机器人程序对接的关键。
 
 第~\ref{sec:profiling}~节所述基于硬件 PMU 的 perf 工具，是另一项在整个优化过程中都用到的内核能力，它让各阶段的开销可以被测量。
 
@@ -573,7 +573,7 @@ Starry 使能 & 块设备完成路径容错，首次跑通 NPU 推理\\
 \end{tabularx}
 \end{table}
 
-其余可推进的方向亦较清晰。第~\ref{sec:kernelopt}~节所述的架构感知调度是其中之一，它将依据各核算力自动放置用户态与内核态的线程，免去手动绑核。NPU 的三核可独立工作，而当前的串行点在于设备锁在整个推理期间被持有，一个以每核队列与中断组织的并发完成路径，是进一步提升推理吞吐的结构前提。此外，RGA 的缩放路径尚未实现，640$\times$640 输入下放大相机帧时该步回退到 CPU（见第~\ref{sec:zerocopy}~节），补齐 RGA2 的缩放寄存器即可消除；多核唤醒时延造成的端到端尾部停顿也有待随上述调度工作一并收敛；块设备完成中断的底层成因则有待进一步分析，当前的容错处理已能保证稳定挂载。
+其余可推进的方向亦较清晰。第~\ref{sec:kernelopt}~节所述的架构感知调度是其中之一，它将依据各核算力自动放置用户态与内核态的线程，免去手动绑核。NPU 的三核可独立工作，而当前的串行点在于设备锁在整个推理期间被持有，一个以每核队列与中断组织的并发完成路径，是进一步提升推理吞吐的结构前提。此外，多核唤醒时延造成的端到端尾部停顿有待随上述调度工作一并收敛；块设备完成中断的底层成因也有待进一步分析，当前的容错处理已能保证稳定挂载。
 
 在机器人应用层面，我们还规划了若干方向。
 \begin{itemize}

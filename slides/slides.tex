@@ -367,7 +367,16 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 重活迁往大核后，相机帧的 YUYV→RGB 色彩转换（decode）成为 CPU 上最高的一项。RGA 同时承担 decode 与缩放填充，并在关闭 IOMMU（设备侧地址翻译部件）后以物理地址直通写入 NPU 输入缓冲，各阶段间不再拷贝。
 \vskip5pt
 结果：decode p50 0.776 ms、inputs\_set 归零；在 11.75 的基础上端到端进一步降至 9.65 ms，约 28 fps 的吞吐受相机供帧速率限制。
-\keyline{9.65 相对 11.75 的下降来自 RGA 接管前处理；持平结论以同尺寸的 11.75 与 11.4 为准。接入 JPU 后完整零拷贝流水线与 Linux 的对照见后文。}
+\keyline{9.65 相对 11.75 的下降来自 RGA 接管前处理；持平结论以同尺寸的 11.75 与 11.4 为准。}
+\end{frame}
+
+% 20b 以 JPU 硬件解码 MJPEG
+\begin{frame}{以 JPU 硬件解码相机的 MJPEG}
+\small
+相机原生以 MJPEG（逐帧 JPEG 压缩）输出，须先解码为像素。前述各步在 YUYV 模式下由 RGA 直接转色彩；改用相机原生的 MJPEG 模式后，这一解码若由 CPU 承担单帧约 25 ms，会重新主导时延。
+\vskip5pt
+接入 JPU 后，MJPEG 由硬件解码为 NV12（单帧约 1 ms），再交 RGA 转色彩、直写 NPU 输入缓冲，整条 MJPEG$\to$JPU$\to$RGA$\to$NPU 全程零拷贝。
+\keyline{在机器人实际使用的 MJPEG 模式下，端到端 p50 为 9.06 ms，约 29 fps（受相机供帧速率限制），与 YUYV 路径约 9 ms 相当。}
 \end{frame}
 
 % 21 优化历程（原生历程图）
@@ -380,8 +389,8 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
   ytick={10,20,50,100,200}, yticklabels={10,20,50,100,200},
   ylabel={端到端 p50（ms）}, ylabel style={font=\scriptsize},
   yticklabel style={font=\scriptsize},
-  xmin=0.6, xmax=5.4, xtick={1,2,3,4,5},
-  xticklabels={{YOLOv8 640×640},{绑大核},{降 480×640},{免反量化},{RGA 零拷贝}},
+  xmin=0.6, xmax=6.4, xtick={1,2,3,4,5,6},
+  xticklabels={{YOLOv8 640×640},{绑大核},{降 480×640},{免反量化},{RGA 零拷贝},{JPU 解码}},
   xticklabel style={font=\scriptsize\sffamily},
   axis line style={rulecol}, tick style={rulecol},
   nodes near coords, point meta=explicit symbolic,
@@ -389,9 +398,9 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
   clip=false,
 ]
 \addplot[ochre, dashed, thick, forget plot] coordinates {(0.8,25.8) (2.5,25.8)};
-\addplot[ochre, dashed, thick, forget plot] coordinates {(2.6,11.4) (4,11.4)};
+\addplot[ochre, dashed, thick, forget plot] coordinates {(2.6,11.4) (6,11.4)};
 \addplot[ink, very thick, mark=*, mark options={fill=white,draw=ink,line width=0.8pt}]
-  coordinates {(1,162.7)[162.7] (2,55.2)[55.2] (3,30.6)[30.6] (4,11.75)[11.75] (5,9.65)[9.65]};
+  coordinates {(1,162.7)[162.7] (2,55.2)[55.2] (3,30.6)[30.6] (4,11.75)[11.75] (5,9.65)[9.65] (6,9.06)[9.06]};
 \end{semilogyaxis}
 \end{tikzpicture}
 \par\vskip1pt
@@ -420,10 +429,10 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 \end{frame}
 
 % 24 JPU 驱动
-\begin{frame}{JPU 驱动与完整零拷贝流水线}
+\begin{frame}{JPU 驱动的实现}
 JPU 以 /dev/mpp\_service 暴露，遵循瑞芯微多媒体框架 MPP 的用户态接口，为相机的 MJPEG 模式提供硬件解码。标准解码测试 mpi\_dec\_test 的输出与 Linux 逐字节一致，校验和同为 2712426383。
 \vskip5pt
-接入机器人程序后，MJPEG 由 JPU 在硬件上解码，再经 RGA 转色彩并写入 NPU 输入缓冲，三者共用同一段 dma-heap 缓冲，构成 MJPEG$\to$JPU$\to$RGA$\to$NPU 的零拷贝流水线，单帧解码 p50 约 1 至 2 ms。
+接入机器人程序后，JPU 与 RGA、NPU 共用同一段 dma-heap 缓冲，构成前述的 MJPEG$\to$JPU$\to$RGA$\to$NPU 零拷贝流水线（端到端 9.06 ms）。
 \vskip5pt
 \footnotesize RGA 与 JPU 都采用既有库的真实接口（librga、MPP）而非自定义 ioctl，这是不改机器人程序即可对接的前提。
 \end{frame}
@@ -445,7 +454,7 @@ run（NPU）& 10.89 & 4.76\\
 \end{tabular}
 \end{center}
 \vskip3pt
-中位差异来自调频而非硅片：Starry 不降频，Linux 默认 ondemand 在持续负载下把 NPU 降频（固定图连测 Linux 4.7$\to$10.6、Starry 稳定 4.8）。同一时钟下 NPU 本就相当，与 480×640 下 11.75 与 11.4 的持平印证，切到 performance 即追平。
+中位差异来自调频而非两侧硬件的快慢：Starry 不降频，Linux 默认 ondemand 在持续负载下把 NPU 降频（固定图连测 Linux 4.7$\to$10.6、Starry 稳定 4.8）。同一时钟下 NPU 本就相当，与 480×640 下 11.75 与 11.4 的持平印证，切到 performance 即追平。
 \keyline{代价在尾部：Starry 端到端最坏 487 ms（Linux 22），丢帧约一成，冷启动更慢；常驻内存反更省（19 比 31 MB），检测精度一致。}
 \end{frame}
 
