@@ -1,0 +1,5 @@
+# Build artifact — the shipped PDF lives at ../docs/设计方案（初赛）.pdf
+main.pdf
+*.aux
+*.log
+*.out

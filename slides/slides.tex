@@ -1,18 +1,13 @@
 % !TEX program = tectonic
-% ============================================================================
-%  LANGUAGE: Simplified Chinese (zh-CN). Formal technical register.
-%  这份幻灯片全程使用简体中文，正式书面技术语体，不译为英文，不混入口语。
-%  Build:  tectonic -X compile slides.tex   ->  slides.pdf
-%  进展汇报幻灯片 · 功能挑战 · proj4 · 队伍 Posad · 清华大学
-% ============================================================================
 \PassOptionsToPackage{table}{xcolor}
 \documentclass[aspectratio=169,fontset=mac]{ctexbeamer}
 
 \usepackage{fontspec}
-\setCJKmonofont{STSong}
+\usepackage{ctex}
+% \setCJKmonofont{STSong}
 \usefonttheme{serif}            % 正文宋体，标题另设黑体
 
-%==================== 颜色（沿用报告） ====================
+% 颜色（沿用报告）
 \usepackage{xcolor}
 \definecolor{ink}{HTML}{15384E}
 \definecolor{ochre}{HTML}{A8702A}
@@ -21,7 +16,7 @@
 \definecolor{tintbox}{HTML}{F4F1E9}
 \definecolor{textcol}{HTML}{17191C}
 
-%==================== Beamer 外观 ====================
+% Beamer 外观
 \setbeamercolor{normal text}{fg=textcol}
 \setbeamercolor{structure}{fg=ink}
 \setbeamercolor{frametitle}{fg=ink}
@@ -51,7 +46,7 @@
   \vskip4pt%
 }
 
-%==================== 表格 ====================
+% 表格
 \usepackage{booktabs}
 \usepackage{array}
 \renewcommand{\arraystretch}{1.18}
@@ -59,7 +54,7 @@
 \newcommand{\hdr}[1]{\textsf{\bfseries\color{ink}#1}}
 \newcommand{\headrow}{\rowcolor{tinthdr}}
 
-%==================== 强调块 ====================
+% 强调块
 \setbeamercolor{block title}{fg=white,bg=ink}
 \setbeamercolor{block body}{fg=textcol,bg=tintbox}
 \usepackage{tikz}
@@ -68,18 +63,18 @@
 
 \newcommand{\keyline}[1]{\par\vskip3pt\noindent\colorbox{tintbox}{\parbox{0.91\textwidth}{\color{ink}#1}}\par}
 
-%==================== 元信息 ====================
+% 元信息
 \title{面向边缘智能的 AIOS 设计与优化}
 \subtitle{在 Starry 上承载 RK3588 网球拾取机器人视觉流水线}
 \author{洪世金\quad 王乙凡\quad 徐子航}
 \institute{队伍 Posad\quad 清华大学}
 \date{2026 年 6 月}
 
-\graphicspath{{../docs/figures/}}
+\graphicspath{{./figures/}{../docs/figures/}}
 
 \begin{document}
 
-%==================================================================
+%
 % 1 封面
 \begin{frame}[plain]
 \vfill
@@ -95,7 +90,7 @@
 \vfill
 \end{frame}
 
-%==================================================================
+%
 % 2 目录
 \begin{frame}{目录}
 \vskip4pt
@@ -107,7 +102,7 @@
 \end{itemize}
 \end{frame}
 
-%==================================================================
+%
 % 3 主要工作与结果
 \begin{frame}{主要工作与结果}
 \begin{itemize}
@@ -118,7 +113,7 @@
 \keyline{两种输入尺寸计算量不同，各与对应尺寸的 Linux 基线比较；推理时延的结论是与 Linux 持平。}
 \end{frame}
 
-%==================================================================
+%
 \section{背景与目标}
 
 % 4 研究目标与实施阶段
@@ -177,7 +172,7 @@
 \end{itemize}
 \end{column}
 \end{columns}
-\keyline{推理时延的目标是追平 Linux。启动、内存与能耗等维度尚未实测，列为后续工作，不预设结论；与类似项目的对照见第 25 页。}
+\keyline{推理时延的目标是追平 Linux。启动、内存与能耗等维度尚未实测，列为后续工作，不预设结论；与类似项目的对照见后文对比页。}
 \end{frame}
 
 % 8 体系结构
@@ -215,7 +210,7 @@ postprocess & 解码边框并做非极大值抑制\\
 \footnotesize 模型为 YOLOv8（单阶段实时目标检测网络）；RKNN 是瑞芯微 NPU 的模型格式与运行时，常见框架模型须经 rknn-toolkit2 转换才能加载。
 \end{frame}
 
-%==================================================================
+%
 \section{系统使能}
 
 % 10 启动
@@ -233,17 +228,44 @@ postprocess & 解码边框并做非极大值抑制\\
 \keyline{效果：启动由停滞转为稳定进入 shell。}
 \end{frame}
 
-% 11 USB 串口与 reboot
-\begin{frame}{USB 串口驱动与 reboot 系统调用}
+% 11 reboot 与板端迭代
+\begin{frame}{reboot 系统调用与板端迭代}
 \begin{itemize}
-\item \textbf{USB 串口驱动}\quad 以 /dev/ttyUSB0 暴露机械臂控制器（经 CP210x USB 转串口芯片相连），程序据此读机械臂状态、下控制指令，完成定位与抓取。
-\item \textbf{reboot 系统调用}\quad 使 Linux 与 Starry 的切换由插拔变为一条命令，提升迭代效率。
+\item \textbf{一键切换}\quad Linux 侧负责构建、上传资产与写入 FIT；reboot 后由 U-Boot 一次性引导 Starry，跑完后可回到 Linux。
+\item \textbf{迭代效率}\quad Linux 与 Starry 的切换由手工操作或硬件插拔变为一条命令，缩短调试与复测路径。
 \end{itemize}
-\vskip4pt
-\footnotesize 相机由 Starry 既有的 USB 主机栈在 USB3 端口枚举取流，进入流水线，非本队驱动。
+\keyline{效果：Linux 与 Starry 的切换由人工上电、插拔或手工引导，收敛为一条命令触发的可复现流程。}
 \end{frame}
 
-% 12 NPU 推理链路
+% 12 动作外设驱动
+\begin{frame}{动作外设驱动的接入}
+\small
+硬件上，机械臂经 USB 转串口接入舵机总线控制板，底盘两路直流电机经 DRV8833，由四路 PWM 控制方向与占空比。
+\vskip4pt
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\textbf{\color{ink}USB 串口}\\[2pt]
+\begin{itemize}\footnotesize
+\item rdrive 增加 USB 设备与接口 probe，按匹配结果绑定驱动。
+\item CP210x 后端接入 Starry TTY 框架，复用行规程与文件接口。
+\item 用户态保持 Linux 口径，仍通过 /dev/ttyUSB0 控制机械臂。
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{\color{ink}PWM 底盘}\\[2pt]
+\begin{itemize}\footnotesize
+\item 提供 Linux 兼容的 /sys/class/pwm 属性子集：export、period、duty\_cycle、enable。
+\item RK3588 平台层按 FDT 应用 pinctrl，配置 pwmchip0/1/4/5 对应时钟与寄存器。
+\item 底盘程序切换为 PWM 驱动后，不再占用唯一 UART3。
+\end{itemize}
+\end{column}
+\end{columns}
+\vskip4pt
+\footnotesize 相机由 Starry 既有的 USB 主机栈在 USB3 端口枚举取流，进入流水线，非本队驱动。
+\keyline{结果：机械臂经 /dev/ttyUSB0，底盘经 /sys/class/pwm，主流程中的动作控制都由 Starry 内核路径承载。}
+\end{frame}
+
+% 13 NPU 推理链路
 \begin{frame}{NPU 推理链路的接入}
 rknpu 设备节点与驱动是 Starry 既有部分。本队的工作：
 \begin{itemize}
@@ -253,10 +275,10 @@ rknpu 设备节点与驱动是 Starry 既有部分。本队的工作：
 \keyline{固定图输入下，首次推理的检测结果与 Linux 完全一致，机器人完整回路在 Starry 上闭合。}
 \end{frame}
 
-%==================================================================
+%
 \section{性能优化}
 
-% 13 剖析方法
+% 14 剖析方法
 \begin{frame}{剖析方法与测量工具}
 \small
 两侧采用同一份遵循 Linux ABI 的可执行文件、加载相同运行时与权重；干净运行与诊断运行分离；上游大同步后基线复测，主分位落在 ±2\%；每个数字独立复核。
@@ -266,7 +288,7 @@ rknpu 设备节点与驱动是 Starry 既有部分。本队的工作：
 \footnotesize 观测能力：全链路分位与逐帧 CSV、冷启动四段拆分、拷贝与零拷贝 A/B、内核侧 ioctl 计时。
 \end{frame}
 
-% 14 Linux 基线 run
+% 15 Linux 基线 run
 \begin{frame}{Linux 基线下 run 阶段是单帧时延主体}
 \small
 \begin{tabular}{@{}l*{4}{r}@{}}
@@ -285,7 +307,7 @@ postprocess & 1.06 & 1.19 & 1.25 & 1.86\\
 \keyline{run 约占除解码外各阶段之和的 79\%（15.42 / 19.4），卷积类算子占 NPU 时间约 72\%，故 run 由模型决定。消融排除了调度饥饿与内存带宽两项因素。}
 \end{frame}
 
-% 15 Starry 最初 6.3x
+% 16 Starry 最初 6.3x
 \begin{frame}{Starry 最初配置较 Linux 慢 6.3 倍，差距不在内核与 NPU}
 \small
 \begin{tabular}{@{}lrrr@{}}
@@ -303,7 +325,7 @@ outputs\_get & 1.30 & 14.3 & 11×\\
 \small 内核计时显示提交 NPU 作业 0.360 ms、缓存维护 0.082 ms，相对 20 ms 量级推理微不足道。run 的实时 4.6× 是同一小核多项争用所致，固定图下 run 仅为 Linux 的 1.2 至 1.37 倍。
 \end{frame}
 
-% 16 根因
+% 17 根因
 \begin{frame}{最初配置下线程串行于单个小核}
 采集、解码、缩放与推理最初都落在 cpu0（一个 A55 小核）上相互串行。
 \vskip6pt
@@ -312,7 +334,7 @@ outputs\_get & 1.30 & 14.3 & 11×\\
 \footnotesize 另一层是缩放与色彩转换仍由 CPU 承担、尚未用上 RGA，留到第三个杠杆。
 \end{frame}
 
-% 17 大核放置
+% 18 大核放置
 \begin{frame}{将推理绑定至大核}
 \small
 \begin{tabular}{@{}lrrr@{}}
@@ -330,7 +352,7 @@ outputs\_get & 14.3 & 14.3 & 2.7\\
 \small 核驻留直方图显示推理由 cpu0 迁到 cpu4，亲和性被遵从；采集帧率 10.9 升至 17.7。此时相对 Linux 25.8 仍约 2.1 倍，残余主要在 letterbox（仍走 CPU）。亲和性须在 NPU 与 USB 初始化之后设置，否则二级核挂起。
 \end{frame}
 
-% 18 整数路径
+% 19 整数路径
 \begin{frame}{以整数路径取回输出}
 \small
 NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整数域阈值先筛掉背景单元，只对存活的数十个反量化；因反量化单调、整数域比较等价，结果不变，285 张图与浮点路径逐一一致。outputs\_get 由约 12 ms 降到约 1 ms。
@@ -339,16 +361,16 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 \keyline{480×640 下，整数输出、大核放置与 ReLU 三者叠加，端到端 11.75 ms，与 Linux 11.4 持平。}
 \end{frame}
 
-% 19 RGA 零拷贝
+% 20 RGA 零拷贝
 \begin{frame}{以 RGA 零拷贝合并解码与缩放}
 \small
 重活迁往大核后，相机帧的 YUYV→RGB 色彩转换（decode）成为 CPU 上最高的一项。RGA 同时承担 decode 与缩放填充，并在关闭 IOMMU（设备侧地址翻译部件）后以物理地址直通写入 NPU 输入缓冲，各阶段间不再拷贝。
 \vskip5pt
 结果：decode p50 0.776 ms、inputs\_set 归零；在 11.75 的基础上端到端进一步降至 9.65 ms，约 28 fps 的吞吐受相机供帧速率限制。
-\keyline{9.65 相对 11.75 的下降来自 RGA 接管前处理。该步对应的 Linux 同配置基线尚未测得，故 9.65 不与 Linux 比较，持平结论只用 11.75 与 11.4。}
+\keyline{9.65 相对 11.75 的下降来自 RGA 接管前处理；持平结论以同尺寸的 11.75 与 11.4 为准。接入 JPU 后完整零拷贝流水线与 Linux 的对照见后文。}
 \end{frame}
 
-% 20 优化历程（原生历程图）
+% 21 优化历程（原生历程图）
 \begin{frame}{各步优化的端到端时延}
 \centering
 \begin{tikzpicture}
@@ -373,10 +395,10 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 \end{semilogyaxis}
 \end{tikzpicture}
 \par\vskip1pt
-{\footnotesize 实线为 Starry 各步优化，赭色虚线为对应尺寸的 Linux 基线（640×640 为 25.8 ms，480×640 为 11.4 ms）。11.75 与 Linux 11.4 持平；9.65 为再加 RGA 零拷贝的 Starry 侧结果，其 Linux 同配置基线待补。}
+{\footnotesize 实线为 Starry 各步优化，赭色虚线为对应尺寸的 Linux 基线（640×640 为 25.8 ms，480×640 为 11.4 ms）。11.75 与 Linux 11.4 持平；9.65 为再加 RGA 零拷贝的 Starry 侧结果，完整流水线与 Linux 的对照见后文。}
 \end{frame}
 
-% 21 负面结果
+% 22 负面结果
 \begin{frame}{无收益的尝试及其边界}
 \begin{itemize}
 \item \textbf{NPU 张量零拷贝}\quad 把输出重排从内核搬到用户态，单核上只换位置不减开销，总时延反升约 22\%（诊断口径）；多核并发取输出时才划算。
@@ -385,10 +407,10 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 \end{itemize}
 \end{frame}
 
-%==================================================================
+%
 \section{增量与展望}
 
-% 22 RGA 驱动
+% 23 RGA 驱动
 \begin{frame}{RGA 驱动的实现}
 \small
 \textbf{两层实现}：底层 RGA2 寄存器级驱动，含开时钟、解软复位、主模式，以及提交、轮询、应答、复位的状态机；上层把 librga 的请求结构 rga\_req 按真实二进制布局在内核镜像并翻译，故无需改动机器人程序。
@@ -397,14 +419,37 @@ NPU 输出为 INT8，原本每帧约四十万个数全部反量化。改为整�
 \keyline{五项操作逐像素 CRC 自测通过，PR \#1388。}
 \end{frame}
 
-% 23 JPU 驱动
-\begin{frame}{JPU 驱动的实现}
+% 24 JPU 驱动
+\begin{frame}{JPU 驱动与完整零拷贝流水线}
 JPU 以 /dev/mpp\_service 暴露，遵循瑞芯微多媒体框架 MPP 的用户态接口，为相机的 MJPEG 模式提供硬件解码。标准解码测试 mpi\_dec\_test 的输出与 Linux 逐字节一致，校验和同为 2712426383。
-\vskip6pt
+\vskip5pt
+接入机器人程序后，MJPEG 由 JPU 在硬件上解码，再经 RGA 转色彩并写入 NPU 输入缓冲，三者共用同一段 dma-heap 缓冲，构成 MJPEG$\to$JPU$\to$RGA$\to$NPU 的零拷贝流水线，单帧解码 p50 约 1 至 2 ms。
+\vskip5pt
 \footnotesize RGA 与 JPU 都采用既有库的真实接口（librga、MPP）而非自定义 ioctl，这是不改机器人程序即可对接的前提。
 \end{frame}
 
-% 24 基础版本与增量
+% 24b 完整零拷贝流水线与 Linux 的对照
+\begin{frame}{完整零拷贝流水线与 Linux 的对照}
+\small
+同一开发板、同一程序，MJPEG$\to$JPU$\to$RGA$\to$NPU 全硬件零拷贝在两侧均已跑通。逐阶段 p50（480×640）：
+\vskip3pt
+\begin{center}\footnotesize
+\begin{tabular}{lcc}
+\toprule
+阶段（p50，ms）& Linux & Starry\\
+\midrule
+解码（JPU 与 RGA）& 2.11 & 1.21\\
+run（NPU）& 10.89 & 4.76\\
+端到端（帧到检测）& 13.89 & 9.06\\
+\bottomrule
+\end{tabular}
+\end{center}
+\vskip3pt
+中位差异来自调频而非硅片：Starry 不降频，Linux 默认 ondemand 在持续负载下把 NPU 降频（固定图连测 Linux 4.7$\to$10.6、Starry 稳定 4.8）。同一时钟下 NPU 本就相当，与 480×640 下 11.75 与 11.4 的持平印证，切到 performance 即追平。
+\keyline{代价在尾部：Starry 端到端最坏 487 ms（Linux 22），丢帧约一成，冷启动更慢；常驻内存反更省（19 比 31 MB），检测精度一致。}
+\end{frame}
+
+% 25 基础版本与增量
 \begin{frame}{基础版本与增量贡献}
 \footnotesize
 基础版本：内核 rcore-os/tgoskits @ dev（fork 自 Starry-OS/StarryOS，基线 commit 73409e079）；应用 pengzechen/aka-rk3588；模型工具 rknn-toolkit2。
@@ -423,7 +468,7 @@ JPU、块设备容错、PWM、profile-rknpu、负载均衡器原型 & 待提交\
 \end{tabular}
 \end{frame}
 
-% 25 与类似项目对比
+% 26 与类似项目对比
 \begin{frame}{与类似项目的对比}
 \small
 \textbf{\color{ink}唯一同口径可比}\quad 与同机 Linux：同机、同模型、同 NPU、同 480×640 输入，端到端 11.75 ms 与 11.4 ms 持平。其余项目硬件、模型与口径各异，推理时延不具可比性，仅作定性定位。
@@ -444,7 +489,7 @@ OSComp proj311 & ArceOS / Rust & 飞腾派 & 未接 NPU & HID 到电机\\
 \footnotesize 按是否接专用 NPU、硬件量级与是否真机机器人闭环定位，不比较延迟。工业 RKNPU2 是本工作所复现的生产路径（自写设备层并对齐 librga 与 MPP 真实接口）。详见随附对比分析文档。
 \end{frame}
 
-% 26 队员分工
+% 27 队员分工
 \begin{frame}{队员分工}
 \small
 \begin{tabular}{@{}lp{0.78\textwidth}@{}}
@@ -458,7 +503,7 @@ OSComp proj311 & ArceOS / Rust & 飞腾派 & 未接 NPU & HID 到电机\\
 \end{tabular}
 \end{frame}
 
-% 27 进度
+% 28 进度
 \begin{frame}{开发进度与完成情况}
 \small
 \begin{tabular}{@{}lp{0.66\textwidth}l@{}}
@@ -475,7 +520,7 @@ Starry 使能 & 块设备容错，首次跑通 NPU 推理 & 完成\\
 \end{tabular}
 \end{frame}
 
-% 28 AI 使用说明
+% 29 AI 使用说明
 \begin{frame}{AI 使用说明}
 \small
 \begin{tabular}{@{}p{0.40\textwidth}p{0.32\textwidth}p{0.20\textwidth}@{}}
@@ -490,7 +535,7 @@ ChatGPT 图像生成 & GPT-4o 图像生成 & 仅方法论示意图\\
 \footnotesize 使用场景：检索、生成、调试、日志整理、撰写。AI 在规格内实现，架构、正确性判据与采纳由队员决定，每个数字对照原始日志独立复核，交互记录摘要随附材料给出。
 \end{frame}
 
-% 29 方法论
+% 30 方法论
 \begin{frame}{AI 辅助开发方法与正确性保障}
 \begin{columns}[c]
 \begin{column}{0.46\textwidth}
@@ -508,7 +553,7 @@ ChatGPT 图像生成 & GPT-4o 图像生成 & 仅方法论示意图\\
 \end{columns}
 \end{frame}
 
-% 30 主要贡献与创新点
+% 31 主要贡献与创新点
 \begin{frame}{主要贡献与创新点}
 \begin{itemize}
 \item 完整机器人回路在一个研究型 Rust 操作系统上跑通。
@@ -518,7 +563,7 @@ ChatGPT 图像生成 & GPT-4o 图像生成 & 仅方法论示意图\\
 \end{itemize}
 \end{frame}
 
-% 31 后续与可复现
+% 32 后续与可复现
 \begin{frame}{后续工作与可复现性}
 \textbf{\color{ink}后续}
 \begin{itemize}\small

@@ -44,7 +44,7 @@
 | 一　启动并跑通 NPU 推理 | ✅ | 块设备完成路径容错使开发板稳定挂载，首次推理结果与 Linux 完全一致 |
 | 二　接齐本体外设并实际拾球 | ✅ | USB 串口驱动连接机械臂控制器，相机经既有 USB 栈取流，完整拾球回路跑通 |
 | 三　以 Linux 为基线的性能优化 | ✅ | 端到端推理由 162.7 ms 收敛至 55.2 ms（640×640），480×640 下达到 11.75 ms |
-| 　　启动、内存与能耗的多维对照 | 进行中 | 精简内核在内存与启动路径上具结构性优势，实测对照决赛前补齐 |
+| 　　启动、内存与能耗的多维对照 | 进行中 | 常驻内存更省（约 19 比 31 MB），模型冷启动更慢（约 3.6 比 0.8 s，列为优化方向），整机功耗待板上采集 |
 
 初赛要求的各项提交物及其在本仓库中的位置如下。
 
@@ -70,6 +70,8 @@
 
 在此基础上再以 RGA 承担解码与缩放并直接写入 NPU 的输入缓冲，自相机采集到控制指令就绪的整条回路 p50 为 9.65 ms，受相机约 28 fps 的供帧速率限制。
 
+进一步接入 JPU 硬件解码后，完整的 MJPEG→JPU→RGA→NPU 零拷贝流水线在 Linux 与 Starry 上均已跑通。在各自默认调频策略下，Starry 的端到端中位时延更低（9.06 比 13.89 ms），但这源于 Starry 把加速器固定在最高频而不降频，而非推理本身更快；在同一时钟下两侧的 NPU 推理本就相当，与上表 11.75 和 11.4 的持平一致，把 Linux 切到 performance 调频策略即可消除该差距。不降频的代价体现在尾部，Starry 偶有数百毫秒的停顿（最坏 487 比 22 ms）并丢弃约一成的帧，模型冷启动也更慢，这些都列为后续的调度与驱动优化方向；常驻内存则反而更省（约 19 比 31 MB），两侧检测精度一致。
+
 ## 增量贡献
 
 本队在上述基础上的增量贡献见下表，其中多项已作为合并请求提交至上游仓库 rcore-os/tgoskits，其余以分支形式保留待提交。已合并的改动随基础版本一同位于本仓库，开放中与待提交的改动分别见对应的合并请求与分支。
@@ -81,7 +83,7 @@
 | reboot 系统调用，加速 Linux 与 Starry 的切换 | StarryOS 系统调用层 | [PR #1358](https://github.com/rcore-os/tgoskits/pull/1358)，已合并 |
 | rknpu DRM 整合与 GEM 缓冲修复 | `os/StarryOS/.../dev/card1.rs`、`drm.rs` | [PR #1351](https://github.com/rcore-os/tgoskits/pull/1351)、[#1364](https://github.com/rcore-os/tgoskits/pull/1364)，已合并 |
 | RGA 驱动，`/dev/rga`，对齐 librga 接口 | `drivers/` rockchip-rga | [PR #1388](https://github.com/rcore-os/tgoskits/pull/1388)，开放中 |
-| JPU 驱动，`/dev/mpp_service`，对齐 MPP 接口 | 分支 `worktree-jpu-driver` | 待提交 |
+| JPU 驱动，`/dev/mpp_service`，对齐 MPP 接口 | `drivers/vpu/rockchip-jpeg/` | 待提交 |
 | 块设备完成路径容错，中断超时回退轮询 | `os/arceos/modules/axfs-ng/` | 待提交（commit `5c36d90e3`）|
 | PWM 驱动，机械臂与底盘电机 | 机械臂与底盘电机驱动 | 待提交 |
 | profile-rknpu 计时特性，NPU ioctl 分阶段计数 | `card1.rs`（`RKNPU_KPROFILE`）| 待提交 |
