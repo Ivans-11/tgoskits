@@ -14,7 +14,7 @@
 board_type = "OrangePi-5-Plus"
 shell_prefix = "root@starry:/root #"
 shell_init_cmd = '''
-cd /tennis_app && ./tennis_app --mode live --model model/tennis.rknn --label model/labels.txt --ball-class 0 --device 0 --width 640 --height 480 --fps 30 --duration-sec 60 --core-mask all --min-confidence 50 --log-every 30 --virtual-actuators
+cd /tennis_app && ./tennis_app --mode live --model model/tennis.rknn --label model/labels.txt --ball-class 0 --device 0 --width 640 --height 480 --fps 30 --duration-sec 60 --core-mask all --min-confidence 50 --log-every 30 --infer-affinity 4-7 --profile --virtual-actuators
 '''
 success_regex = [
   "(?m)^TENNIS_BENCH_RESULT .*\\bprocessed=[1-9][0-9]*\\b.*\\binference_errors=0\\b.*$",

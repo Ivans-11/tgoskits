@@ -83,6 +83,9 @@ public:
     void on_arm_command() { ++arm_commands_; }
     void on_decode_error() { ++decode_errors_; }
     void on_inference_error() { ++inference_errors_; }
+    // Incomplete camera frame (USB-ISO short-packet) that was dropped before
+    // inference — a capture-reliability stat, NOT an inference error.
+    void on_short_frame() { ++short_frames_; }
 
     // --- Deep profiling (board live path) ---
 
@@ -116,6 +119,7 @@ private:
     uint64_t arm_commands_ = 0;
     uint64_t decode_errors_ = 0;
     uint64_t inference_errors_ = 0;
+    uint64_t short_frames_ = 0;
     std::vector<double> f2d_ms_; // capture -> detection
     std::vector<double> f2c_ms_; // capture -> command
 

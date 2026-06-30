@@ -102,6 +102,9 @@ int run_live(const Options &opts) {
     int64_t capture_ts = 0;
     int64_t last_report = start;
     int64_t t_first_frame = 0, t_first_detect = 0, t_first_cmd = 0;
+    // One persistent RGB buffer reused by frame_to_image every frame (avoids a
+    // malloc/free + page-zero per frame); freed once after the loop.
+    image_buffer_t img{};
 
     while (monotonic_ns() < end) {
         if (!cam.poll(lf, capture_ts)) {
@@ -123,14 +126,6 @@ int run_live(const Options &opts) {
         st.seq = lf.id;
         st.queue_age_ms = queue_age_ms;
 
-        image_buffer_t img{};
-        const int64_t t_dec0 = monotonic_ns();
-        if (frame_to_image(lf, &img) != 0) {
-            metrics.on_decode_error();
-            continue;
-        }
-        st.decode_ms = ns_to_ms(monotonic_ns() - t_dec0);
-
         Detection d;
         d.seq = lf.id;
         d.capture_ts_ns = capture_ts;
@@ -138,24 +133,38 @@ int run_live(const Options &opts) {
         d.valid = true;
 
         if (d.mode == PerceptionMode::BALL) {
+            // Zero-copy preprocess: the detector converts the raw camera frame
+            // (YUYV via RGA, MJPEG via CPU) straight into its NPU input buffer --
+            // no separate frame_to_image CPU decode. `decode_ms` now measures that
+            // preprocess (reported as prof.letterbox_ms).
             rknn_inference_profile_t prof{};
-            if (det.detect(&img, d.ball, &prof) != 0) {
+            const int dr = det.detect(lf, d.ball, &prof);
+            if (dr == TennisDetector::kShortFrame) {
+                // Incomplete USB-ISO frame: dropped, not an inference error. Skip.
+                metrics.on_short_frame();
+                continue;
+            }
+            if (dr != 0) {
                 metrics.on_inference_error();
             }
-            // Capture the per-stage RKNN profile (previously discarded).
-            st.letterbox_ms = prof.letterbox_ms;
+            st.decode_ms = prof.letterbox_ms;
             st.inputs_set_ms = prof.inputs_set_ms;
             st.run_ms = prof.run_ms;
             st.rknn_perf_run_ms = prof.rknn_perf_run_ms;
             st.outputs_get_ms = prof.outputs_get_ms;
             st.postprocess_ms = prof.postprocess_ms;
         } else {
+            // Bucket (HSV) still needs a decoded RGB frame on the CPU.
+            const int64_t t_dec0 = monotonic_ns();
+            if (frame_to_image(lf, &img) != 0) {
+                metrics.on_decode_error();
+                continue;
+            }
+            st.decode_ms = ns_to_ms(monotonic_ns() - t_dec0);
             bucket.detect(&img, d.bucket);
         }
         d.detect_ts_ns = monotonic_ns();
         if (t_first_detect == 0) t_first_detect = d.detect_ts_ns;
-
-        if (img.virt_addr) std::free(img.virt_addr);
 
         const int64_t t_ctrl0 = monotonic_ns();
         controller.process(d);
@@ -181,6 +190,8 @@ int run_live(const Options &opts) {
             }
         }
     }
+
+    if (img.virt_addr) std::free(img.virt_addr);
 
     const double dur = ns_to_ms(monotonic_ns() - start) / 1000.0;
     const UvcCaptureCounters cc = cam.counters();
@@ -338,21 +349,21 @@ int run_test_yolo(const Options &opts) {
         st.seq = lf.id;
         st.queue_age_ms = ns_to_ms(pickup - ts);
 
-        image_buffer_t img{};
-        const int64_t t_dec0 = monotonic_ns();
-        if (frame_to_image(lf, &img) != 0) continue;
-        st.decode_ms = ns_to_ms(monotonic_ns() - t_dec0);
-
+        // Zero-copy preprocess from the raw frame (no frame_to_image CPU decode).
         BallObs ball;
         rknn_inference_profile_t prof{};
-        if (det.detect(&img, ball, &prof) != 0) {
+        const int dr = det.detect(lf, ball, &prof);
+        if (dr == TennisDetector::kShortFrame) {
+            continue; // incomplete USB-ISO frame: dropped, not counted
+        }
+        if (dr != 0) {
             ++infer_errors;
         } else if (ball.found) {
             ++detections;
         }
         const int64_t t_det = monotonic_ns();
         if (t_first_detect == 0) t_first_detect = t_det;
-        st.letterbox_ms = prof.letterbox_ms;
+        st.decode_ms = prof.letterbox_ms; // YUYV->RGB preprocess (RGA/CPU)
         st.inputs_set_ms = prof.inputs_set_ms;
         st.run_ms = prof.run_ms;
         st.rknn_perf_run_ms = prof.rknn_perf_run_ms;
@@ -361,7 +372,6 @@ int run_test_yolo(const Options &opts) {
         st.frame_to_detection_ms = ns_to_ms(t_det - ts);
         st.detections = ball.found ? 1 : 0;
         ++frames;
-        if (img.virt_addr) std::free(img.virt_addr);
 
         if (opts.profile) {
             metrics.on_stage_timing(st);

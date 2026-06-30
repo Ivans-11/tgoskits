@@ -157,7 +157,7 @@ void Metrics::emit_result(double duration_sec) const {
         "frame_to_command_ms_p50=%.3f frame_to_command_ms_p95=%.3f "
         "frame_to_command_ms_p99=%.3f frame_to_command_ms_p999=%.3f "
         "frame_to_command_ms_max=%.3f decode_errors=%llu inference_errors=%llu "
-        "memory_rss_kb=%zu memory_hwm_kb=%zu\n",
+        "short_frames=%llu memory_rss_kb=%zu memory_hwm_kb=%zu\n",
         duration_sec, static_cast<unsigned long long>(captured_),
         static_cast<unsigned long long>(processed_),
         static_cast<unsigned long long>(detections_),
@@ -171,7 +171,8 @@ void Metrics::emit_result(double duration_sec) const {
         percentile_ms(f2c_ms_, 0.99), percentile_ms(f2c_ms_, 0.999),
         percentile_ms(f2c_ms_, 1.0),
         static_cast<unsigned long long>(decode_errors_),
-        static_cast<unsigned long long>(inference_errors_), read_rss_kb(),
+        static_cast<unsigned long long>(inference_errors_),
+        static_cast<unsigned long long>(short_frames_), read_rss_kb(),
         rss_hwm_kb_);
 }
 

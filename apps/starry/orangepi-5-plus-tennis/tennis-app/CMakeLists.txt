@@ -39,57 +39,64 @@ if(TENNIS_HOST_DRYRUN)
     target_include_directories(tennis_app PRIVATE cpp)
     target_compile_options(tennis_app PRIVATE -Wall -Wextra)
 else()
-    # --- Board build: reuse the sibling uvc-rknn vendored code, do not duplicate.
-    set(TENNIS_RKNN_SHARED_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../orangepi-5-plus-uvc-rknn/rknn-yolov8-image"
-        CACHE PATH "Path to the orangepi-5-plus-uvc-rknn native runner (reused RKNN/UVC/RGA code)")
-
-    if(NOT EXISTS "${TENNIS_RKNN_SHARED_DIR}/3rdparty/CMakeLists.txt")
-        message(FATAL_ERROR
-            "TENNIS_RKNN_SHARED_DIR='${TENNIS_RKNN_SHARED_DIR}' does not contain the "
-            "uvc-rknn native runner. Point it at apps/starry/orangepi-5-plus-uvc-rknn/"
-            "rknn-yolov8-image (it provides the reused RKNN/UVC/RGA libraries).")
-    endif()
-
+    # --- Board build: fully self-contained. All RKNN/UVC/RGA/utils code is now
+    # vendored under this app (3rdparty/, utils/, cpp/uvc_capture.cc,
+    # cpp/postprocess.cc, cpp/rknpu2/yolov8.cc) -- no dependency on the sibling
+    # orangepi-5-plus-uvc-rknn app.
     set(CMAKE_INSTALL_RPATH "$ORIGIN/lib")
     set(TARGET_SOC rk3588 CACHE STRING "Rockchip target SoC")
 
-    # Reuse the sibling's 3rdparty resolver (exports LIBRKNNRT/LIBJPEG/LIBRGA +
-    # *_INCLUDES, and installs librknnrt.so/librga.so to lib/) and its static
-    # image/file/drawing utility libraries.
-    add_subdirectory(${TENNIS_RKNN_SHARED_DIR}/3rdparty ${CMAKE_BINARY_DIR}/shared_3rdparty)
-    add_subdirectory(${TENNIS_RKNN_SHARED_DIR}/utils ${CMAKE_BINARY_DIR}/shared_utils)
+    # Vendored 3rdparty resolver (exports LIBRKNNRT/LIBJPEG/LIBRGA + *_INCLUDES,
+    # installs librknnrt.so/librga.so to lib/) and the static image/file/drawing
+    # utility libraries. 3rdparty must precede utils (utils links ${LIBRGA}).
+    add_subdirectory(3rdparty ${CMAKE_BINARY_DIR}/vendor_3rdparty)
+    add_subdirectory(utils ${CMAKE_BINARY_DIR}/vendor_utils)
 
-    # Reused, vendored RKNN/UVC sources (compiled into tennis_app directly).
-    set(TENNIS_SHARED_SRC
-        ${TENNIS_RKNN_SHARED_DIR}/cpp/uvc_capture.cc
-        ${TENNIS_RKNN_SHARED_DIR}/cpp/rknpu2/yolov8.cc
-        ${TENNIS_RKNN_SHARED_DIR}/cpp/postprocess.cc
+    # Vendored RKNN/UVC sources (compiled into tennis_app directly).
+    set(TENNIS_VENDORED_SRC
+        cpp/uvc_capture.cc
+        cpp/rknpu2/yolov8.cc
+        cpp/postprocess.cc
     )
+
+    # Vendored librockchip_mpp (RK3588 JPU MJPEG decode via /dev/mpp_service).
+    set(LIBMPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/mpp)
+    set(LIBMPP_INCLUDES ${LIBMPP_DIR}/include)
+    find_library(LIBMPP NAMES rockchip_mpp PATHS ${LIBMPP_DIR}/lib NO_DEFAULT_PATH)
+    if(NOT LIBMPP)
+        message(FATAL_ERROR "librockchip_mpp not found in ${LIBMPP_DIR}/lib")
+    endif()
 
     add_executable(tennis_app
         ${TENNIS_CORE_SRC}
         cpp/live.cc
         cpp/perception/camera.cc
         cpp/perception/tennis_detector.cc
+        cpp/perception/jpu_decoder.cc
         cpp/perception/bucket_detector.cc
-        ${TENNIS_SHARED_SRC}
+        ${TENNIS_VENDORED_SRC}
     )
 
     target_include_directories(tennis_app PRIVATE
         cpp
-        ${TENNIS_RKNN_SHARED_DIR}/cpp
-        ${TENNIS_RKNN_SHARED_DIR}/cpp/rknpu2
-        ${TENNIS_RKNN_SHARED_DIR}/utils
+        cpp/rknpu2
+        utils
         ${LIBRKNNRT_INCLUDES}
         ${LIBJPEG_INCLUDES}
+        ${LIBRGA_INCLUDES}
+        ${LIBMPP_INCLUDES}
     )
 
+    # LIBRGA is linked explicitly: the detector calls librga (imcvtcolor /
+    # importbuffer_fd) directly for the zero-copy YUYV->RGB preprocess, not only
+    # transitively through imageutils.
     target_link_libraries(tennis_app
         imageutils
         fileutils
         ${LIBRKNNRT}
         ${LIBJPEG}
+        ${LIBRGA}
+        ${LIBMPP}
         dl
     )
 
@@ -105,6 +112,9 @@ else()
     endif()
 
     install(TARGETS tennis_app DESTINATION .)
+    # Deploy librockchip_mpp alongside the binary (RPATH is $ORIGIN/lib).
+    file(GLOB LIBMPP_SOFILES ${LIBMPP_DIR}/lib/librockchip_mpp.so*)
+    install(FILES ${LIBMPP_SOFILES} DESTINATION lib)
     install(DIRECTORY model DESTINATION .)
     install(DIRECTORY validation DESTINATION . OPTIONAL)
 endif()

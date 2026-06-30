@@ -6,9 +6,8 @@
 # The result is installed under install/rk3588_linux_aarch64/tennis_app and must
 # be copied onto the board rootfs (see README.md "On-board install").
 #
-# The build REUSES the vendored RKNN/UVC/RGA code from the sibling
-# orangepi-5-plus-uvc-rknn app (no duplicated libraries); override the location
-# with TENNIS_RKNN_SHARED_DIR if that app lives elsewhere.
+# The build is fully self-contained: all RKNN/UVC/RGA/utils code is vendored under
+# tennis-app/ (3rdparty/, utils/, cpp/). No sibling app is required.
 set -euo pipefail
 
 case_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -33,7 +32,6 @@ else
 fi
 cc="${CC:-${cross_prefix}gcc}"
 cxx="${CXX:-${cross_prefix}g++}"
-shared_dir="${TENNIS_RKNN_SHARED_DIR:-${case_dir}/../orangepi-5-plus-uvc-rknn/rknn-yolov8-image}"
 jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 command -v "${cc}" >/dev/null
@@ -49,8 +47,7 @@ cmake -S "${src_dir}" -B "${build_dir}" \
   -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="${install_dir}" \
-  -DTARGET_SOC=rk3588 \
-  -DTENNIS_RKNN_SHARED_DIR="${shared_dir}"
+  -DTARGET_SOC=rk3588
 
 cmake --build "${build_dir}" -j"${jobs}"
 cmake --install "${build_dir}"
