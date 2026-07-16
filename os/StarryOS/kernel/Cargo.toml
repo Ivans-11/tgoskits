@@ -74,6 +74,7 @@ memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu"]
 jpeg = ["ax-driver/jpeg"]
 rga = ["ax-driver/rga", "dep:rockchip-rga"]
+rockchip-vop2 = ["ax-driver/rockchip-vop2"]
 rk3588-pwm = [
     "ax-driver/rk3588-pwm",
     "dep:rdif-pwm",
