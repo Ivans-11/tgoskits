@@ -70,6 +70,7 @@ members = [
     "drivers/net/*",
     "drivers/npu/*",
     "drivers/pci/*",
+    "drivers/phy/*",
     "drivers/pwm/*",
     "drivers/rdrive*",
     "drivers/rtc/*",

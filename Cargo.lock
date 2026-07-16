@@ -6905,6 +6905,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rockchip-hdptx-phy"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "rockchip-jpeg"
 version = "0.1.5"
 dependencies = [
