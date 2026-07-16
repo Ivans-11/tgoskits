@@ -75,6 +75,7 @@ rknpu = ["ax-driver/rknpu"]
 jpeg = ["ax-driver/jpeg"]
 rga = ["ax-driver/rga", "dep:rockchip-rga"]
 rockchip-vop2 = ["ax-driver/rockchip-vop2"]
+rockchip-vop2-coldinit = ["ax-driver/rockchip-vop2-coldinit"]
 rk3588-pwm = [
     "ax-driver/rk3588-pwm",
     "dep:rdif-pwm",
