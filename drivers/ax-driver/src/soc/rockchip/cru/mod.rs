@@ -18,6 +18,35 @@ fn lock_cru(cru: &SharedCru) -> RawSpinLockGuard<'_, Cru> {
     unsafe { cru.lock_raw() }
 }
 
+/// A process-wide handle to the registered CRU, stashed at probe time so
+/// non-rdif callers (e.g. the display cold-init) can reach CRU operations that
+/// aren't exposed through the `rdif_clk`/`rdif_reset` wrappers (like the VOP
+/// display-clock setup and the HDPTX PHY resets).
+static SHARED_CRU: Mutex<Option<SharedCru>> = Mutex::new(None);
+
+pub(crate) fn set_shared_cru(cru: SharedCru) {
+    // SAFETY: platform discovery serializes CRU registration.
+    *unsafe { SHARED_CRU.lock_raw() } = Some(cru);
+}
+
+/// Run `f` with the registered CRU, if one has been probed.
+pub fn with_cru<R>(f: impl FnOnce(&mut Cru) -> R) -> Option<R> {
+    let cru = {
+        // SAFETY: the handle is only replaced during serialized probe.
+        unsafe { SHARED_CRU.lock_raw() }.as_ref()?.clone()
+    };
+    Some(f(&mut lock_cru(&cru)))
+}
+
+/// Assert a CRU reset line by its DT reset id. Returns `false` if no CRU exists.
+pub fn reset_assert(id: usize) -> bool {
+    with_cru(|c| c.reset_assert(RstId::from(id))).is_some()
+}
+/// Deassert a CRU reset line by its DT reset id.
+pub fn reset_deassert(id: usize) -> bool {
+    with_cru(|c| c.reset_deassert(RstId::from(id))).is_some()
+}
+
 pub struct ClkDrv {
     name: &'static str,
     inner: SharedCru,
