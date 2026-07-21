@@ -340,6 +340,7 @@ clk_gate_table!(
     HCLK_RGA2 => (45, 7),
     ACLK_RGA2 => (45, 8),
     CLK_RGA2_CORE => (45, 9),
+
     // ========================================================================
     // JPEG 解码器 (VDPU) 叶子时钟门控
     // (leaf gates verified against mainline drivers/clk/rockchip/clk-rk3588.c:
@@ -348,6 +349,7 @@ clk_gate_table!(
     // ========================================================================
     ACLK_JPEG_DECODER => (45, 2),
     HCLK_JPEG_DECODER => (45, 3),
+
 );
 
 clk_pmu_gate_table!(
@@ -445,9 +447,9 @@ mod tests {
         // NPU: 22
         // PCIe/PHP: 57
         // USB: 21 main/php gates + 2 PMU composite gates
+        // NVM/eMMC: 7
         // RGA2: 3 (hclk/aclk/core)
         // JPEG decoder (VDPU): 2
-        // NVM/eMMC: 7
         // 总计: 178
         assert_eq!(
             CLK_GATE_TABLE.len()
