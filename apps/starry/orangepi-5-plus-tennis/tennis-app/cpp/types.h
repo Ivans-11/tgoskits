@@ -112,6 +112,8 @@ struct Config {
     int align_stall_frames = 20;
     int align_stall_move_px = 10;
     int align_kick_spd = 35;
+    int align_kick_ms = 180;
+    int align_kick_brake_ms = 20;
 
     // Ball lost search.
     int search_frames = 25;
@@ -140,10 +142,11 @@ struct Config {
     // overcomes stall. Lives in the abstract Motor layer, not the backend.
     int motor_min_speed = 15;
 
-    // Brief settle windows (frames) for the otherwise-instant virtual arm moves,
-    // so GRAB/DEPOSIT are observable states rather than zero-width transitions.
-    int grab_settle_frames = 3;
-    int deposit_settle_frames = 3;
+    // Physical action timing. Timed motor phases remain non-blocking, while the
+    // state machine keeps issuing the latched command until its deadline.
+    int brake_hold_ms = 350;
+    int grab_settle_ms = 100;
+    int release_settle_ms = 500;
 
     // Drop a detection whose source frame is older than this (0 = never). Keeps
     // control acting on fresh perception under load.

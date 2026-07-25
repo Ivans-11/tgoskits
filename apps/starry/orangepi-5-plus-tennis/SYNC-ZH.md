@@ -85,6 +85,8 @@ tennis_app --mode live --motor-backend uart --motor-device /dev/ttyS3 \
 
 电机支持 `virtual`、`pwm` 和 `uart`，机械臂支持 `virtual` 和 `uart`，两者可独立组合。`--virtual-actuators` 保留为同时选择两个虚拟后端的兼容参数。真实 UART 机械臂按标定动作同步等待舵机到位，因此其动作耗时会计入 LIVE 模式延迟；真实后端初始化失败时程序直接报错退出，不会静默切换为虚拟后端。
 
+LIVE 控制使用单调时钟推进抓取/投放前制动和对准脱困阶段，不依赖相机帧率，也不会用阻塞循环反复写执行器。真实机械臂在启动时归位；相机需在限定时间内产生连续有效帧，运行中停帧超过 watchdog 会停车退出；执行器 I/O 失败以及 `SIGINT`/`SIGTERM` 同样通过正常清理路径停车。`dry-run` 强制使用虚拟执行器，避免合成场景驱动物理硬件。
+
 ## 产生的指标
 
 基准输出行 `TENNIS_BENCH_RESULT` 各关键字段含义：

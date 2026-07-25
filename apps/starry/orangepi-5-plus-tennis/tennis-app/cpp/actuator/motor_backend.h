@@ -12,18 +12,18 @@ namespace tennis {
 class MotorBackend {
 public:
     virtual ~MotorBackend() = default;
-    virtual void drive(int left, int right) = 0; // set per-wheel speed
-    virtual void brake() = 0;                     // actively lock both wheels
-    virtual void standby() = 0;                   // coast / outputs off
+    virtual bool drive(int left, int right) = 0; // set per-wheel speed
+    virtual bool brake() = 0;                    // actively lock both wheels
+    virtual bool standby() = 0;                  // coast / outputs off
 };
 
 // Virtual backend: emits structured, machine-readable command lines and touches
 // no hardware.
 class TraceMotorBackend final : public MotorBackend {
 public:
-    void drive(int left, int right) override;
-    void brake() override;
-    void standby() override;
+    bool drive(int left, int right) override;
+    bool brake() override;
+    bool standby() override;
 };
 
 } // namespace tennis

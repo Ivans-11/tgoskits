@@ -167,6 +167,7 @@ static int run_dry_run(const Options &opts) {
     int64_t next_frame = start;
     int64_t last_report = start;
     int64_t t_first_cmd = 0;
+    bool actuator_failed = false;
 
     while (monotonic_ns() < end) {
         const int64_t capture_ts = monotonic_ns();
@@ -174,7 +175,10 @@ static int run_dry_run(const Options &opts) {
         Detection det = scene.next(controller.perception_mode(),
                                    controller.state(), seq, capture_ts);
         const int64_t t_ctrl0 = monotonic_ns();
-        controller.process(det);
+        if (!controller.process(det)) {
+            actuator_failed = true;
+            break;
+        }
         const int64_t t_ctrl1 = monotonic_ns();
         if (t_first_cmd == 0) t_first_cmd = t_ctrl1;
         ++seq;
@@ -200,6 +204,7 @@ static int run_dry_run(const Options &opts) {
         const int64_t sleep = next_frame - monotonic_ns();
         if (sleep > 0) sleep_ns(sleep);
     }
+    if (actuator_failed) (void)actuators.motor->standby();
 
     const double dur = ns_to_ms(monotonic_ns() - start) / 1000.0;
     if (opts.profile) {
@@ -219,7 +224,7 @@ static int run_dry_run(const Options &opts) {
         metrics.close_csv();
     }
     std::printf("TENNIS_BENCH_DONE\n");
-    return 0;
+    return actuator_failed ? 1 : 0;
 }
 
 static void usage(const char *prog) {
@@ -238,6 +243,9 @@ static void usage(const char *prog) {
         "  --arm-backend <kind>     virtual|uart (default virtual)\n"
         "  --arm-device <path>      arm UART device (default /dev/ttyUSB0)\n"
         "  --motor-min-speed <n>    real motor dead-zone floor (default 15)\n"
+        "  --camera-warmup-frames <n> consecutive startup frames (default 3)\n"
+        "  --camera-warmup-timeout-ms <n> startup deadline (default 3000)\n"
+        "  --camera-watchdog-ms <n> no-frame stop timeout (default 2000)\n"
         "  --virtual-actuators      select both virtual backends (compatibility)\n"
         "  --ball-class <n>         class id of the ball (0 tennis model; 32 COCO)\n"
         "  --min-confidence <0-100> detection confidence threshold (default 50)\n"
@@ -291,6 +299,9 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--log-every", v)) { o.log_every = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--staleness-ms", v)) { o.cfg.staleness_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--motor-min-speed", v)) { o.cfg.motor_min_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--camera-warmup-frames", v)) { o.camera_warmup_frames = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--camera-warmup-timeout-ms", v)) { o.camera_warmup_timeout_ms = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--camera-watchdog-ms", v)) { o.camera_watchdog_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--min-confidence", v)) {
             int c = std::atoi(v.c_str());
             if (c < 0) c = 0;
@@ -318,6 +329,12 @@ static int parse_options(int argc, char **argv, Options &o) {
                      "TENNIS_ERROR --motor-min-speed must be in [1,100]\n");
         return 2;
     }
+    if (o.camera_warmup_frames < 0 || o.camera_warmup_timeout_ms <= 0 ||
+        o.camera_watchdog_ms <= 0) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR camera warmup/watchdog values are invalid\n");
+        return 2;
+    }
     if (o.motor_backend != "virtual" && o.motor_backend != "pwm" &&
         o.motor_backend != "uart") {
         std::fprintf(stderr, "TENNIS_ERROR unsupported motor backend: %s\n",
@@ -327,6 +344,12 @@ static int parse_options(int argc, char **argv, Options &o) {
     if (o.arm_backend != "virtual" && o.arm_backend != "uart") {
         std::fprintf(stderr, "TENNIS_ERROR unsupported arm backend: %s\n",
                      o.arm_backend.c_str());
+        return 2;
+    }
+    if (o.mode == "dry-run" &&
+        (o.motor_backend != "virtual" || o.arm_backend != "virtual")) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR dry-run requires virtual actuators\n");
         return 2;
     }
     return 0;

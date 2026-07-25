@@ -15,6 +15,7 @@ The default virtual motor/arm backends give a clean, **non-blocking** seam betwe
 - The motor can instead use four RK3588 PWM sysfs channels driving a DRV8833, or the ESP32-C3 UART controller used by `aka-rk3588`.
 - The arm can instead use the ZP10D UART bus-servo controller and the calibrated `aka-rk3588` grab poses.
 - Motor and arm selection is independent, so mixed configurations such as a PWM chassis with a virtual arm are supported. Real backend initialization errors are fatal and never silently fall back to virtual output.
+- `dry-run` always requires both virtual backends, so a synthetic scene cannot accidentally move physical hardware.
 
 ## Architecture
 
@@ -23,6 +24,8 @@ The pipeline is built for low frame-to-command latency:
 - **Capture thread (drop-old):** `libuvc` runs its own capture thread and latches only the **newest** frame into a sequenced latest-frame slot (frame id + capture timestamp). Old frames are dropped rather than queued.
 - **Latest-frame slot:** the perception/control loop reads the most recent frame from this slot, so it never works on stale backlog.
 - **Perception + control loop:** reads the latest frame, runs YOLOv8 **or** HSV per the current state (never both — no redundant decode), runs the state machine, and calls the selected actuator backends. Virtual backends are non-blocking; UART ACK waits and calibrated servo movement delays are included in live latency when real UART hardware is selected.
+- **Timed motion phases:** grab/deposit braking and alignment recovery use monotonic deadlines rather than blocking loops or frame counts. A 1 ms control tick advances these deadlines even without a new frame, while command de-duplication avoids repeated UART/sysfs writes.
+- **Fail-safe lifecycle:** a real arm is homed before control starts, startup waits for consecutive valid camera frames, a no-frame watchdog stops the run, actuator I/O failures are fatal, and `SIGINT`/`SIGTERM` return through normal motor shutdown.
 - **Multi-core NPU:** inference runs across all three RK3588 NPU cores via `rknn_set_core_mask` (`RKNN_NPU_CORE_0_1_2`). The stock image/stream binaries do not set this.
 - **Single-class postprocess:** the YOLOv8 head is decoded for a single tennis-ball class. No per-frame heap allocation in the steady state.
 - **HSV bucket detection:** the bucket is found with an HSV red-bucket detector rather than a second NPU pass.
@@ -164,6 +167,9 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--arm-device <path>` | `/dev/ttyUSB0` | ZP10D UART path |
 | `--motor-min-speed <n>` | `15` | Minimum non-zero real motor command |
 | `--virtual-actuators` | — | Compatibility shorthand selecting both virtual backends |
+| `--camera-warmup-frames <n>` | `3` | Consecutive valid frames required before live control |
+| `--camera-warmup-timeout-ms <n>` | `3000` | Camera startup deadline |
+| `--camera-watchdog-ms <n>` | `2000` | Stop after this long without a new frame |
 | `--ball-class <n>` | `0` | `0` for a single-class tennis model; `32` = COCO sports ball |
 | `--min-confidence <0-100>` | `50` | Detection confidence threshold |
 | `--log-every <n>` | `1` | Emit per-frame lines every Nth frame |
@@ -222,13 +228,14 @@ Fields on the `TENNIS_BENCH_RESULT` line:
 - RKNN YOLOv8 ball detection
 - Full state machine (`CHASE_BALL`, `GRAB`, `FIND_BUCKET`, `APPROACH_BUCKET`, `DEPOSIT`)
 - HSV red-bucket detection
-- Virtual differential motor + gripper-arm commands
+- Selectable virtual/PWM/UART motor and virtual/UART arm backends
 - The `TENNIS_BENCH_RESULT` benchmark
 
-**Requires the physical car later (designed-for but disabled, hardware-gated, not the default):**
+**Real actuator support (explicitly selected, not the default):**
 
-- Real UART differential-motor backend (ESP32-C3, `0xAA 0x55` framed protocol @115200)
-- Real UART gripper-arm backend (ZP10D bus servo, ASCII `#IDPpulseTtime!` @115200)
+- RK3588 PWM sysfs + DRV8833 differential-motor backend
+- ESP32-C3 UART differential-motor backend (`0xAA 0x55` framed protocol @115200)
+- ZP10D UART gripper-arm backend (ASCII `#IDPpulseTtime!` @115200)
 
 ## Attribution
 
@@ -240,8 +247,6 @@ The reused RKNN/UVC/image-utility code is Apache-2.0 (Rockchip) and is shared fr
 
 ## Next steps
 
-1. Add a real UART motor backend once the car arrives.
-2. Add a real UART arm backend once the car arrives.
-3. Switch preprocessing to RGA once `/dev/rga` works.
-4. Split a dedicated control thread + multiple `rknn_dup_context` NPU workers for true 3-core parallelism.
-5. Add a Linux-vs-Starry benchmark comparison.
+1. Move the calibrated multi-step arm sequence to an asynchronous executor if perception must continue while the chassis is intentionally stopped for grabbing.
+2. Evaluate multiple `rknn_dup_context` NPU workers against the current low-latency latest-frame pipeline.
+3. Add a Linux-vs-Starry benchmark comparison.

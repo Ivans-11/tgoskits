@@ -52,11 +52,11 @@ PwmMotorBackend::PwmMotorBackend(const std::string &spec) {
         if (!initialize(output)) return;
     }
     ready_ = true;
-    standby();
+    if (!standby()) ready_ = false;
 }
 
 PwmMotorBackend::~PwmMotorBackend() {
-    if (ready_) standby();
+    if (ready_) (void)standby();
 }
 
 bool PwmMotorBackend::parse(const std::string &spec) {
@@ -107,37 +107,37 @@ bool PwmMotorBackend::set_output(Index index, bool enable, int speed) {
            write_value(output.channel + "enable", enable ? 1 : 0);
 }
 
-void PwmMotorBackend::set_pair(Index forward, Index backward, int speed) {
+bool PwmMotorBackend::set_pair(Index forward, Index backward, int speed) {
     if (speed > 0) {
-        set_output(backward, false, 0);
-        set_output(forward, true, speed);
+        const bool stopped = set_output(backward, false, 0);
+        return set_output(forward, true, speed) && stopped;
     } else if (speed < 0) {
-        set_output(forward, false, 0);
-        set_output(backward, true, -speed);
+        const bool stopped = set_output(forward, false, 0);
+        return set_output(backward, true, -speed) && stopped;
     } else {
-        set_output(forward, false, 0);
-        set_output(backward, false, 0);
+        const bool forward_stopped = set_output(forward, false, 0);
+        return set_output(backward, false, 0) && forward_stopped;
     }
 }
 
-void PwmMotorBackend::drive(int left, int right) {
-    set_pair(LeftForward, LeftBackward, left);
+bool PwmMotorBackend::drive(int left, int right) {
+    const bool left_ok = set_pair(LeftForward, LeftBackward, left);
     const int compensated = right + (right > 0 ? 2 : right < 0 ? -2 : 0);
-    set_pair(RightForward, RightBackward, compensated);
+    return set_pair(RightForward, RightBackward, compensated) && left_ok;
 }
 
-void PwmMotorBackend::brake() {
-    set_output(LeftForward, true, 100);
-    set_output(LeftBackward, true, 100);
-    set_output(RightForward, true, 100);
-    set_output(RightBackward, true, 100);
+bool PwmMotorBackend::brake() {
+    bool ok = set_output(LeftForward, true, 100);
+    ok = set_output(LeftBackward, true, 100) && ok;
+    ok = set_output(RightForward, true, 100) && ok;
+    return set_output(RightBackward, true, 100) && ok;
 }
 
-void PwmMotorBackend::standby() {
-    set_output(LeftForward, false, 0);
-    set_output(LeftBackward, false, 0);
-    set_output(RightForward, false, 0);
-    set_output(RightBackward, false, 0);
+bool PwmMotorBackend::standby() {
+    bool ok = set_output(LeftForward, false, 0);
+    ok = set_output(LeftBackward, false, 0) && ok;
+    ok = set_output(RightForward, false, 0) && ok;
+    return set_output(RightBackward, false, 0) && ok;
 }
 
 } // namespace tennis

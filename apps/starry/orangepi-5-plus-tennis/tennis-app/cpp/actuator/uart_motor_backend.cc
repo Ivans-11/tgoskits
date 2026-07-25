@@ -48,7 +48,7 @@ UartMotorBackend::UartMotorBackend(const std::string &device, int speed_scale,
 }
 
 UartMotorBackend::~UartMotorBackend() {
-    if (serial_.is_open()) send_command(kCmdReset, nullptr, 0, false);
+    if (serial_.is_open()) (void)send_command(kCmdReset, nullptr, 0, false);
 }
 
 bool UartMotorBackend::send_command(uint8_t command, const uint8_t *payload,
@@ -92,34 +92,34 @@ bool UartMotorBackend::receive_ack(int timeout_ms) {
     return false;
 }
 
-void UartMotorBackend::set_speed(uint8_t motor, int16_t speed) {
+bool UartMotorBackend::set_speed(uint8_t motor, int16_t speed) {
     const auto encoded = static_cast<uint16_t>(speed);
     uint8_t payload[3] = {motor, static_cast<uint8_t>(encoded >> 8),
                           static_cast<uint8_t>(encoded)};
-    send_command(kCmdSetSpeed, payload, sizeof(payload));
+    return send_command(kCmdSetSpeed, payload, sizeof(payload));
 }
 
-void UartMotorBackend::drive(int left, int right) {
+bool UartMotorBackend::drive(int left, int right) {
     auto scaled = [this](int speed) {
         speed = std::clamp(speed, -100, 100);
         return static_cast<int16_t>(speed * speed_scale_ / 100);
     };
-    set_speed(0, scaled(left));
-    set_speed(1, scaled(right));
+    const bool left_ok = set_speed(0, scaled(left));
+    return set_speed(1, scaled(right)) && left_ok;
 }
 
-void UartMotorBackend::brake() {
+bool UartMotorBackend::brake() {
     const uint8_t left = 0;
     const uint8_t right = 1;
-    send_command(kCmdBrake, &left, 1);
-    send_command(kCmdBrake, &right, 1);
+    const bool left_ok = send_command(kCmdBrake, &left, 1);
+    return send_command(kCmdBrake, &right, 1) && left_ok;
 }
 
-void UartMotorBackend::standby() {
+bool UartMotorBackend::standby() {
     const uint8_t left = 0;
     const uint8_t right = 1;
-    send_command(kCmdStop, &left, 1);
-    send_command(kCmdStop, &right, 1);
+    const bool left_ok = send_command(kCmdStop, &left, 1);
+    return send_command(kCmdStop, &right, 1) && left_ok;
 }
 
 } // namespace tennis

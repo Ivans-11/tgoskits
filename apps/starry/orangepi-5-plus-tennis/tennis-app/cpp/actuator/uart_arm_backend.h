@@ -13,12 +13,12 @@ public:
     explicit UartArmBackend(const std::string &device);
 
     bool is_ready() const { return ready_; }
-    void grab() override;
-    void release() override;
-    void ready() override;
+    bool grab() override;
+    bool release() override;
+    bool ready() override;
 
 private:
-    void set_angle(int servo, float angle, int time_ms = 1000);
+    bool set_angle(int servo, float angle, int time_ms = 1000);
     bool send(const std::string &command);
 
     SerialDevice serial_;

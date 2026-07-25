@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <signal.h>
 
 #include "bench/metrics.h"
 #include "actuator/actuator_factory.h"
@@ -37,6 +38,38 @@
 namespace tennis {
 
 static constexpr int64_t kIdleSleepNs = 1000000; // 1 ms when no new frame
+static constexpr int64_t kArmReadySettleNs = 1000000000; // T1000 servo command
+
+volatile sig_atomic_t g_termination_requested = 0;
+
+void request_termination(int) {
+    g_termination_requested = 1;
+}
+
+class TerminationSignals {
+public:
+    TerminationSignals() {
+        g_termination_requested = 0;
+        struct sigaction action {};
+        action.sa_handler = request_termination;
+        sigemptyset(&action.sa_mask);
+        int_installed_ = sigaction(SIGINT, &action, &old_int_) == 0;
+        term_installed_ = sigaction(SIGTERM, &action, &old_term_) == 0;
+    }
+
+    ~TerminationSignals() {
+        if (int_installed_) sigaction(SIGINT, &old_int_, nullptr);
+        if (term_installed_) sigaction(SIGTERM, &old_term_, nullptr);
+    }
+
+    bool requested() const { return g_termination_requested != 0; }
+
+private:
+    struct sigaction old_int_ {};
+    struct sigaction old_term_ {};
+    bool int_installed_ = false;
+    bool term_installed_ = false;
+};
 
 static Config make_cfg(const Options &opts) {
     Config cfg = opts.cfg;
@@ -49,9 +82,18 @@ int run_live(const Options &opts) {
     // Cold-start clock: process start ~= run_live entry (arg parse is trivial).
     const int64_t t_proc_start = monotonic_ns();
     Config cfg = make_cfg(opts);
+    TerminationSignals termination;
 
     Actuators actuators;
     if (!make_actuators(opts, actuators)) return 1;
+    int64_t arm_ready_deadline = 0;
+    if (opts.arm_backend != "virtual") {
+        if (!actuators.arm->ready()) {
+            std::fprintf(stderr, "TENNIS_ERROR initial arm homing failed\n");
+            return 1;
+        }
+        arm_ready_deadline = monotonic_ns() + kArmReadySettleNs;
+    }
 
     Camera cam;
     const int64_t t_cap0 = monotonic_ns();
@@ -70,6 +112,19 @@ int run_live(const Options &opts) {
         return 1;
     }
     const int64_t t_mdl1 = monotonic_ns();
+
+    if (!cam.warm_up(opts.camera_warmup_frames,
+                     opts.camera_warmup_timeout_ms)) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR camera warmup timed out after %d ms\n",
+                     opts.camera_warmup_timeout_ms);
+        return 1;
+    }
+    while (!termination.requested() &&
+           arm_ready_deadline > monotonic_ns()) {
+        sleep_ns(kIdleSleepNs);
+    }
+    if (termination.requested()) return 0;
 
     BucketDetector bucket(cfg);
     Metrics metrics;
@@ -105,16 +160,32 @@ int run_live(const Options &opts) {
     LatestFrame lf;
     int64_t capture_ts = 0;
     int64_t last_report = start;
+    int64_t last_frame = start;
     int64_t t_first_frame = 0, t_first_detect = 0, t_first_cmd = 0;
+    bool actuator_failed = false;
     // One persistent RGB buffer reused by frame_to_image every frame (avoids a
     // malloc/free + page-zero per frame); freed once after the loop.
     image_buffer_t img{};
 
-    while (monotonic_ns() < end) {
+    while (!termination.requested() && monotonic_ns() < end) {
         if (!cam.poll(lf, capture_ts)) {
+            const int64_t now = monotonic_ns();
+            if (!controller.tick(now)) {
+                actuator_failed = true;
+                break;
+            }
+            if (now - last_frame >
+                static_cast<int64_t>(opts.camera_watchdog_ms) * 1000000) {
+                std::fprintf(stderr,
+                             "TENNIS_ERROR camera produced no frame for %d ms\n",
+                             opts.camera_watchdog_ms);
+                actuator_failed = true;
+                break;
+            }
             sleep_ns(kIdleSleepNs);
             continue;
         }
+        last_frame = monotonic_ns();
 
         const int64_t pickup = monotonic_ns();
         const double queue_age_ms = ns_to_ms(pickup - capture_ts);
@@ -171,7 +242,10 @@ int run_live(const Options &opts) {
         if (t_first_detect == 0) t_first_detect = d.detect_ts_ns;
 
         const int64_t t_ctrl0 = monotonic_ns();
-        controller.process(d);
+        if (!controller.process(d)) {
+            actuator_failed = true;
+            break;
+        }
         const int64_t t_ctrl1 = monotonic_ns();
         if (t_first_cmd == 0) t_first_cmd = t_ctrl1;
 
@@ -193,6 +267,11 @@ int run_live(const Options &opts) {
                 last_report = t_ctrl1;
             }
         }
+    }
+
+    if (!actuators.motor->standby()) actuator_failed = true;
+    if (termination.requested()) {
+        std::fprintf(stderr, "TENNIS_INFO termination requested; actuators stopped\n");
     }
 
     if (img.virt_addr) std::free(img.virt_addr);
@@ -229,7 +308,7 @@ int run_live(const Options &opts) {
 
     cam.stop();
     det.deinit();
-    return 0;
+    return actuator_failed ? 1 : 0;
 }
 
 int run_test_uvc(const Options &opts) {

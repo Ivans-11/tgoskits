@@ -14,9 +14,9 @@ public:
     ~PwmMotorBackend() override;
 
     bool ready() const { return ready_; }
-    void drive(int left, int right) override;
-    void brake() override;
-    void standby() override;
+    bool drive(int left, int right) override;
+    bool brake() override;
+    bool standby() override;
 
 private:
     struct Output {
@@ -28,7 +28,7 @@ private:
     bool parse(const std::string &spec);
     bool initialize(Output &output);
     bool set_output(Index index, bool enable, int speed);
-    void set_pair(Index forward, Index backward, int speed);
+    bool set_pair(Index forward, Index backward, int speed);
 
     std::array<Output, 4> outputs_{};
     bool ready_ = false;

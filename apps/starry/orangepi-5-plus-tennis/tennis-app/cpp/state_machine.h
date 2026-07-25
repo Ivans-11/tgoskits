@@ -2,13 +2,14 @@
 //
 // Game state machine + differential-drive steering. Pure logic: it consumes a
 // perception Detection and returns the desired motor/arm command. It performs
-// no I/O and no blocking sleeps (the reference robot busy-waited for hundreds
-// of ms inside brake/grab/deposit; here those are brief non-blocking states),
-// which keeps end-to-end frame->command latency equal to pure compute.
+// no I/O and no blocking sleeps. Calibrated brake and alignment intervals are
+// monotonic-time phases advanced by step()/tick(), independent of camera FPS.
 //
 // This is a clean reimplementation of the aka-rk3588 control flow (that repo
 // carries no license); constants live in Config and are re-derived, not copied.
 #pragma once
+
+#include <optional>
 
 #include "actuator/arm_backend.h"
 #include "types.h"
@@ -29,7 +30,11 @@ public:
     explicit StateMachine(const Config &cfg);
 
     // Run one control step against the latest detection; updates internal state.
-    ControlOutput step(const Detection &det);
+    ControlOutput step(const Detection &det, int64_t now_ns);
+
+    // Advance elapsed-time phases without consuming another detection. This
+    // keeps motor deadlines independent of camera FPS and temporary frame gaps.
+    std::optional<ControlOutput> tick(int64_t now_ns);
 
     // Detector the perception stage should run for the next frame.
     PerceptionMode perception_mode() const;
@@ -37,14 +42,24 @@ public:
     GameState state() const { return state_; }
 
 private:
-    ControlOutput chase_ball(const BallObs &ball);
-    ControlOutput grab();
+    enum TimedPhase {
+        Normal,
+        AlignKick,
+        AlignKickBrake,
+        BrakeForGrab,
+        BrakeForDeposit,
+    };
+
+    ControlOutput chase_ball(const BallObs &ball, int64_t now_ns);
+    ControlOutput grab(int64_t now_ns);
     ControlOutput find_bucket(const BucketObs &bucket);
-    ControlOutput approach_bucket(const BucketObs &bucket);
-    ControlOutput deposit();
+    ControlOutput approach_bucket(const BucketObs &bucket, int64_t now_ns);
+    ControlOutput deposit(int64_t now_ns);
 
     int base_speed(float area_ratio) const;
     void enter(GameState s);
+    bool run_timed_phase(int64_t now_ns, ControlOutput &out);
+    void start_timed_phase(TimedPhase phase, int64_t now_ns, int duration_ms);
 
     Config cfg_;
     int half_w_;
@@ -60,9 +75,14 @@ private:
     int align_off_min_ = 0;
     int align_off_max_ = 0;
 
-    // Transient-state settle counters.
-    int grab_frames_ = 0;
-    int deposit_frames_ = 0;
+    TimedPhase timed_phase_ = Normal;
+    int timed_direction_ = 0;
+    int64_t timed_deadline_ns_ = 0;
+
+    // GRAB/DEPOSIT issue their arm command once, then wait on an elapsed-time
+    // deadline rather than a frame count that changes with camera load.
+    bool state_action_started_ = false;
+    int64_t state_deadline_ns_ = 0;
 
     // Bucket bookkeeping.
     int bucket_confirm_ = 0;

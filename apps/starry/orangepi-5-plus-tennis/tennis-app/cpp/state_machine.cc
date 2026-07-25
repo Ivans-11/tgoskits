@@ -7,6 +7,12 @@
 
 namespace tennis {
 
+namespace {
+
+constexpr int64_t kNsPerMs = 1000000;
+
+} // namespace
+
 const char *to_string(GameState s) {
     switch (s) {
     case GameState::CHASE_BALL: return "CHASE_BALL";
@@ -44,10 +50,60 @@ void StateMachine::enter(GameState s) {
     // Reset per-state bookkeeping on entry.
     stop_confirm_ = 0;
     align_frames_ = 0;
-    grab_frames_ = 0;
-    deposit_frames_ = 0;
+    state_action_started_ = false;
+    state_deadline_ns_ = 0;
     bucket_confirm_ = 0;
     bucket_lost_ = 0;
+}
+
+void StateMachine::start_timed_phase(TimedPhase phase, int64_t now_ns,
+                                     int duration_ms) {
+    timed_phase_ = phase;
+    timed_deadline_ns_ = now_ns +
+                         static_cast<int64_t>(std::max(duration_ms, 0)) *
+                             kNsPerMs;
+}
+
+bool StateMachine::run_timed_phase(int64_t now_ns, ControlOutput &out) {
+    switch (timed_phase_) {
+    case Normal: return false;
+    case AlignKick:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Drive;
+            out.left = timed_direction_ * cfg_.align_kick_spd;
+            out.right = -out.left;
+            return true;
+        }
+        start_timed_phase(AlignKickBrake, now_ns, cfg_.align_kick_brake_ms);
+        out.motor_op = MotorOp::Brake;
+        return true;
+    case AlignKickBrake:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Brake;
+            return true;
+        }
+        timed_phase_ = Normal;
+        return false;
+    case BrakeForGrab:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Brake;
+            return true;
+        }
+        timed_phase_ = Normal;
+        enter(GameState::GRAB);
+        out = grab(now_ns);
+        return true;
+    case BrakeForDeposit:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Brake;
+            return true;
+        }
+        timed_phase_ = Normal;
+        enter(GameState::DEPOSIT);
+        out = deposit(now_ns);
+        return true;
+    }
+    return false;
 }
 
 // Forward speed for the far/approach zone: full speed when far, tapering to the
@@ -61,18 +117,30 @@ int StateMachine::base_speed(float area) const {
                             t * (cfg_.brake_speed - cfg_.chase_speed_far));
 }
 
-ControlOutput StateMachine::step(const Detection &det) {
+ControlOutput StateMachine::step(const Detection &det, int64_t now_ns) {
+    ControlOutput timed_output;
+    if (run_timed_phase(now_ns, timed_output)) return timed_output;
+
     switch (state_) {
-    case GameState::CHASE_BALL: return chase_ball(det.ball);
-    case GameState::GRAB: return grab();
+    case GameState::CHASE_BALL: return chase_ball(det.ball, now_ns);
+    case GameState::GRAB: return grab(now_ns);
     case GameState::FIND_BUCKET: return find_bucket(det.bucket);
-    case GameState::APPROACH_BUCKET: return approach_bucket(det.bucket);
-    case GameState::DEPOSIT: return deposit();
+    case GameState::APPROACH_BUCKET:
+        return approach_bucket(det.bucket, now_ns);
+    case GameState::DEPOSIT: return deposit(now_ns);
     }
     return {};
 }
 
-ControlOutput StateMachine::chase_ball(const BallObs &ball) {
+std::optional<ControlOutput> StateMachine::tick(int64_t now_ns) {
+    ControlOutput out;
+    if (run_timed_phase(now_ns, out)) return out;
+    if (state_ == GameState::GRAB) return grab(now_ns);
+    if (state_ == GameState::DEPOSIT) return deposit(now_ns);
+    return std::nullopt;
+}
+
+ControlOutput StateMachine::chase_ball(const BallObs &ball, int64_t now_ns) {
     ControlOutput out;
 
     if (!ball.found) {
@@ -102,19 +170,9 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball) {
     last_offset_ = offset;
     const int stop_off = offset - cfg_.stop_center_offset;
 
-    // Stop gate: ball close enough AND centred on the (off-centre) gripper
-    // target for N consecutive frames -> grab.
-    if (area >= cfg_.area_stop && std::abs(stop_off) <= cfg_.stop_center_zone) {
-        if (++stop_confirm_ >= cfg_.stop_confirm_cnt) {
-            enter(GameState::GRAB);
-        }
-        out.motor_op = MotorOp::Brake;
-        return out;
-    }
-    stop_confirm_ = 0;
-
     // Too close: back up (with a slight steer to keep the ball in view).
     if (area >= cfg_.area_reverse) {
+        stop_confirm_ = 0;
         align_frames_ = 0;
         int bias = (std::abs(offset) <= cfg_.center_dead_zone)
                        ? 0
@@ -125,6 +183,18 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball) {
         out.right = clampi(-cfg_.reverse_speed - bias, -100, 100);
         return out;
     }
+
+    // Stop gate: ball close enough AND centred on the (off-centre) gripper
+    // target for N consecutive frames. Hold active braking for a calibrated
+    // interval before moving the arm, without blocking camera processing.
+    if (area >= cfg_.area_stop && std::abs(stop_off) <= cfg_.stop_center_zone) {
+        if (++stop_confirm_ >= cfg_.stop_confirm_cnt) {
+            start_timed_phase(BrakeForGrab, now_ns, cfg_.brake_hold_ms);
+        }
+        out.motor_op = MotorOp::Brake;
+        return out;
+    }
+    stop_confirm_ = 0;
 
     // Close in area but not yet on the off-centre target: proportional pivot to
     // align, with a stall kick if the ball stops moving in the frame.
@@ -140,10 +210,12 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball) {
         out.motor_op = MotorOp::Drive;
         if (align_frames_ >= cfg_.align_stall_frames &&
             (align_off_max_ - align_off_min_) < cfg_.align_stall_move_px) {
-            // Stalled: a single stronger pivot to break static friction.
-            int dir = stop_off > 0 ? 1 : -1;
-            out.left = dir * cfg_.align_kick_spd;
-            out.right = -dir * cfg_.align_kick_spd;
+            // Hold the stronger pivot long enough to overcome static friction,
+            // then actively brake before resuming proportional alignment.
+            timed_direction_ = stop_off > 0 ? 1 : -1;
+            start_timed_phase(AlignKick, now_ns, cfg_.align_kick_ms);
+            out.left = timed_direction_ * cfg_.align_kick_spd;
+            out.right = -out.left;
             align_frames_ = 0;
         } else {
             float t = std::fabs(static_cast<float>(stop_off)) /
@@ -181,11 +253,17 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball) {
     return out;
 }
 
-ControlOutput StateMachine::grab() {
+ControlOutput StateMachine::grab(int64_t now_ns) {
     ControlOutput out;
     out.motor_op = MotorOp::Standby;
-    if (grab_frames_ == 0) out.arm = ArmAction::Grab; // issue once
-    if (++grab_frames_ >= cfg_.grab_settle_frames) {
+    if (!state_action_started_) {
+        out.arm = ArmAction::Grab;
+        state_action_started_ = true;
+        state_deadline_ns_ = now_ns +
+                             static_cast<int64_t>(
+                                 std::max(cfg_.grab_settle_ms, 0)) *
+                                 kNsPerMs;
+    } else if (now_ns >= state_deadline_ns_) {
         enter(GameState::FIND_BUCKET);
     }
     return out;
@@ -208,7 +286,8 @@ ControlOutput StateMachine::find_bucket(const BucketObs &bucket) {
     return out;
 }
 
-ControlOutput StateMachine::approach_bucket(const BucketObs &bucket) {
+ControlOutput StateMachine::approach_bucket(const BucketObs &bucket,
+                                            int64_t now_ns) {
     ControlOutput out;
     if (!bucket.found) {
         if (++bucket_lost_ > cfg_.bucket_lost_frames) {
@@ -221,7 +300,7 @@ ControlOutput StateMachine::approach_bucket(const BucketObs &bucket) {
 
     const float area = bucket.area_ratio;
     if (area >= cfg_.bucket_area_deposit) {
-        enter(GameState::DEPOSIT);
+        start_timed_phase(BrakeForDeposit, now_ns, cfg_.brake_hold_ms);
         out.motor_op = MotorOp::Brake;
         return out;
     }
@@ -240,12 +319,18 @@ ControlOutput StateMachine::approach_bucket(const BucketObs &bucket) {
     return out;
 }
 
-ControlOutput StateMachine::deposit() {
+ControlOutput StateMachine::deposit(int64_t now_ns) {
     ControlOutput out;
     out.motor_op = MotorOp::Standby;
-    if (deposit_frames_ == 0) out.arm = ArmAction::Release; // open over bucket
-    if (++deposit_frames_ >= cfg_.deposit_settle_frames) {
-        out.arm = ArmAction::Ready; // return home; round complete
+    if (!state_action_started_) {
+        out.arm = ArmAction::Release;
+        state_action_started_ = true;
+        state_deadline_ns_ = now_ns +
+                             static_cast<int64_t>(
+                                 std::max(cfg_.release_settle_ms, 0)) *
+                                 kNsPerMs;
+    } else if (now_ns >= state_deadline_ns_) {
+        out.arm = ArmAction::Ready;
         enter(GameState::CHASE_BALL);
         frames_since_seen_ = 1 << 20; // start the next round searching
     }

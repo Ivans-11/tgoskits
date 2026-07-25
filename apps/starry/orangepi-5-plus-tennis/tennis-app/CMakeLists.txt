@@ -39,6 +39,17 @@ if(TENNIS_HOST_DRYRUN)
     target_compile_definitions(tennis_app PRIVATE TENNIS_HOST_DRYRUN)
     target_include_directories(tennis_app PRIVATE cpp)
     target_compile_options(tennis_app PRIVATE -Wall -Wextra)
+
+    include(CTest)
+    if(BUILD_TESTING)
+        add_executable(tennis_state_machine_test
+            cpp/tests/state_machine_test.cc
+            cpp/state_machine.cc
+        )
+        target_include_directories(tennis_state_machine_test PRIVATE cpp)
+        target_compile_options(tennis_state_machine_test PRIVATE -Wall -Wextra)
+        add_test(NAME tennis_state_machine COMMAND tennis_state_machine_test)
+    endif()
 else()
     # --- Board build: fully self-contained. All RKNN/UVC/RGA/utils code is now
     # vendored under this app (3rdparty/, utils/, cpp/uvc_capture.cc,

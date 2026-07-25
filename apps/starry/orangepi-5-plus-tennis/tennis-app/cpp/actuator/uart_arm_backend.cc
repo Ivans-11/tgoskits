@@ -33,36 +33,36 @@ bool UartArmBackend::send(const std::string &command) {
     return false;
 }
 
-void UartArmBackend::set_angle(int servo, float angle, int time_ms) {
+bool UartArmBackend::set_angle(int servo, float angle, int time_ms) {
     angle = std::clamp(angle, 0.0f, kAngleMax);
     const int pulse = std::clamp(
         static_cast<int>(500.0f + angle / kAngleMax * 2000.0f), 500, 2500);
     char command[32];
     std::snprintf(command, sizeof(command), "#%03dP%04dT%d!", servo, pulse,
                   time_ms);
-    send(command);
+    return send(command);
 }
 
-void UartArmBackend::grab() {
-    set_angle(0, kServo0Grab);
-    set_angle(1, kServo1Grab);
-    set_angle(2, kOpen);
+bool UartArmBackend::grab() {
+    if (!set_angle(0, kServo0Grab) || !set_angle(1, kServo1Grab) ||
+        !set_angle(2, kOpen))
+        return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-    set_angle(2, kClosed);
+    if (!set_angle(2, kClosed)) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    set_angle(0, kServo0Lift);
-    set_angle(1, kServo1Lift);
+    if (!set_angle(0, kServo0Lift) || !set_angle(1, kServo1Lift)) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    return true;
 }
 
-void UartArmBackend::release() {
-    set_angle(2, kOpen);
+bool UartArmBackend::release() {
+    return set_angle(2, kOpen);
 }
 
-void UartArmBackend::ready() {
-    set_angle(0, kServo0Ready);
-    set_angle(1, kServo1Ready);
-    set_angle(2, kOpen);
+bool UartArmBackend::ready() {
+    const bool servo0 = set_angle(0, kServo0Ready);
+    const bool servo1 = set_angle(1, kServo1Ready);
+    return set_angle(2, kOpen) && servo0 && servo1;
 }
 
 } // namespace tennis

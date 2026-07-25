@@ -40,6 +40,27 @@ bool Camera::poll(LatestFrame &frame, int64_t &capture_ts_ns) {
     return true;
 }
 
+bool Camera::warm_up(int valid_frames, int timeout_ms) {
+    if (valid_frames <= 0) return true;
+    const int64_t deadline = monotonic_ns() +
+                             static_cast<int64_t>(timeout_ms) * 1000000;
+    int consecutive = 0;
+    while (monotonic_ns() < deadline) {
+        LatestFrame frame;
+        int64_t capture_ts_ns = 0;
+        if (!poll(frame, capture_ts_ns)) {
+            sleep_ns(1000000);
+            continue;
+        }
+        if (frame.width > 0 && frame.height > 0 && !frame.data.empty()) {
+            if (++consecutive >= valid_frames) return true;
+        } else {
+            consecutive = 0;
+        }
+    }
+    return false;
+}
+
 UvcCaptureCounters Camera::counters() {
     return capture_counters(&session_.state);
 }

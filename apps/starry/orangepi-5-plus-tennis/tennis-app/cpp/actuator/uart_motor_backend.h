@@ -17,15 +17,15 @@ public:
     ~UartMotorBackend() override;
 
     bool ready() const { return ready_; }
-    void drive(int left, int right) override;
-    void brake() override;
-    void standby() override;
+    bool drive(int left, int right) override;
+    bool brake() override;
+    bool standby() override;
 
 private:
     bool send_command(uint8_t command, const uint8_t *payload, uint8_t size,
                       bool expect_ack = true);
     bool receive_ack(int timeout_ms);
-    void set_speed(uint8_t motor, int16_t speed);
+    bool set_speed(uint8_t motor, int16_t speed);
 
     SerialDevice serial_;
     int speed_scale_;

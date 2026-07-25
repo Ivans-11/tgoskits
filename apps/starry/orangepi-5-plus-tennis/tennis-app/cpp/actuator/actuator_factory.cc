@@ -18,11 +18,11 @@ public:
     DeadZoneMotorBackend(std::unique_ptr<MotorBackend> backend, int minimum)
         : backend_(std::move(backend)), minimum_(std::clamp(minimum, 1, 100)) {}
 
-    void drive(int left, int right) override {
-        backend_->drive(map(left), map(right));
+    bool drive(int left, int right) override {
+        return backend_->drive(map(left), map(right));
     }
-    void brake() override { backend_->brake(); }
-    void standby() override { backend_->standby(); }
+    bool brake() override { return backend_->brake(); }
+    bool standby() override { return backend_->standby(); }
 
 private:
     int map(int speed) const {

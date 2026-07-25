@@ -23,10 +23,12 @@ public:
     PerceptionMode perception_mode() const { return sm_.perception_mode(); }
     GameState state() const { return sm_.state(); }
 
-    void process(const Detection &det);
+    bool process(const Detection &det);
+    bool tick(int64_t now_ns);
 
 private:
-    void apply_motor(const ControlOutput &out);
+    bool apply_motor(const ControlOutput &out);
+    bool dispatch(const ControlOutput &out);
 
     StateMachine sm_;
     MotorBackend &motor_;
