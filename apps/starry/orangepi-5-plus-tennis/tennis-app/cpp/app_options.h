@@ -19,7 +19,10 @@ struct Options {
     int height = 480;
     int fps = 30;
     double duration_sec = 60.0;
-    bool virtual_actuators = true; // the only supported actuator path for now
+    std::string motor_backend = "virtual"; // virtual | pwm | uart
+    std::string motor_device; // backend default when empty
+    std::string arm_backend = "virtual"; // virtual | uart
+    std::string arm_device = "/dev/ttyUSB0";
     int log_every = 1;             // emit per-frame lines every Nth frame (1 = all)
     std::string core_mask = "all"; // NPU core mask for live mode
     // --- Deep profiling (mirrors the sibling uvc-rknn bench) ---

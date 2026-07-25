@@ -28,6 +28,7 @@ set(TENNIS_CORE_SRC
     cpp/controller.cc
     cpp/state_machine.cc
     cpp/bench/metrics.cc
+    cpp/actuator/actuator_factory.cc
     cpp/actuator/trace_motor_backend.cc
     cpp/actuator/trace_arm_backend.cc
 )
@@ -74,6 +75,10 @@ else()
         cpp/perception/tennis_detector.cc
         cpp/perception/jpu_decoder.cc
         cpp/perception/bucket_detector.cc
+        cpp/actuator/serial_device.cc
+        cpp/actuator/pwm_motor_backend.cc
+        cpp/actuator/uart_motor_backend.cc
+        cpp/actuator/uart_arm_backend.cc
         ${TENNIS_VENDORED_SRC}
     )
 

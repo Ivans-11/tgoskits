@@ -18,7 +18,7 @@ public:
 };
 
 // Virtual backend: emits structured, machine-readable command lines and touches
-// no hardware. This is the default and the only backend built by the first PR.
+// no hardware.
 class TraceMotorBackend final : public MotorBackend {
 public:
     void drive(int left, int right) override;

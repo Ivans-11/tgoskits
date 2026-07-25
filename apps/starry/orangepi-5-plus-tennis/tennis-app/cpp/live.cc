@@ -5,10 +5,9 @@
 // Threading: libuvc runs its own capture thread and latches only the newest
 // frame; this file's main loop polls that latest-frame slot, runs
 // perception (YOLO or HSV, per the FSM's current mode), and the control step.
-// Because the actuator backend is non-blocking (TraceBackend), fusing
-// perception+control on one thread keeps frame->command latency at pure compute;
-// the separate control thread + multi-context NPU workers are deferred (they
-// matter once a *blocking* real UART backend lands). See README "Next steps".
+// Virtual backends are non-blocking. Real UART backends intentionally preserve
+// the reference controller's synchronous command/ACK and servo-settle behavior,
+// so live frame-to-command timing includes actuator latency when they are used.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE // sched_setaffinity / sched_getcpu / CPU_SET
 #endif
@@ -21,6 +20,7 @@
 #include <cstring>
 
 #include "bench/metrics.h"
+#include "actuator/actuator_factory.h"
 #include "image_utils.h" // read_image (fixed-image validation)
 #include "profiling.h"    // apply_and_check_affinity / profiler_getcpu
 #include "controller.h"
@@ -50,6 +50,9 @@ int run_live(const Options &opts) {
     const int64_t t_proc_start = monotonic_ns();
     Config cfg = make_cfg(opts);
 
+    Actuators actuators;
+    if (!make_actuators(opts, actuators)) return 1;
+
     Camera cam;
     const int64_t t_cap0 = monotonic_ns();
     if (!cam.start(opts.device, opts.width, opts.height, opts.fps)) {
@@ -69,11 +72,10 @@ int run_live(const Options &opts) {
     const int64_t t_mdl1 = monotonic_ns();
 
     BucketDetector bucket(cfg);
-    TraceMotorBackend motor;
-    TraceArmBackend arm;
     Metrics metrics;
     metrics.reserve(static_cast<size_t>(opts.duration_sec * opts.fps) + 16);
-    Controller controller(cfg, motor, arm, metrics, opts.log_every);
+    Controller controller(cfg, *actuators.motor, *actuators.arm, metrics,
+                          opts.log_every);
 
     const bool do_csv = opts.profile && !opts.profile_csv.empty();
     if (do_csv && !metrics.open_csv(opts.profile_csv.c_str())) {
@@ -82,9 +84,11 @@ int run_live(const Options &opts) {
     }
 
     std::printf("TENNIS_BENCH_BEGIN mode=live model=%s fps=%d duration_sec=%.3f "
-                "core_mask=%s virtual_actuators=%d profile=%d affinity=%s\n",
+                "core_mask=%s virtual_actuators=%d motor_backend=%s "
+                "arm_backend=%s profile=%d affinity=%s\n",
                 opts.model.c_str(), opts.fps, opts.duration_sec,
-                opts.core_mask.c_str(), opts.virtual_actuators ? 1 : 0,
+                opts.core_mask.c_str(), uses_virtual_actuators(opts) ? 1 : 0,
+                opts.motor_backend.c_str(), opts.arm_backend.c_str(),
                 opts.profile ? 1 : 0,
                 opts.infer_affinity.empty() ? "none"
                                             : opts.infer_affinity.c_str());

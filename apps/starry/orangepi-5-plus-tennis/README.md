@@ -1,18 +1,20 @@
 # orangepi-5-plus-tennis
 
-A StarryOS board demo and benchmark app that ports the RK3588 tennis-ball pickup robot workflow to an OrangePi-5-Plus (RK3588) + UVC camera, using **virtual** motor and arm backends so it runs today with no physical car.
+A StarryOS board demo and benchmark app that ports the RK3588 tennis-ball pickup robot workflow to an OrangePi-5-Plus (RK3588) + UVC camera. Motor and arm backends are selected independently, with virtual backends for reproducible benchmarks and real backends compatible with `aka-rk3588` hardware.
 
 ## What this demonstrates
 
-This app drives the full tennis pickup workflow — chase a tennis ball, grab it, find a red bucket, approach it, and deposit — and frames it as an **end-to-end latency benchmark**. The competition goal is minimizing the time from a camera frame to the motor/arm command that acts on it (frame-to-command latency), and the mandatory deliverable is the `TENNIS_BENCH_RESULT` line. Perception (YOLOv8 ball detection + HSV bucket detection) and control (a differential-drive state machine) run on the board's NPU and CPU; the actuators are virtual command traces, so the measured latency is the pure perception+control compute path on StarryOS.
+This app drives the full tennis pickup workflow — chase a tennis ball, grab it, find a red bucket, approach it, and deposit — and frames it as an **end-to-end latency benchmark**. The competition goal is minimizing the time from a camera frame to the motor/arm command that acts on it (frame-to-command latency), and the mandatory deliverable is the `TENNIS_BENCH_RESULT` line. Perception (YOLOv8 ball detection + HSV bucket detection) and control (a differential-drive state machine) run on the board's NPU and CPU. Virtual actuators keep the benchmark reproducible; real actuators execute the same control commands on the robot.
 
-## Why virtual actuators
+## Actuator backends
 
-The virtual motor/arm backends give a clean, **non-blocking** seam between the control loop and the hardware:
+The default virtual motor/arm backends give a clean, **non-blocking** seam between the control loop and the hardware:
 
 - It **runs with no physical car** — only the OrangePi-5-Plus board and a UVC camera (for live modes) are required.
 - Because the virtual actuator backend never blocks, **frame-to-command latency stays pure compute** — there is no UART round-trip or servo settle time inflating the benchmark.
-- The **real UART backends are future, hardware-gated work**: a differential-motor backend (ESP32-C3) and a gripper-arm backend (ZP10D bus servo) are designed for but disabled until the car arrives. They are not the default.
+- The motor can instead use four RK3588 PWM sysfs channels driving a DRV8833, or the ESP32-C3 UART controller used by `aka-rk3588`.
+- The arm can instead use the ZP10D UART bus-servo controller and the calibrated `aka-rk3588` grab poses.
+- Motor and arm selection is independent, so mixed configurations such as a PWM chassis with a virtual arm are supported. Real backend initialization errors are fatal and never silently fall back to virtual output.
 
 ## Architecture
 
@@ -20,12 +22,10 @@ The pipeline is built for low frame-to-command latency:
 
 - **Capture thread (drop-old):** `libuvc` runs its own capture thread and latches only the **newest** frame into a sequenced latest-frame slot (frame id + capture timestamp). Old frames are dropped rather than queued.
 - **Latest-frame slot:** the perception/control loop reads the most recent frame from this slot, so it never works on stale backlog.
-- **Perception + control loop:** reads the latest frame, runs YOLOv8 **or** HSV per the current state (never both — no redundant decode), runs the state machine, and calls the **non-blocking** virtual actuator backend. Because the actuator never blocks, frame-to-command latency = pure compute.
+- **Perception + control loop:** reads the latest frame, runs YOLOv8 **or** HSV per the current state (never both — no redundant decode), runs the state machine, and calls the selected actuator backends. Virtual backends are non-blocking; UART ACK waits and calibrated servo movement delays are included in live latency when real UART hardware is selected.
 - **Multi-core NPU:** inference runs across all three RK3588 NPU cores via `rknn_set_core_mask` (`RKNN_NPU_CORE_0_1_2`). The stock image/stream binaries do not set this.
 - **Single-class postprocess:** the YOLOv8 head is decoded for a single tennis-ball class. No per-frame heap allocation in the steady state.
 - **HSV bucket detection:** the bucket is found with an HSV red-bucket detector rather than a second NPU pass.
-
-**PR1 fuses perception + control on one thread.** This is safe precisely because the virtual actuator is non-blocking — there is nothing to wait on. A separate control thread plus multiple `rknn_dup_context` NPU workers is a deferred optimization that only matters once a blocking real-UART backend lands.
 
 ## Reuse (no duplication)
 
@@ -35,7 +35,7 @@ The board build **reuses** the vendored, Apache-2.0 (Rockchip) RKNN/UVC code fro
 - its `utils/` (`image_utils`, `image_drawing`, `file_utils`),
 - and its `cpp/` modules (`uvc_capture`, `rknpu2/yolov8`, `postprocess`).
 
-The multi-MB libraries and the model are **not** copied. The tennis-specific code — state machine, `tennis_detector` wrapper, HSV `bucket_detector`, virtual backends, metrics, `main`, and the live pipeline — is new and lives under `tennis-app/cpp`.
+The multi-MB libraries and the model are **not** copied. The tennis-specific code — state machine, `tennis_detector` wrapper, HSV `bucket_detector`, actuator backends, metrics, `main`, and the live pipeline — is new and lives under `tennis-app/cpp`.
 
 ## Build
 
@@ -132,9 +132,20 @@ tennis_app --mode test-uvc --device 0
 tennis_app --mode test-yolo --model model/tennis.rknn --device 0
 tennis_app --mode test-bucket --device 0
 tennis_app --mode dry-run --duration-sec 10 --virtual-actuators
+
+# Real RK3588 PWM chassis + ZP10D UART arm
+tennis_app --mode live --motor-backend pwm \
+  --motor-device 'pwm:/sys/class/pwm/pwmchip0,/sys/class/pwm/pwmchip1,/sys/class/pwm/pwmchip4,/sys/class/pwm/pwmchip5' \
+  --arm-backend uart --arm-device /dev/ttyUSB0
+
+# ESP32-C3 UART chassis + virtual arm
+tennis_app --mode live --motor-backend uart --motor-device /dev/ttyS3 \
+  --arm-backend virtual
 ```
 
 `dry-run` needs no camera/model/board and emits `TENNIS_BENCH_RESULT`. The test modes additionally print `TENNIS_TEST_UVC ...` + `TENNIS_TEST_UVC_DONE`, `TENNIS_TEST_YOLO ...` + `TENNIS_TEST_YOLO_DONE`, and `TENNIS_TEST_BUCKET ...` + `TENNIS_TEST_BUCKET_DONE`.
+
+For output compatibility, the historical `virtual_motor_commands` and `virtual_arm_commands` result fields count commands sent through the selected backends, including real backends.
 
 ## CLI flags
 
@@ -147,7 +158,12 @@ tennis_app --mode dry-run --duration-sec 10 --virtual-actuators
 | `--width <n>` / `--height <n>` | `640` / `480` | Capture resolution |
 | `--fps <n>` | `30` | Capture frame rate |
 | `--duration-sec <f>` | `60` | Run duration in seconds |
-| `--virtual-actuators` | on | The only actuator path (flag) |
+| `--motor-backend <virtual\|pwm\|uart>` | `virtual` | Chassis backend |
+| `--motor-device <spec>` | backend default | Four PWM chip paths or motor UART path |
+| `--arm-backend <virtual\|uart>` | `virtual` | Arm backend |
+| `--arm-device <path>` | `/dev/ttyUSB0` | ZP10D UART path |
+| `--motor-min-speed <n>` | `15` | Minimum non-zero real motor command |
+| `--virtual-actuators` | — | Compatibility shorthand selecting both virtual backends |
 | `--ball-class <n>` | `0` | `0` for a single-class tennis model; `32` = COCO sports ball |
 | `--min-confidence <0-100>` | `50` | Detection confidence threshold |
 | `--log-every <n>` | `1` | Emit per-frame lines every Nth frame |

@@ -2,8 +2,9 @@
 //
 // Entry point for the StarryOS tennis-ball pickup demo/benchmark.
 //
-//   tennis_app --mode live      --model model/tennis.rknn --label model/labels.txt \
-//              --device 0 --width 640 --height 480 --fps 30 --duration-sec 60 --virtual-actuators
+//   tennis_app --mode live --model model/tennis.rknn --label model/labels.txt
+//              --device 0 --width 640 --height 480 --fps 30 --duration-sec 60
+//              --virtual-actuators
 //   tennis_app --mode test-uvc   --device 0
 //   tennis_app --mode test-yolo  --model model/tennis.rknn --device 0
 //   tennis_app --mode test-bucket --device 0
@@ -24,6 +25,7 @@
 #include <string>
 
 #include "actuator/arm_backend.h"
+#include "actuator/actuator_factory.h"
 #include "actuator/motor_backend.h"
 #include "app_options.h"
 #include "bench/metrics.h"
@@ -135,19 +137,22 @@ static int run_dry_run(const Options &opts) {
     const size_t expected = static_cast<size_t>(opts.duration_sec * fps) + 16;
 
     const int64_t t_proc_start = monotonic_ns();
-    TraceMotorBackend motor;
-    TraceArmBackend arm;
+    Actuators actuators;
+    if (!make_actuators(opts, actuators)) return 1;
     Metrics metrics;
     metrics.reserve(expected);
     if (opts.profile && !opts.profile_csv.empty()) {
         metrics.open_csv(opts.profile_csv.c_str());
     }
-    Controller controller(cfg, motor, arm, metrics, opts.log_every);
+    Controller controller(cfg, *actuators.motor, *actuators.arm, metrics,
+                          opts.log_every);
     SyntheticScene scene(cfg);
 
     std::printf("TENNIS_BENCH_BEGIN mode=dry-run fps=%d duration_sec=%.3f "
-                "virtual_actuators=%d profile=%d affinity=%s\n",
-                fps, opts.duration_sec, opts.virtual_actuators ? 1 : 0,
+                "virtual_actuators=%d motor_backend=%s arm_backend=%s "
+                "profile=%d affinity=%s\n",
+                fps, opts.duration_sec, uses_virtual_actuators(opts) ? 1 : 0,
+                opts.motor_backend.c_str(), opts.arm_backend.c_str(),
                 opts.profile ? 1 : 0,
                 opts.infer_affinity.empty() ? "none"
                                             : opts.infer_affinity.c_str());
@@ -228,7 +233,12 @@ static void usage(const char *prog) {
         "  --width/--height <n>     capture size (default 640x480)\n"
         "  --fps <n>                capture fps (default 30)\n"
         "  --duration-sec <f>       run duration (default 60)\n"
-        "  --virtual-actuators      use the Trace motor/arm backends (default)\n"
+        "  --motor-backend <kind>   virtual|pwm|uart (default virtual)\n"
+        "  --motor-device <spec>    PWM chip list or UART device\n"
+        "  --arm-backend <kind>     virtual|uart (default virtual)\n"
+        "  --arm-device <path>      arm UART device (default /dev/ttyUSB0)\n"
+        "  --motor-min-speed <n>    real motor dead-zone floor (default 15)\n"
+        "  --virtual-actuators      select both virtual backends (compatibility)\n"
         "  --ball-class <n>         class id of the ball (0 tennis model; 32 COCO)\n"
         "  --min-confidence <0-100> detection confidence threshold (default 50)\n"
         "  --log-every <n>          emit per-frame lines every Nth frame\n"
@@ -263,6 +273,10 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--model", o.model)) continue;
         if (arg_val(argc, argv, i, "--label", o.label)) continue;
         if (arg_val(argc, argv, i, "--core-mask", o.core_mask)) continue;
+        if (arg_val(argc, argv, i, "--motor-backend", o.motor_backend)) continue;
+        if (arg_val(argc, argv, i, "--motor-device", o.motor_device)) continue;
+        if (arg_val(argc, argv, i, "--arm-backend", o.arm_backend)) continue;
+        if (arg_val(argc, argv, i, "--arm-device", o.arm_device)) continue;
         if (arg_val(argc, argv, i, "--profile-csv", o.profile_csv)) continue;
         if (arg_val(argc, argv, i, "--infer-affinity", o.infer_affinity)) continue;
         if (arg_val(argc, argv, i, "--validate-list", o.validate_list)) continue;
@@ -276,6 +290,7 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--ball-class", v)) { o.cfg.ball_class_id = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--log-every", v)) { o.log_every = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--staleness-ms", v)) { o.cfg.staleness_ms = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--motor-min-speed", v)) { o.cfg.motor_min_speed = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--min-confidence", v)) {
             int c = std::atoi(v.c_str());
             if (c < 0) c = 0;
@@ -283,7 +298,11 @@ static int parse_options(int argc, char **argv, Options &o) {
             o.cfg.conf_thresh = static_cast<float>(c) / 100.f;
             continue;
         }
-        if (std::strcmp(argv[i], "--virtual-actuators") == 0) { o.virtual_actuators = true; continue; }
+        if (std::strcmp(argv[i], "--virtual-actuators") == 0) {
+            o.motor_backend = "virtual";
+            o.arm_backend = "virtual";
+            continue;
+        }
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             std::exit(0);
@@ -294,6 +313,22 @@ static int parse_options(int argc, char **argv, Options &o) {
     }
     o.cfg.frame_w = o.width;
     o.cfg.frame_h = o.height;
+    if (o.cfg.motor_min_speed < 1 || o.cfg.motor_min_speed > 100) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR --motor-min-speed must be in [1,100]\n");
+        return 2;
+    }
+    if (o.motor_backend != "virtual" && o.motor_backend != "pwm" &&
+        o.motor_backend != "uart") {
+        std::fprintf(stderr, "TENNIS_ERROR unsupported motor backend: %s\n",
+                     o.motor_backend.c_str());
+        return 2;
+    }
+    if (o.arm_backend != "virtual" && o.arm_backend != "uart") {
+        std::fprintf(stderr, "TENNIS_ERROR unsupported arm backend: %s\n",
+                     o.arm_backend.c_str());
+        return 2;
+    }
     return 0;
 }
 
