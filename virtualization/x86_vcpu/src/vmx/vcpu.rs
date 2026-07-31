@@ -1836,6 +1836,7 @@ impl AxArchVCpu for VmxVcpu {
                 }
             } else {
                 match exit_info.exit_reason {
+                    VmxExitReason::TRIPLE_FAULT => AxVCpuExitReason::SystemDown,
                     VmxExitReason::VMCALL => {
                         self.advance_rip(exit_info.exit_instruction_length as _)?;
                         AxVCpuExitReason::Hypercall {
