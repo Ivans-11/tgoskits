@@ -21,7 +21,7 @@
 - HSV 红色桶检测
 - 可独立选择的虚拟/真实差速电机和夹爪机械臂后端
 - RK3588 PWM sysfs + DRV8833 电机后端
-- ESP32-C3 UART 电机后端与 ZP10D UART 舵机后端
+- ESP32-C3 UART 电机后端与 ZP10S UART 舵机后端
 - `TENNIS_BENCH_RESULT` 基准测试
 
 后续：
@@ -71,21 +71,22 @@ tennis_app --mode test-yolo --model model/tennis.rknn --device 0
 tennis_app --mode test-bucket --device 0
 tennis_app --mode dry-run --duration-sec 10 --virtual-actuators
 
-# RK3588 PWM 底盘 + ZP10D UART 机械臂
-tennis_app --mode live --motor-backend pwm \
-  --motor-device 'pwm:/sys/class/pwm/pwmchip0,/sys/class/pwm/pwmchip1,/sys/class/pwm/pwmchip4,/sys/class/pwm/pwmchip5' \
-  --arm-backend uart --arm-device /dev/ttyUSB0
-
-# ESP32-C3 UART 底盘 + 虚拟机械臂
-tennis_app --mode live --motor-backend uart --motor-device /dev/ttyS3 \
-  --arm-backend virtual
+# aka00v4-rk3588：ESP32-C3 UART 底盘 + ZP10S UART 机械臂
+tennis_app --mode live --motor-backend uart --motor-device /dev/ttyS6 \
+  --arm-backend uart --arm-device /dev/ttyS3
 ```
 
 ## 执行器选择
 
 电机支持 `virtual`、`pwm` 和 `uart`，机械臂支持 `virtual` 和 `uart`，两者可独立组合。`--virtual-actuators` 保留为同时选择两个虚拟后端的兼容参数。真实 UART 机械臂按标定动作同步等待舵机到位，因此其动作耗时会计入 LIVE 模式延迟；真实后端初始化失败时程序直接报错退出，不会静默切换为虚拟后端。
 
-LIVE 控制使用单调时钟推进抓取/投放前制动和对准脱困阶段，不依赖相机帧率，也不会用阻塞循环反复写执行器。真实机械臂在启动时归位；相机需在限定时间内产生连续有效帧，运行中停帧超过 watchdog 会停车退出；执行器 I/O 失败以及 `SIGINT`/`SIGTERM` 同样通过正常清理路径停车。`dry-run` 强制使用虚拟执行器，避免合成场景驱动物理硬件。
+LIVE 控制使用单调时钟推进抓取/投放前制动阶段，不依赖相机帧率，也不会用阻塞循环反复写执行器。真实机械臂在启动时归位；相机需在限定时间内产生连续有效帧，运行中停帧超过 watchdog 会停车退出；执行器 I/O 失败以及 `SIGINT`/`SIGTERM` 同样通过正常清理路径停车。`dry-run` 强制使用虚拟执行器，避免合成场景驱动物理硬件。
+
+`aka00v4-rk3588` 的已验证接线为：ESP32-C3 底盘使用
+`/dev/ttyS6`，ZP10S 机械臂使用 `/dev/ttyS3`，波特率均为 115200。
+底盘使用 `0x13` 命令一次发送左右轮有符号百分比，只有初始化和配置命令等待
+ACK。启用真实执行器前，必须先在设备树中启用并分别验证这两个 UART 节点及
+pinmux；真实后端初始化失败时不会回退到虚拟后端。
 
 ## 产生的指标
 

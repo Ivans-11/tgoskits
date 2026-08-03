@@ -30,7 +30,7 @@ private:
         if (speed == 0) return 0;
         const int sign = speed > 0 ? 1 : -1;
         const int magnitude = std::abs(speed);
-        return sign * (minimum_ + (magnitude - 1) * (100 - minimum_) / 99);
+        return sign * std::max(magnitude, minimum_);
     }
 
     std::unique_ptr<MotorBackend> backend_;
@@ -65,7 +65,7 @@ bool make_actuators(const Options &options, Actuators &actuators) {
             std::move(backend), options.cfg.motor_min_speed);
     } else if (options.motor_backend == "uart") {
         const std::string device =
-            options.motor_device.empty() ? "/dev/ttyS3" : options.motor_device;
+            options.motor_device.empty() ? "/dev/ttyS6" : options.motor_device;
         auto backend = std::make_unique<UartMotorBackend>(device);
         if (!backend->ready()) return false;
         actuators.motor = std::make_unique<DeadZoneMotorBackend>(
@@ -88,7 +88,9 @@ bool make_actuators(const Options &options, Actuators &actuators) {
     }
 #else
     else if (options.arm_backend == "uart") {
-        auto backend = std::make_unique<UartArmBackend>(options.arm_device);
+        const std::string device =
+            options.arm_device.empty() ? "/dev/ttyS3" : options.arm_device;
+        auto backend = std::make_unique<UartArmBackend>(device);
         if (!backend->is_ready()) return false;
         actuators.arm = std::move(backend);
     } else {

@@ -11,8 +11,7 @@ namespace tennis {
 
 class UartMotorBackend final : public MotorBackend {
 public:
-    explicit UartMotorBackend(const std::string &device, int speed_scale = 150,
-                              uint16_t ppr = 4680,
+    explicit UartMotorBackend(const std::string &device, uint16_t ppr = 4680,
                               uint16_t pwm_frequency = 20000);
     ~UartMotorBackend() override;
 
@@ -25,10 +24,9 @@ private:
     bool send_command(uint8_t command, const uint8_t *payload, uint8_t size,
                       bool expect_ack = true);
     bool receive_ack(int timeout_ms);
-    bool set_speed(uint8_t motor, int16_t speed);
+    bool stop();
 
     SerialDevice serial_;
-    int speed_scale_;
     bool ready_ = false;
 };
 

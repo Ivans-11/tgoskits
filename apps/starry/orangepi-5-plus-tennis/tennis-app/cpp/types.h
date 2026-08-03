@@ -83,42 +83,25 @@ struct Config {
     float conf_thresh = 0.5f;
     float nms_thresh = 0.45f;
 
-    // CHASE_BALL distance zones (by ball area_ratio).
-    float area_far = 0.02f;
-    float area_near = 0.35f;
-    float area_brake = 0.20f;
+    // CHASE_BALL distance limits (by ball area_ratio).
     float area_stop = 0.28f;
     float area_reverse = 0.50f;
-    float area_stop_exit = 0.20f;
 
-    // CHASE_BALL speeds / steering.
-    int chase_speed_far = 40;
-    int brake_speed = 3;
-    int reverse_speed = 15;
-    float k_turn = 25.0f;
-    int max_turn_bias_far = 5;
-    int max_turn_bias_near = 10;
+    // Discrete chassis commands. These must all be physically executable;
+    // unlike the old proportional controller, none relies on dead-zone lifting.
+    int chase_forward_spd = 30;
+    int chase_pivot_spd = 30;
+    int reverse_speed = 30;
     int center_dead_zone = 15;
 
     // Stop / grab gate. The ball is centred under a gripper mounted right of the
     // optical centre, hence the off-centre stop target.
     int stop_center_offset = 90;
-    int stop_center_zone = 5;
-    int stop_confirm_cnt = 4;
-
-    // ALIGN (proportional pivot to centre the ball) + stall kick.
-    int align_pivot_spd = 15;
-    int align_pivot_min = 3;
-    int align_stall_frames = 20;
-    int align_stall_move_px = 10;
-    int align_kick_spd = 35;
-    int align_kick_ms = 180;
-    int align_kick_brake_ms = 20;
+    int stop_center_zone = 20;
+    int stop_confirm_cnt = 3;
 
     // Ball lost search.
-    int search_frames = 25;
-    int search_pivot_spd = 10;
-    int scan_flip_frames = 60;
+    int search_pivot_spd = 30;
 
     // Bucket approach.
     float bucket_area_deposit = 0.90f;
@@ -140,7 +123,7 @@ struct Config {
 
     // Motor dead-zone: a non-zero command is lifted to at least min_speed so it
     // overcomes stall. Lives in the abstract Motor layer, not the backend.
-    int motor_min_speed = 15;
+    int motor_min_speed = 20;
 
     // Physical action timing. Timed motor phases remain non-blocking, while the
     // state machine keeps issuing the latched command until its deadline.

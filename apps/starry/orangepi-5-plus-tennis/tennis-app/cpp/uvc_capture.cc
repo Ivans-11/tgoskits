@@ -43,7 +43,13 @@ static bool load_symbol(void *lib, const char *name, void **out)
 
 bool load_uvc_api(UvcApi *api)
 {
-    const char *candidates[] = {"libuvc.so", "/usr/local/lib/libuvc.so", "/usr/lib/aarch64-linux-gnu/libuvc.so", NULL};
+    const char *candidates[] = {
+        "libuvc.so",
+        "libuvc.so.0",
+        "/usr/local/lib/libuvc.so",
+        "/usr/lib/aarch64-linux-gnu/libuvc.so",
+        NULL,
+    };
     for (int i = 0; candidates[i] != NULL && api->lib == NULL; ++i) {
         api->lib = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
     }

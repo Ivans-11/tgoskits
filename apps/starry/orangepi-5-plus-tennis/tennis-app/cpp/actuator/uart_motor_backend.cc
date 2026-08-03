@@ -14,10 +14,8 @@ constexpr uint8_t kSof0 = 0xaa;
 constexpr uint8_t kSof1 = 0x55;
 constexpr uint8_t kCmdInit = 0x01;
 constexpr uint8_t kCmdConfig = 0x02;
-constexpr uint8_t kCmdSetSpeed = 0x10;
+constexpr uint8_t kCmdSetSpeeds = 0x13;
 constexpr uint8_t kCmdStop = 0x11;
-constexpr uint8_t kCmdBrake = 0x12;
-constexpr uint8_t kCmdReset = 0xff;
 constexpr uint8_t kRspAck = 0x80;
 
 uint8_t checksum(uint8_t command, uint8_t size, const uint8_t *payload) {
@@ -33,11 +31,10 @@ void put_be16(uint8_t *buffer, uint16_t value) {
 
 } // namespace
 
-UartMotorBackend::UartMotorBackend(const std::string &device, int speed_scale,
-                                   uint16_t ppr, uint16_t pwm_frequency)
-    : speed_scale_(speed_scale) {
+UartMotorBackend::UartMotorBackend(const std::string &device, uint16_t ppr,
+                                   uint16_t pwm_frequency) {
     if (!serial_.open(device)) return;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     serial_.flush();
     if (!send_command(kCmdInit, nullptr, 0)) return;
     uint8_t config[4];
@@ -48,7 +45,7 @@ UartMotorBackend::UartMotorBackend(const std::string &device, int speed_scale,
 }
 
 UartMotorBackend::~UartMotorBackend() {
-    if (serial_.is_open()) (void)send_command(kCmdReset, nullptr, 0, false);
+    if (serial_.is_open()) (void)stop();
 }
 
 bool UartMotorBackend::send_command(uint8_t command, const uint8_t *payload,
@@ -92,34 +89,26 @@ bool UartMotorBackend::receive_ack(int timeout_ms) {
     return false;
 }
 
-bool UartMotorBackend::set_speed(uint8_t motor, int16_t speed) {
-    const auto encoded = static_cast<uint16_t>(speed);
-    uint8_t payload[3] = {motor, static_cast<uint8_t>(encoded >> 8),
-                          static_cast<uint8_t>(encoded)};
-    return send_command(kCmdSetSpeed, payload, sizeof(payload));
-}
-
 bool UartMotorBackend::drive(int left, int right) {
-    auto scaled = [this](int speed) {
-        speed = std::clamp(speed, -100, 100);
-        return static_cast<int16_t>(speed * speed_scale_ / 100);
-    };
-    const bool left_ok = set_speed(0, scaled(left));
-    return set_speed(1, scaled(right)) && left_ok;
+    const auto left_speed = static_cast<int16_t>(std::clamp(left, -100, 100));
+    const auto right_speed = static_cast<int16_t>(std::clamp(right, -100, 100));
+    uint8_t payload[4];
+    put_be16(payload, static_cast<uint16_t>(left_speed));
+    put_be16(payload + 2, static_cast<uint16_t>(right_speed));
+    return send_command(kCmdSetSpeeds, payload, sizeof(payload), false);
 }
 
 bool UartMotorBackend::brake() {
-    const uint8_t left = 0;
-    const uint8_t right = 1;
-    const bool left_ok = send_command(kCmdBrake, &left, 1);
-    return send_command(kCmdBrake, &right, 1) && left_ok;
+    return stop();
 }
 
 bool UartMotorBackend::standby() {
-    const uint8_t left = 0;
-    const uint8_t right = 1;
-    const bool left_ok = send_command(kCmdStop, &left, 1);
-    return send_command(kCmdStop, &right, 1) && left_ok;
+    return stop();
+}
+
+bool UartMotorBackend::stop() {
+    const uint8_t all_motors = 2;
+    return send_command(kCmdStop, &all_motors, 1, false);
 }
 
 } // namespace tennis

@@ -53,10 +53,13 @@ bool Controller::process(const Detection &det) {
         const int mleft = out.motor_op == MotorOp::Drive ? out.left : 0;
         const int mright = out.motor_op == MotorOp::Drive ? out.right : 0;
         std::printf("TENNIS_STATE frame=%llu state=%s detections=%d "
-                    "bucket_visible=%d frame_age_ms=%.3f\n",
+                    "bucket_visible=%d ball_area=%.4f ball_cx=%.1f "
+                    "frame_age_ms=%.3f\n",
                     static_cast<unsigned long long>(det.seq),
                     to_string(acting_state), had_ball ? 1 : 0,
-                    had_bucket ? 1 : 0, frame_age_ms);
+                    had_bucket ? 1 : 0,
+                    had_ball ? det.ball.area_ratio : 0.0f,
+                    had_ball ? det.ball.cx : 0.0f, frame_age_ms);
         std::printf("TENNIS_CMD frame=%llu state=%s motor_left=%d "
                     "motor_right=%d arm_action=%s capture_ts_ns=%lld "
                     "decision_ts_ns=%lld frame_to_command_ms=%.3f\n",
@@ -83,7 +86,17 @@ bool Controller::dispatch(const ControlOutput &out) {
     if (out.arm == ArmAction::None) return true;
     bool succeeded = false;
     switch (out.arm) {
-    case ArmAction::Grab: succeeded = arm_.grab(); break;
+    case ArmAction::Grab: {
+        const GrabResult result = arm_.grab();
+        if (result == GrabResult::Empty) {
+            metrics_.on_arm_command();
+            sm_.on_grab_empty();
+            std::fprintf(stderr, "TENNIS_WARN arm grab empty; resuming ball search\n");
+            return true;
+        }
+        succeeded = result == GrabResult::Captured;
+        break;
+    }
     case ArmAction::Release: succeeded = arm_.release(); break;
     case ArmAction::Ready: succeeded = arm_.ready(); break;
     case ArmAction::None: succeeded = true; break;

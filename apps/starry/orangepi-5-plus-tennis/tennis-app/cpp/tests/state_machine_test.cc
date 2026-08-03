@@ -86,39 +86,76 @@ bool grab_brake_uses_elapsed_time() {
                   "grab must finish at its elapsed-time deadline");
 }
 
-bool align_kick_has_a_timed_brake_phase() {
+bool empty_grab_resumes_ball_search() {
     tennis::Config config;
-    config.align_stall_frames = 2;
-    config.align_stall_move_px = 1000;
-    config.align_kick_ms = 180;
-    config.align_kick_brake_ms = 20;
+    config.stop_confirm_cnt = 1;
+    config.brake_hold_ms = 0;
     tennis::StateMachine machine(config);
-    const auto detection = ball_detection(config.area_stop + 0.01f, 320.0f);
+    const auto detection = ball_detection(
+        config.area_stop + 0.01f,
+        static_cast<float>(config.frame_w / 2 + config.stop_center_offset));
 
     machine.step(detection, ms(0));
-    auto output = machine.step(detection, ms(10));
+    const auto output = machine.tick(ms(0));
+    if (!expect(output && output->arm == tennis::ArmAction::Grab &&
+                    machine.state() == tennis::GameState::GRAB,
+                "test setup must enter the grab state"))
+        return false;
+    machine.on_grab_empty();
+    return expect(machine.state() == tennis::GameState::CHASE_BALL,
+                  "an empty grasp must resume ball search") &&
+           expect(machine.perception_mode() == tennis::PerceptionMode::BALL,
+                  "an empty grasp must restore ball perception");
+}
+
+bool ball_search_keeps_one_way_scan() {
+    tennis::Config config;
+    config.search_pivot_spd = 30;
+    tennis::StateMachine machine(config);
+    auto output = machine.step(tennis::Detection{}, ms(0));
+    if (!expect(output.left == config.search_pivot_spd &&
+                    output.right == -config.search_pivot_spd,
+                "ball search must rotate in the initial direction"))
+        return false;
+    for (int frame = 1; frame <= 180; ++frame) {
+        output = machine.step(tennis::Detection{}, ms(frame * 33));
+        if (!expect(output.left == config.search_pivot_spd &&
+                        output.right == -config.search_pivot_spd,
+                    "ball search must keep rotating in one direction"))
+            return false;
+    }
+    return true;
+}
+
+bool chase_uses_only_discrete_executable_actions() {
+    tennis::Config config;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+
+    auto output = machine.step(ball_detection(0.1f, target - 50.0f), ms(0));
     if (!expect(output.motor_op == tennis::MotorOp::Drive &&
-                    output.left == -config.align_kick_spd,
-                "stalled alignment must start the strong pivot"))
+                    output.left == -config.chase_pivot_spd &&
+                    output.right == config.chase_pivot_spd,
+                "an offset ball must use a fixed executable pivot"))
         return false;
-    output = *machine.tick(ms(189));
-    if (!expect(output.motor_op == tennis::MotorOp::Drive,
-                "align kick must remain active for 180 ms"))
+    output = machine.step(ball_detection(0.1f, target), ms(33));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == config.chase_forward_spd &&
+                    output.right == config.chase_forward_spd,
+                "an aligned distant ball must use fixed forward speed"))
         return false;
-    output = *machine.tick(ms(190));
+    output = machine.step(
+        ball_detection(config.area_stop + 0.01f, target), ms(66));
     if (!expect(output.motor_op == tennis::MotorOp::Brake,
-                "align kick must end with active braking"))
+                "an aligned close ball must brake"))
         return false;
-    output = *machine.tick(ms(209));
-    if (!expect(output.motor_op == tennis::MotorOp::Brake,
-                "post-kick brake must remain active until its deadline"))
-        return false;
-    if (!expect(!machine.tick(ms(210)),
-                "expired kick braking must wait for fresh perception"))
-        return false;
-    output = machine.step(detection, ms(210));
-    return expect(output.motor_op == tennis::MotorOp::Drive,
-                  "alignment must resume after the kick brake deadline");
+    output = machine.step(
+        ball_detection(config.area_stop + 0.01f, target + 50.0f), ms(99));
+    return expect(output.motor_op == tennis::MotorOp::Drive &&
+                      output.left == config.chase_pivot_spd &&
+                      output.right == -config.chase_pivot_spd,
+                  "a close offset ball must pivot without a timed sub-state");
 }
 
 bool deposit_waits_for_brake_and_release() {
@@ -168,7 +205,9 @@ bool deposit_waits_for_brake_and_release() {
 int main() {
     if (!reverse_takes_priority_over_grab()) return 1;
     if (!grab_brake_uses_elapsed_time()) return 1;
-    if (!align_kick_has_a_timed_brake_phase()) return 1;
+    if (!empty_grab_resumes_ball_search()) return 1;
+    if (!ball_search_keeps_one_way_scan()) return 1;
+    if (!chase_uses_only_discrete_executable_actions()) return 1;
     if (!deposit_waits_for_brake_and_release()) return 1;
     std::puts("tennis_state_machine_test: OK");
     return 0;

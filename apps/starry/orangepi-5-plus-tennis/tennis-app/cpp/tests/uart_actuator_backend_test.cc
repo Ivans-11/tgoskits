@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <poll.h>
+#include <pty.h>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <vector>
+
+#include "actuator/uart_arm_backend.h"
+#include "actuator/uart_motor_backend.h"
+
+namespace {
+
+struct PtyPair {
+    PtyPair() {
+        char path[128]{};
+        if (openpty(&master, &slave, path, nullptr, nullptr) == 0)
+            device = path;
+    }
+
+    ~PtyPair() {
+        if (master >= 0) close(master);
+        if (slave >= 0) close(slave);
+    }
+
+    int master = -1;
+    int slave = -1;
+    std::string device;
+};
+
+bool read_exact(int fd, void *data, size_t size, int timeout_ms) {
+    auto *bytes = static_cast<uint8_t *>(data);
+    size_t offset = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms);
+    while (offset < size) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) return false;
+        pollfd descriptor{fd, POLLIN, 0};
+        const int ready = poll(&descriptor, 1, static_cast<int>(remaining.count()));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return false;
+        const ssize_t received = read(fd, bytes + offset, size - offset);
+        if (received < 0 && errno == EINTR) continue;
+        if (received <= 0) return false;
+        offset += static_cast<size_t>(received);
+    }
+    return true;
+}
+
+uint8_t checksum(uint8_t command, const std::vector<uint8_t> &payload) {
+    uint8_t value = command ^ static_cast<uint8_t>(payload.size());
+    for (uint8_t byte : payload) value ^= byte;
+    return value;
+}
+
+std::vector<uint8_t> frame(uint8_t command,
+                           const std::vector<uint8_t> &payload = {}) {
+    std::vector<uint8_t> result{0xaa, 0x55, command,
+                                static_cast<uint8_t>(payload.size())};
+    result.insert(result.end(), payload.begin(), payload.end());
+    result.push_back(checksum(command, payload));
+    return result;
+}
+
+bool read_frame(int fd, std::vector<uint8_t> &result) {
+    uint8_t header[4];
+    if (!read_exact(fd, header, sizeof(header), 2000)) return false;
+    result.assign(header, header + sizeof(header));
+    std::vector<uint8_t> tail(static_cast<size_t>(header[3]) + 1);
+    if (!read_exact(fd, tail.data(), tail.size(), 2000)) return false;
+    result.insert(result.end(), tail.begin(), tail.end());
+    return true;
+}
+
+bool expect(bool condition, const char *message) {
+    if (condition) return true;
+    std::fprintf(stderr, "FAIL: %s\n", message);
+    return false;
+}
+
+bool motor_protocol_matches_esp32_controller() {
+    PtyPair pty;
+    if (!expect(pty.master >= 0, "open motor PTY")) return false;
+
+    std::vector<std::vector<uint8_t>> received;
+    std::string emulator_error;
+    std::thread emulator([&] {
+        for (int i = 0; i < 6; ++i) {
+            std::vector<uint8_t> command;
+            if (!read_frame(pty.master, command)) {
+                emulator_error = "timed out reading motor frame";
+                return;
+            }
+            received.push_back(std::move(command));
+            if (i < 2) {
+                const auto ack = frame(0x80);
+                if (write(pty.master, ack.data(), ack.size()) !=
+                    static_cast<ssize_t>(ack.size())) {
+                    emulator_error = "failed to write motor ACK";
+                    return;
+                }
+            }
+        }
+    });
+
+    bool calls_succeeded = true;
+    {
+        tennis::UartMotorBackend motor(pty.device);
+        calls_succeeded = motor.ready() && motor.drive(120, -101) &&
+                          motor.brake() && motor.standby();
+    }
+    emulator.join();
+
+    if (!expect(calls_succeeded, "motor backend commands succeed")) return false;
+    if (!expect(emulator_error.empty(), emulator_error.c_str())) return false;
+
+    const std::vector<std::vector<uint8_t>> expected{
+        frame(0x01),
+        frame(0x02, {0x12, 0x48, 0x4e, 0x20}),
+        frame(0x13, {0x00, 0x64, 0xff, 0x9c}),
+        frame(0x11, {0x02}),
+        frame(0x11, {0x02}),
+        frame(0x11, {0x02}),
+    };
+    return expect(received == expected,
+                  "motor frames match INIT/CONFIG/SET_SPEEDS/STOP protocol");
+}
+
+bool arm_protocol_matches_calibrated_sequence() {
+    PtyPair pty;
+    if (!expect(pty.master >= 0, "open arm PTY")) return false;
+
+    const std::string expected =
+        "#000P1685T1000!#001P0722T1000!#002P1166T1000!"
+        "#002P1611T1000!"
+        "#000P2255T1000!#001P1166T1000!#002P1611T1000!"
+        "#002P1166T1000!"
+        "#002PRAD!"
+        "#000P1462T1000!#001P0722T1000!#002P1166T1000!"
+        "#002PRAD!"
+        "#000P1685T1000!#001P1314T1000!#002P1166T1000!"
+        "#002P1611T1000!"
+        "#000P1462T1000!#001P0722T1000!#002P1166T1000!";
+    const std::string query = "#002PRAD!";
+    const std::string position = "#002P1367!";
+    std::string received;
+    std::string emulator_error;
+    std::thread emulator([&] {
+        while (received.size() < expected.size()) {
+            char byte = 0;
+            if (!read_exact(pty.master, &byte, 1, 2000)) {
+                emulator_error = "timed out reading arm command";
+                return;
+            }
+            received.push_back(byte);
+            if (received.size() >= query.size() &&
+                received.compare(received.size() - query.size(), query.size(),
+                                 query) == 0 &&
+                write(pty.master, position.data(), position.size()) !=
+                    static_cast<ssize_t>(position.size())) {
+                emulator_error = "failed to write arm position response";
+                return;
+            }
+        }
+    });
+
+    tennis::GrabResult grab_result = tennis::GrabResult::Error;
+    bool calls_succeeded = true;
+    {
+        tennis::UartArmBackend arm(pty.device);
+        calls_succeeded = arm.is_ready() && arm.ready();
+        grab_result = arm.grab();
+        calls_succeeded = calls_succeeded && arm.release();
+    }
+    emulator.join();
+
+    if (!expect(calls_succeeded, "arm origin and put commands succeed"))
+        return false;
+    if (!expect(grab_result == tennis::GrabResult::Captured,
+                "two position samples above P1260 confirm capture"))
+        return false;
+    if (!expect(emulator_error.empty(), emulator_error.c_str())) return false;
+    return expect(received == expected,
+                  "arm commands match calibrated origin/pick/put sequence");
+}
+
+bool arm_ball_lost_after_lift_is_reported() {
+    PtyPair pty;
+    if (!expect(pty.master >= 0, "open lost-ball arm PTY")) return false;
+
+    const std::string expected =
+        "#002P1611T1000!"
+        "#000P2255T1000!#001P1166T1000!#002P1611T1000!"
+        "#002P1166T1000!"
+        "#002PRAD!"
+        "#000P1462T1000!#001P0722T1000!#002P1166T1000!"
+        "#002PRAD!";
+    const std::string query = "#002PRAD!";
+    const std::string held_position = "#002P1367!";
+    const std::string empty_position = "#002P1194!";
+    std::string received;
+    std::string emulator_error;
+    std::thread emulator([&] {
+        int query_count = 0;
+        while (received.size() < expected.size()) {
+            char byte = 0;
+            if (!read_exact(pty.master, &byte, 1, 2000)) {
+                emulator_error = "timed out reading lost-ball command";
+                return;
+            }
+            received.push_back(byte);
+            if (received.size() >= query.size() &&
+                received.compare(received.size() - query.size(), query.size(),
+                                 query) == 0) {
+                const std::string &position =
+                    query_count++ == 0 ? held_position : empty_position;
+                if (write(pty.master, position.data(), position.size()) !=
+                    static_cast<ssize_t>(position.size())) {
+                    emulator_error = "failed to write arm position response";
+                    return;
+                }
+            }
+        }
+    });
+
+    tennis::GrabResult result = tennis::GrabResult::Error;
+    {
+        tennis::UartArmBackend arm(pty.device);
+        result = arm.grab();
+    }
+    emulator.join();
+
+    if (!expect(result == tennis::GrabResult::Empty,
+                "a ball lost after lifting must not confirm capture"))
+        return false;
+    if (!expect(emulator_error.empty(), emulator_error.c_str())) return false;
+    return expect(received == expected,
+                  "capture is sampled before and after lifting");
+}
+
+} // namespace
+
+int main() {
+    if (!motor_protocol_matches_esp32_controller()) return 1;
+    if (!arm_protocol_matches_calibrated_sequence()) return 1;
+    if (!arm_ball_lost_after_lift_is_reported()) return 1;
+    return 0;
+}

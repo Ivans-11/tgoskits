@@ -38,7 +38,6 @@
 namespace tennis {
 
 static constexpr int64_t kIdleSleepNs = 1000000; // 1 ms when no new frame
-static constexpr int64_t kArmReadySettleNs = 1000000000; // T1000 servo command
 
 volatile sig_atomic_t g_termination_requested = 0;
 
@@ -86,13 +85,11 @@ int run_live(const Options &opts) {
 
     Actuators actuators;
     if (!make_actuators(opts, actuators)) return 1;
-    int64_t arm_ready_deadline = 0;
     if (opts.arm_backend != "virtual") {
         if (!actuators.arm->ready()) {
             std::fprintf(stderr, "TENNIS_ERROR initial arm homing failed\n");
             return 1;
         }
-        arm_ready_deadline = monotonic_ns() + kArmReadySettleNs;
     }
 
     Camera cam;
@@ -119,10 +116,6 @@ int run_live(const Options &opts) {
                      "TENNIS_ERROR camera warmup timed out after %d ms\n",
                      opts.camera_warmup_timeout_ms);
         return 1;
-    }
-    while (!termination.requested() &&
-           arm_ready_deadline > monotonic_ns()) {
-        sleep_ns(kIdleSleepNs);
     }
     if (termination.requested()) return 0;
 

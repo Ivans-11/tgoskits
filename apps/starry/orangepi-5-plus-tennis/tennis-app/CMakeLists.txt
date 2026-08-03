@@ -42,6 +42,9 @@ if(TENNIS_HOST_DRYRUN)
 
     include(CTest)
     if(BUILD_TESTING)
+        set(THREADS_PREFER_PTHREAD_FLAG ON)
+        find_package(Threads REQUIRED)
+
         add_executable(tennis_state_machine_test
             cpp/tests/state_machine_test.cc
             cpp/state_machine.cc
@@ -49,6 +52,22 @@ if(TENNIS_HOST_DRYRUN)
         target_include_directories(tennis_state_machine_test PRIVATE cpp)
         target_compile_options(tennis_state_machine_test PRIVATE -Wall -Wextra)
         add_test(NAME tennis_state_machine COMMAND tennis_state_machine_test)
+
+        add_executable(tennis_uart_actuator_test
+            cpp/tests/uart_actuator_backend_test.cc
+            cpp/actuator/serial_device.cc
+            cpp/actuator/uart_motor_backend.cc
+            cpp/actuator/uart_arm_backend.cc
+        )
+        target_include_directories(tennis_uart_actuator_test PRIVATE cpp)
+        target_compile_options(tennis_uart_actuator_test PRIVATE -Wall -Wextra)
+        target_link_libraries(tennis_uart_actuator_test PRIVATE Threads::Threads)
+        find_library(UTIL_LIBRARY util)
+        if(UTIL_LIBRARY)
+            target_link_libraries(tennis_uart_actuator_test PRIVATE ${UTIL_LIBRARY})
+        endif()
+        add_test(NAME tennis_uart_actuator COMMAND tennis_uart_actuator_test)
+        set_tests_properties(tennis_uart_actuator PROPERTIES TIMEOUT 15)
     endif()
 else()
     # --- Board build: fully self-contained. All RKNN/UVC/RGA/utils code is now
@@ -132,5 +151,6 @@ else()
     file(GLOB LIBMPP_SOFILES ${LIBMPP_DIR}/lib/librockchip_mpp.so*)
     install(FILES ${LIBMPP_SOFILES} DESTINATION lib)
     install(DIRECTORY model DESTINATION .)
+    install(DIRECTORY configs DESTINATION .)
     install(DIRECTORY validation DESTINATION . OPTIONAL)
 endif()

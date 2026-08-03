@@ -15,9 +15,9 @@ const char *to_string(ArmAction a) {
     return "none";
 }
 
-bool TraceArmBackend::grab() {
+GrabResult TraceArmBackend::grab() {
     std::printf("TENNIS_ARM grab\n");
-    return true;
+    return GrabResult::Captured;
 }
 
 bool TraceArmBackend::release() {

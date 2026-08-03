@@ -2,8 +2,8 @@
 //
 // Game state machine + differential-drive steering. Pure logic: it consumes a
 // perception Detection and returns the desired motor/arm command. It performs
-// no I/O and no blocking sleeps. Calibrated brake and alignment intervals are
-// monotonic-time phases advanced by step()/tick(), independent of camera FPS.
+// no I/O and no blocking sleeps. Calibrated brake intervals are monotonic-time
+// phases advanced by step()/tick(), independent of camera FPS.
 //
 // This is a clean reimplementation of the aka-rk3588 control flow (that repo
 // carries no license); constants live in Config and are re-derived, not copied.
@@ -41,11 +41,13 @@ public:
 
     GameState state() const { return state_; }
 
+    // A verified empty grasp resumes ball search instead of advancing to the
+    // bucket flow. Transport failures are handled by Controller separately.
+    void on_grab_empty();
+
 private:
     enum TimedPhase {
         Normal,
-        AlignKick,
-        AlignKickBrake,
         BrakeForGrab,
         BrakeForDeposit,
     };
@@ -56,7 +58,6 @@ private:
     ControlOutput approach_bucket(const BucketObs &bucket, int64_t now_ns);
     ControlOutput deposit(int64_t now_ns);
 
-    int base_speed(float area_ratio) const;
     void enter(GameState s);
     bool run_timed_phase(int64_t now_ns, ControlOutput &out);
     void start_timed_phase(TimedPhase phase, int64_t now_ns, int duration_ms);
@@ -66,17 +67,10 @@ private:
     GameState state_ = GameState::CHASE_BALL;
 
     // CHASE_BALL bookkeeping.
-    int frames_since_seen_ = 1 << 20;
     int last_offset_ = 0;
-    int scan_dir_ = 1;
-    int scan_counter_ = 0;
     int stop_confirm_ = 0;
-    int align_frames_ = 0;
-    int align_off_min_ = 0;
-    int align_off_max_ = 0;
 
     TimedPhase timed_phase_ = Normal;
-    int timed_direction_ = 0;
     int64_t timed_deadline_ns_ = 0;
 
     // GRAB/DEPOSIT issue their arm command once, then wait on an elapsed-time

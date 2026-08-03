@@ -18,10 +18,12 @@
 #define _GNU_SOURCE // sched_* in profiling.h (Linux/StarryOS; stubbed elsewhere)
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 
 #include "actuator/arm_backend.h"
@@ -231,6 +233,7 @@ static void usage(const char *prog) {
     std::fprintf(
         stderr,
         "usage: %s --mode <live|test-uvc|test-yolo|test-bucket|validate|dry-run> [opts]\n"
+        "  --config <path>         load key=value options; CLI options override it\n"
         "  --validate-list <file>   (validate mode) fixed-image accuracy check; one image path per line\n"
         "  --model <path>           .rknn model (default model/tennis.rknn)\n"
         "  --label <path>           labels file (default model/labels.txt)\n"
@@ -239,10 +242,19 @@ static void usage(const char *prog) {
         "  --fps <n>                capture fps (default 30)\n"
         "  --duration-sec <f>       run duration (default 60)\n"
         "  --motor-backend <kind>   virtual|pwm|uart (default virtual)\n"
-        "  --motor-device <spec>    PWM chip list or UART device\n"
+        "  --motor-device <spec>    PWM chip list or UART device (UART default /dev/ttyS6)\n"
         "  --arm-backend <kind>     virtual|uart (default virtual)\n"
-        "  --arm-device <path>      arm UART device (default /dev/ttyUSB0)\n"
-        "  --motor-min-speed <n>    real motor dead-zone floor (default 15)\n"
+        "  --arm-device <path>      arm UART device (default /dev/ttyS3)\n"
+        "  --motor-min-speed <n>    real motor dead-zone floor (default 20)\n"
+        "  --area-stop <f>          ball area ratio that starts final alignment\n"
+        "  --area-reverse <f>       ball area ratio that triggers reverse\n"
+        "  --stop-center-offset <n> gripper target offset from image center\n"
+        "  --stop-center-zone <n>   final horizontal tolerance in pixels\n"
+        "  --stop-confirm-cnt <n>   consecutive aligned frames before grab\n"
+        "  --chase-forward-speed <n> ball approach speed\n"
+        "  --chase-pivot-speed <n>  ball alignment rotation speed\n"
+        "  --reverse-speed <n>      too-close reverse speed\n"
+        "  --search-pivot-speed <n> ball search rotation speed\n"
         "  --camera-warmup-frames <n> consecutive startup frames (default 3)\n"
         "  --camera-warmup-timeout-ms <n> startup deadline (default 3000)\n"
         "  --camera-watchdog-ms <n> no-frame stop timeout (default 2000)\n"
@@ -274,9 +286,165 @@ static bool arg_val(int argc, char **argv, int &i, const char *flag,
     return false;
 }
 
+static std::string trim(const std::string &value) {
+    const char *space = " \t\r\n";
+    const size_t first = value.find_first_not_of(space);
+    if (first == std::string::npos) return {};
+    const size_t last = value.find_last_not_of(space);
+    return value.substr(first, last - first + 1);
+}
+
+static bool parse_config_bool(const std::string &value, bool &result) {
+    if (value == "1" || value == "true" || value == "yes" ||
+        value == "on") {
+        result = true;
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" ||
+        value == "off") {
+        result = false;
+        return true;
+    }
+    return false;
+}
+
+static bool apply_config_value(Options &o, std::string key,
+                               const std::string &value) {
+    if (key.rfind("--", 0) == 0) key.erase(0, 2);
+    std::replace(key.begin(), key.end(), '_', '-');
+
+    if (key == "mode") o.mode = value;
+    else if (key == "model") o.model = value;
+    else if (key == "label") o.label = value;
+    else if (key == "core-mask") o.core_mask = value;
+    else if (key == "motor-backend") o.motor_backend = value;
+    else if (key == "motor-device") o.motor_device = value;
+    else if (key == "arm-backend") o.arm_backend = value;
+    else if (key == "arm-device") o.arm_device = value;
+    else if (key == "profile-csv") o.profile_csv = value;
+    else if (key == "infer-affinity") o.infer_affinity = value;
+    else if (key == "validate-list") o.validate_list = value;
+    else if (key == "report-interval-sec")
+        o.report_interval_sec = std::atoi(value.c_str());
+    else if (key == "device") o.device = std::atoi(value.c_str());
+    else if (key == "width") o.width = std::atoi(value.c_str());
+    else if (key == "height") o.height = std::atoi(value.c_str());
+    else if (key == "fps") o.fps = std::atoi(value.c_str());
+    else if (key == "duration-sec")
+        o.duration_sec = std::atof(value.c_str());
+    else if (key == "ball-class")
+        o.cfg.ball_class_id = std::atoi(value.c_str());
+    else if (key == "log-every") o.log_every = std::atoi(value.c_str());
+    else if (key == "staleness-ms")
+        o.cfg.staleness_ms = std::atoi(value.c_str());
+    else if (key == "motor-min-speed")
+        o.cfg.motor_min_speed = std::atoi(value.c_str());
+    else if (key == "area-stop")
+        o.cfg.area_stop = std::atof(value.c_str());
+    else if (key == "area-reverse")
+        o.cfg.area_reverse = std::atof(value.c_str());
+    else if (key == "stop-center-offset")
+        o.cfg.stop_center_offset = std::atoi(value.c_str());
+    else if (key == "stop-center-zone")
+        o.cfg.stop_center_zone = std::atoi(value.c_str());
+    else if (key == "stop-confirm-cnt")
+        o.cfg.stop_confirm_cnt = std::atoi(value.c_str());
+    else if (key == "chase-forward-speed")
+        o.cfg.chase_forward_spd = std::atoi(value.c_str());
+    else if (key == "chase-pivot-speed")
+        o.cfg.chase_pivot_spd = std::atoi(value.c_str());
+    else if (key == "reverse-speed")
+        o.cfg.reverse_speed = std::atoi(value.c_str());
+    else if (key == "search-pivot-speed")
+        o.cfg.search_pivot_spd = std::atoi(value.c_str());
+    else if (key == "camera-warmup-frames")
+        o.camera_warmup_frames = std::atoi(value.c_str());
+    else if (key == "camera-warmup-timeout-ms")
+        o.camera_warmup_timeout_ms = std::atoi(value.c_str());
+    else if (key == "camera-watchdog-ms")
+        o.camera_watchdog_ms = std::atoi(value.c_str());
+    else if (key == "min-confidence") {
+        int confidence = std::atoi(value.c_str());
+        confidence = std::max(0, std::min(confidence, 100));
+        o.cfg.conf_thresh = static_cast<float>(confidence) / 100.0f;
+    } else if (key == "profile") {
+        if (!parse_config_bool(value, o.profile)) return false;
+    } else if (key == "virtual-actuators") {
+        bool enabled = false;
+        if (!parse_config_bool(value, enabled)) return false;
+        if (enabled) {
+            o.motor_backend = "virtual";
+            o.arm_backend = "virtual";
+        }
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static int load_config_file(const std::string &path, Options &o) {
+    std::ifstream input(path);
+    if (!input) {
+        std::fprintf(stderr, "TENNIS_ERROR cannot open config: %s\n",
+                     path.c_str());
+        return 2;
+    }
+
+    std::string line;
+    int line_number = 0;
+    while (std::getline(input, line)) {
+        ++line_number;
+        line = trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        const size_t separator = line.find('=');
+        if (separator == std::string::npos) {
+            std::fprintf(stderr,
+                         "TENNIS_ERROR config %s:%d must use key=value\n",
+                         path.c_str(), line_number);
+            return 2;
+        }
+        std::string key = trim(line.substr(0, separator));
+        std::string value = trim(line.substr(separator + 1));
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') ||
+             (value.front() == '\'' && value.back() == '\''))) {
+            value = value.substr(1, value.size() - 2);
+        }
+        if (key.empty() || !apply_config_value(o, key, value)) {
+            std::fprintf(stderr,
+                         "TENNIS_ERROR invalid config option %s:%d: %s\n",
+                         path.c_str(), line_number, key.c_str());
+            return 2;
+        }
+    }
+    std::printf("TENNIS_CONFIG loaded=%s\n", path.c_str());
+    return 0;
+}
+
 static int parse_options(int argc, char **argv, Options &o) {
+    std::string config_path;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--config") != 0) continue;
+        if (i + 1 >= argc) {
+            std::fprintf(stderr, "TENNIS_ERROR missing value for --config\n");
+            return 2;
+        }
+        if (!config_path.empty()) {
+            std::fprintf(stderr, "TENNIS_ERROR --config may be specified once\n");
+            return 2;
+        }
+        config_path = argv[++i];
+    }
+    if (!config_path.empty()) {
+        if (int rc = load_config_file(config_path, o)) return rc;
+    }
+
     std::string v;
     for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--config") == 0) {
+            ++i;
+            continue;
+        }
         if (arg_val(argc, argv, i, "--mode", o.mode)) continue;
         if (arg_val(argc, argv, i, "--model", o.model)) continue;
         if (arg_val(argc, argv, i, "--label", o.label)) continue;
@@ -299,6 +467,15 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--log-every", v)) { o.log_every = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--staleness-ms", v)) { o.cfg.staleness_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--motor-min-speed", v)) { o.cfg.motor_min_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--area-stop", v)) { o.cfg.area_stop = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--area-reverse", v)) { o.cfg.area_reverse = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--stop-center-offset", v)) { o.cfg.stop_center_offset = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--stop-center-zone", v)) { o.cfg.stop_center_zone = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--stop-confirm-cnt", v)) { o.cfg.stop_confirm_cnt = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--chase-forward-speed", v)) { o.cfg.chase_forward_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--chase-pivot-speed", v)) { o.cfg.chase_pivot_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--reverse-speed", v)) { o.cfg.reverse_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--search-pivot-speed", v)) { o.cfg.search_pivot_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-frames", v)) { o.camera_warmup_frames = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-timeout-ms", v)) { o.camera_warmup_timeout_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-watchdog-ms", v)) { o.camera_watchdog_ms = std::atoi(v.c_str()); continue; }
@@ -327,6 +504,20 @@ static int parse_options(int argc, char **argv, Options &o) {
     if (o.cfg.motor_min_speed < 1 || o.cfg.motor_min_speed > 100) {
         std::fprintf(stderr,
                      "TENNIS_ERROR --motor-min-speed must be in [1,100]\n");
+        return 2;
+    }
+    if (o.cfg.area_stop <= 0.0f || o.cfg.area_stop >= o.cfg.area_reverse ||
+        o.cfg.stop_center_zone < 0 || o.cfg.stop_confirm_cnt < 1 ||
+        o.cfg.chase_forward_spd < o.cfg.motor_min_speed ||
+        o.cfg.chase_forward_spd > 100 ||
+        o.cfg.chase_pivot_spd < o.cfg.motor_min_speed ||
+        o.cfg.chase_pivot_spd > 100 ||
+        o.cfg.reverse_speed < o.cfg.motor_min_speed ||
+        o.cfg.reverse_speed > 100 ||
+        o.cfg.search_pivot_spd < o.cfg.motor_min_speed ||
+        o.cfg.search_pivot_spd > 100) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR invalid ball pursuit values\n");
         return 2;
     }
     if (o.camera_warmup_frames < 0 || o.camera_warmup_timeout_ms <= 0 ||

@@ -22,7 +22,7 @@ struct Options {
     std::string motor_backend = "virtual"; // virtual | pwm | uart
     std::string motor_device; // backend default when empty
     std::string arm_backend = "virtual"; // virtual | uart
-    std::string arm_device = "/dev/ttyUSB0";
+    std::string arm_device; // /dev/ttyS3 when empty
     int camera_warmup_frames = 3;
     int camera_warmup_timeout_ms = 3000;
     int camera_watchdog_ms = 2000;
