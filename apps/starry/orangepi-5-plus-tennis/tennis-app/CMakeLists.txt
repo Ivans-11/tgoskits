@@ -26,6 +26,7 @@ option(TENNIS_HOST_DRYRUN "Build only the host dry-run (no RKNN/UVC/RGA)" OFF)
 set(TENNIS_CORE_SRC
     cpp/main.cc
     cpp/controller.cc
+    cpp/odometry.cc
     cpp/state_machine.cc
     cpp/bench/metrics.cc
     cpp/actuator/actuator_factory.cc
@@ -48,10 +49,19 @@ if(TENNIS_HOST_DRYRUN)
         add_executable(tennis_state_machine_test
             cpp/tests/state_machine_test.cc
             cpp/state_machine.cc
+            cpp/odometry.cc
         )
         target_include_directories(tennis_state_machine_test PRIVATE cpp)
         target_compile_options(tennis_state_machine_test PRIVATE -Wall -Wextra)
         add_test(NAME tennis_state_machine COMMAND tennis_state_machine_test)
+
+        add_executable(tennis_odometry_test
+            cpp/tests/odometry_test.cc
+            cpp/odometry.cc
+        )
+        target_include_directories(tennis_odometry_test PRIVATE cpp)
+        target_compile_options(tennis_odometry_test PRIVATE -Wall -Wextra)
+        add_test(NAME tennis_odometry COMMAND tennis_odometry_test)
 
         add_executable(tennis_uart_actuator_test
             cpp/tests/uart_actuator_backend_test.cc

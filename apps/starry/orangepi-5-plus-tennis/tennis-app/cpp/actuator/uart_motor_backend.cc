@@ -16,7 +16,9 @@ constexpr uint8_t kCmdInit = 0x01;
 constexpr uint8_t kCmdConfig = 0x02;
 constexpr uint8_t kCmdSetSpeeds = 0x13;
 constexpr uint8_t kCmdStop = 0x11;
+constexpr uint8_t kCmdGetRpm = 0x20;
 constexpr uint8_t kRspAck = 0x80;
+constexpr uint8_t kRspRpmData = 0x90;
 
 uint8_t checksum(uint8_t command, uint8_t size, const uint8_t *payload) {
     uint8_t value = command ^ size;
@@ -27,6 +29,11 @@ uint8_t checksum(uint8_t command, uint8_t size, const uint8_t *payload) {
 void put_be16(uint8_t *buffer, uint16_t value) {
     buffer[0] = static_cast<uint8_t>(value >> 8);
     buffer[1] = static_cast<uint8_t>(value);
+}
+
+int16_t get_be16(const uint8_t *buffer) {
+    return static_cast<int16_t>((static_cast<uint16_t>(buffer[0]) << 8) |
+                                static_cast<uint16_t>(buffer[1]));
 }
 
 } // namespace
@@ -62,30 +69,37 @@ bool UartMotorBackend::send_command(uint8_t command, const uint8_t *payload,
 }
 
 bool UartMotorBackend::receive_ack(int timeout_ms) {
+    uint8_t command = 0;
+    uint8_t size = 0;
+    uint8_t payload[32]{};
+    if (receive_frame(command, payload, size, timeout_ms))
+        return command == kRspAck;
+    std::fprintf(stderr, "TENNIS_ERROR motor controller ACK timed out\n");
+    return false;
+}
+
+bool UartMotorBackend::receive_frame(uint8_t &command, uint8_t *payload,
+                                     uint8_t &size, int timeout_ms) {
     uint8_t byte = 0;
     int remaining = timeout_ms;
     while (remaining > 0) {
-        if (!serial_.read_byte(byte, 10)) {
-            remaining -= 10;
+        const int slice = std::min(remaining, 10);
+        if (!serial_.read_byte(byte, slice)) {
+            remaining -= slice;
             continue;
         }
         if (byte != kSof0 || !serial_.read_byte(byte, 10) || byte != kSof1)
             continue;
-        uint8_t command = 0;
-        uint8_t size = 0;
-        if (!serial_.read_byte(command, 50) || !serial_.read_byte(size, 50) ||
+        if (!serial_.read_byte(command, 20) || !serial_.read_byte(size, 20) ||
             size > 32)
             return false;
-        uint8_t payload[32]{};
         for (uint8_t i = 0; i < size; ++i) {
-            if (!serial_.read_byte(payload[i], 50)) return false;
+            if (!serial_.read_byte(payload[i], 20)) return false;
         }
         uint8_t received = 0;
-        if (!serial_.read_byte(received, 50)) return false;
-        return received == checksum(command, size, payload) &&
-               command == kRspAck;
+        return serial_.read_byte(received, 20) &&
+               received == checksum(command, size, payload);
     }
-    std::fprintf(stderr, "TENNIS_ERROR motor controller ACK timed out\n");
     return false;
 }
 
@@ -104,6 +118,34 @@ bool UartMotorBackend::brake() {
 
 bool UartMotorBackend::standby() {
     return stop();
+}
+
+TelemetryResult UartMotorBackend::read_wheel_rpm(WheelRpm &rpm) {
+    const uint8_t all_motors = 2;
+    serial_.flush();
+    if (!send_command(kCmdGetRpm, &all_motors, 1, false))
+        return TelemetryResult::Failed;
+
+    bool have_left = false;
+    bool have_right = false;
+    for (int response = 0; response < 2; ++response) {
+        uint8_t command = 0;
+        uint8_t size = 0;
+        uint8_t payload[32]{};
+        if (!receive_frame(command, payload, size, 150) ||
+            command != kRspRpmData || size < 3)
+            return TelemetryResult::Failed;
+        const int value = get_be16(payload + 1);
+        if (payload[0] == 0) {
+            rpm.left = value;
+            have_left = true;
+        } else if (payload[0] == 1) {
+            rpm.right = value;
+            have_right = true;
+        }
+    }
+    return have_left && have_right ? TelemetryResult::Sample
+                                   : TelemetryResult::Failed;
 }
 
 bool UartMotorBackend::stop() {

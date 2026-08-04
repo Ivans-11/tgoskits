@@ -27,6 +27,9 @@ The pipeline is built for low frame-to-command latency:
 - **Timed motion phases:** grab/deposit braking uses monotonic deadlines rather than blocking loops or frame counts. A 1 ms control tick advances these deadlines even without a new frame, while command de-duplication avoids repeated UART/sysfs writes.
 - **Fail-safe lifecycle:** a real arm is homed before control starts, startup waits for consecutive valid camera frames, a no-frame watchdog stops the run, actuator I/O failures are fatal, and `SIGINT`/`SIGTERM` return through normal motor shutdown.
 - **Multi-core NPU:** inference runs across all three RK3588 NPU cores via `rknn_set_core_mask` (`RKNN_NPU_CORE_0_1_2`). The stock image/stream binaries do not set this.
+- **Optional odometry return:** the UART chassis can query wheel RPM through the
+  same serialized backend and guide the post-grab return toward the last bucket
+  anchor. Bucket vision takes over immediately whenever a bucket is detected.
 - **Single-class postprocess:** the YOLOv8 head is decoded for a single tennis-ball class. No per-frame heap allocation in the steady state.
 - **HSV bucket detection:** the bucket is found with an HSV red-bucket detector rather than a second NPU pass.
 
@@ -192,6 +195,10 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--chase-pivot-speed <n>` | `30` | Fixed ball alignment rotation speed |
 | `--reverse-speed <n>` | `30` | Fixed too-close reverse speed |
 | `--search-pivot-speed <n>` | `30` | Fixed ball search rotation speed |
+| `--odometry-enabled <bool>` | `false` | Enable RPM odometry return guidance |
+| `--odometry-sample-ms <n>` | `100` | Wheel-RPM sampling interval |
+| `--return-timeout-ms <n>` | `15000` | Maximum blind return duration |
+| `--return-stop-radius <f>` | `0.50` | Stop radius before visual bucket search |
 | `--virtual-actuators` | — | Compatibility shorthand selecting both virtual backends |
 | `--camera-warmup-frames <n>` | `3` | Consecutive valid frames required before live control |
 | `--camera-warmup-timeout-ms <n>` | `3000` | Camera startup deadline |
@@ -252,7 +259,7 @@ Fields on the `TENNIS_BENCH_RESULT` line:
 - UVC capture
 - MJPEG decode
 - RKNN YOLOv8 ball detection
-- Full state machine (`CHASE_BALL`, `GRAB`, `FIND_BUCKET`, `APPROACH_BUCKET`, `DEPOSIT`)
+- Full state machine (`CHASE_BALL`, `GRAB`, `RETURN_TO_BUCKET`, `FIND_BUCKET`, `APPROACH_BUCKET`, `DEPOSIT`)
 - HSV red-bucket detection
 - Selectable virtual/PWM/UART motor and virtual/UART arm backends
 - The `TENNIS_BENCH_RESULT` benchmark

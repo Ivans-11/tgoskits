@@ -8,6 +8,17 @@
 
 namespace tennis {
 
+struct WheelRpm {
+    int left = 0;
+    int right = 0;
+};
+
+enum class TelemetryResult {
+    Unsupported,
+    Sample,
+    Failed,
+};
+
 // Backend contract: signed speeds in [-100, 100], positive = forward.
 class MotorBackend {
 public:
@@ -15,6 +26,9 @@ public:
     virtual bool drive(int left, int right) = 0; // set per-wheel speed
     virtual bool brake() = 0;                    // actively lock both wheels
     virtual bool standby() = 0;                  // coast / outputs off
+    virtual TelemetryResult read_wheel_rpm(WheelRpm &) {
+        return TelemetryResult::Unsupported;
+    }
 };
 
 // Virtual backend: emits structured, machine-readable command lines and touches

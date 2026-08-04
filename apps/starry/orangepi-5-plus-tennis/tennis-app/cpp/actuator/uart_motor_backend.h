@@ -19,11 +19,14 @@ public:
     bool drive(int left, int right) override;
     bool brake() override;
     bool standby() override;
+    TelemetryResult read_wheel_rpm(WheelRpm &rpm) override;
 
 private:
     bool send_command(uint8_t command, const uint8_t *payload, uint8_t size,
                       bool expect_ack = true);
     bool receive_ack(int timeout_ms);
+    bool receive_frame(uint8_t &command, uint8_t *payload, uint8_t &size,
+                       int timeout_ms);
     bool stop();
 
     SerialDevice serial_;

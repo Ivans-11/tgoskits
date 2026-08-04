@@ -133,6 +133,57 @@ bool motor_protocol_matches_esp32_controller() {
                   "motor frames match INIT/CONFIG/SET_SPEEDS/STOP protocol");
 }
 
+bool motor_rpm_protocol_matches_esp32_controller() {
+    PtyPair pty;
+    if (!expect(pty.master >= 0, "open RPM motor PTY")) return false;
+
+    std::vector<std::vector<uint8_t>> received;
+    std::string emulator_error;
+    std::thread emulator([&] {
+        for (int i = 0; i < 4; ++i) {
+            std::vector<uint8_t> command;
+            if (!read_frame(pty.master, command)) {
+                emulator_error = "timed out reading RPM motor frame";
+                return;
+            }
+            received.push_back(command);
+            if (i < 2) {
+                const auto ack = frame(0x80);
+                if (write(pty.master, ack.data(), ack.size()) !=
+                    static_cast<ssize_t>(ack.size())) {
+                    emulator_error = "failed to write RPM motor ACK";
+                    return;
+                }
+            } else if (i == 2) {
+                const auto left = frame(0x90, {0, 0, 36});
+                const auto right = frame(0x90, {1, 0, 35});
+                if (write(pty.master, left.data(), left.size()) !=
+                        static_cast<ssize_t>(left.size()) ||
+                    write(pty.master, right.data(), right.size()) !=
+                        static_cast<ssize_t>(right.size())) {
+                    emulator_error = "failed to write RPM data";
+                    return;
+                }
+            }
+        }
+    });
+
+    tennis::WheelRpm rpm;
+    bool succeeded = false;
+    {
+        tennis::UartMotorBackend motor(pty.device);
+        succeeded = motor.ready() &&
+                    motor.read_wheel_rpm(rpm) == tennis::TelemetryResult::Sample;
+    }
+    emulator.join();
+    if (!expect(succeeded, "RPM query must succeed")) return false;
+    if (!expect(emulator_error.empty(), emulator_error.c_str())) return false;
+    return expect(rpm.left == 36 && rpm.right == 35,
+                  "RPM response must decode signed big-endian wheel values") &&
+           expect(received.size() == 4 && received[2] == frame(0x20, {2}),
+                  "RPM query must use command 0x20 with both motors");
+}
+
 bool arm_protocol_matches_calibrated_sequence() {
     PtyPair pty;
     if (!expect(pty.master >= 0, "open arm PTY")) return false;
@@ -249,6 +300,7 @@ bool arm_ball_lost_after_lift_is_reported() {
 
 int main() {
     if (!motor_protocol_matches_esp32_controller()) return 1;
+    if (!motor_rpm_protocol_matches_esp32_controller()) return 1;
     if (!arm_protocol_matches_calibrated_sequence()) return 1;
     if (!arm_ball_lost_after_lift_is_reported()) return 1;
     return 0;

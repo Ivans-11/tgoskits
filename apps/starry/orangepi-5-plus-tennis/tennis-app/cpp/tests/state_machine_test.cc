@@ -158,6 +158,64 @@ bool chase_uses_only_discrete_executable_actions() {
                   "a close offset ball must pivot without a timed sub-state");
 }
 
+bool captured_ball_uses_odom_return_and_visual_takeover() {
+    tennis::Config config;
+    config.stop_confirm_cnt = 1;
+    config.bucket_confirm_cnt = 1;
+    config.brake_hold_ms = 0;
+    config.grab_settle_ms = 0;
+    config.release_settle_ms = 0;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+    const auto ball = ball_detection(config.area_stop + 0.01f, target);
+
+    machine.step(ball, ms(0));
+    auto output = *machine.tick(ms(0));
+    if (!expect(output.arm == tennis::ArmAction::Grab &&
+                    machine.state() == tennis::GameState::GRAB,
+                "first cycle must reach grab"))
+        return false;
+    machine.tick(ms(0));
+    if (!expect(machine.state() == tennis::GameState::FIND_BUCKET,
+                "without a bucket anchor the first cycle uses visual search"))
+        return false;
+    machine.step(bucket_detection(0.1f), ms(0));
+    machine.step(bucket_detection(1.0f), ms(0));
+    machine.tick(ms(0));
+    output = *machine.tick(ms(0));
+    if (!expect(output.arm == tennis::ArmAction::Ready &&
+                    machine.state() == tennis::GameState::CHASE_BALL,
+                "deposit completion must return to ball chase"))
+        return false;
+
+    tennis::OdometryEstimate estimate;
+    estimate.anchor_set = true;
+    estimate.valid = true;
+    estimate.x = 1.0;
+    estimate.distance_to_anchor = 1.0;
+    estimate.bearing_to_anchor = 3.14159265358979323846;
+    machine.set_odometry(estimate);
+    machine.step(ball, ms(0));
+    machine.tick(ms(0));
+    machine.tick(ms(0));
+    if (!expect(machine.state() == tennis::GameState::RETURN_TO_BUCKET &&
+                    machine.perception_mode() == tennis::PerceptionMode::BUCKET,
+                "a later captured ball must enter odometry return"))
+        return false;
+
+    output = machine.step(tennis::Detection{}, ms(1));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == -config.return_pivot_spd &&
+                    output.right == config.return_pivot_spd,
+                "return must pivot toward the bucket anchor"))
+        return false;
+    output = machine.step(bucket_detection(0.1f), ms(2));
+    return expect(output.motor_op == tennis::MotorOp::Brake &&
+                      machine.state() == tennis::GameState::FIND_BUCKET,
+                  "visual bucket detection must immediately take over");
+}
+
 bool deposit_waits_for_brake_and_release() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
@@ -208,6 +266,7 @@ int main() {
     if (!empty_grab_resumes_ball_search()) return 1;
     if (!ball_search_keeps_one_way_scan()) return 1;
     if (!chase_uses_only_discrete_executable_actions()) return 1;
+    if (!captured_ball_uses_odom_return_and_visual_takeover()) return 1;
     if (!deposit_waits_for_brake_and_release()) return 1;
     std::puts("tennis_state_machine_test: OK");
     return 0;

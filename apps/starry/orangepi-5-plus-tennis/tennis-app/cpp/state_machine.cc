@@ -10,6 +10,11 @@ namespace tennis {
 namespace {
 
 constexpr int64_t kNsPerMs = 1000000;
+constexpr double kPi = 3.14159265358979323846;
+
+double normalize_angle(double angle) {
+    return std::remainder(angle, 2.0 * kPi);
+}
 
 } // namespace
 
@@ -17,6 +22,7 @@ const char *to_string(GameState s) {
     switch (s) {
     case GameState::CHASE_BALL: return "CHASE_BALL";
     case GameState::GRAB: return "GRAB";
+    case GameState::RETURN_TO_BUCKET: return "RETURN_TO_BUCKET";
     case GameState::FIND_BUCKET: return "FIND_BUCKET";
     case GameState::APPROACH_BUCKET: return "APPROACH_BUCKET";
     case GameState::DEPOSIT: return "DEPOSIT";
@@ -99,6 +105,8 @@ ControlOutput StateMachine::step(const Detection &det, int64_t now_ns) {
     switch (state_) {
     case GameState::CHASE_BALL: return chase_ball(det.ball, now_ns);
     case GameState::GRAB: return grab(now_ns);
+    case GameState::RETURN_TO_BUCKET:
+        return return_to_bucket(det.bucket, now_ns);
     case GameState::FIND_BUCKET: return find_bucket(det.bucket);
     case GameState::APPROACH_BUCKET:
         return approach_bucket(det.bucket, now_ns);
@@ -183,7 +191,50 @@ ControlOutput StateMachine::grab(int64_t now_ns) {
                                  std::max(cfg_.grab_settle_ms, 0)) *
                                  kNsPerMs;
     } else if (now_ns >= state_deadline_ns_) {
+        if (odometry_.valid) {
+            enter(GameState::RETURN_TO_BUCKET);
+            return_start_ns_ = now_ns;
+        } else {
+            enter(GameState::FIND_BUCKET);
+        }
+    }
+    return out;
+}
+
+ControlOutput StateMachine::return_to_bucket(const BucketObs &bucket,
+                                             int64_t now_ns) {
+    ControlOutput out;
+    out.motor_op = MotorOp::Brake;
+
+    // A visual bucket always takes over before any odometry command.
+    if (bucket.found) {
         enter(GameState::FIND_BUCKET);
+        return out;
+    }
+    const double timeout_ns =
+        static_cast<double>(cfg_.return_timeout_ms) * kNsPerMs;
+    if (!odometry_.valid ||
+        now_ns - return_start_ns_ > static_cast<int64_t>(timeout_ns) ||
+        odometry_.distance_to_anchor <= cfg_.return_stop_radius_m ||
+        odometry_.distance_to_anchor >= cfg_.return_max_distance_m) {
+        enter(GameState::FIND_BUCKET);
+        return out;
+    }
+
+    const double tolerance = cfg_.return_heading_tolerance_deg * kPi / 180.0;
+    const double error =
+        normalize_angle(odometry_.bearing_to_anchor - odometry_.heading);
+    if (std::abs(error) > tolerance) {
+        // Positive mathematical heading is produced by right-wheel-forward,
+        // left-wheel-reverse, hence the negative sign for the wheel command.
+        const int dir = error > 0.0 ? -1 : 1;
+        out.motor_op = MotorOp::Drive;
+        out.left = dir * cfg_.return_pivot_spd;
+        out.right = -out.left;
+    } else {
+        out.motor_op = MotorOp::Drive;
+        out.left = cfg_.return_forward_spd;
+        out.right = cfg_.return_forward_spd;
     }
     return out;
 }
@@ -251,6 +302,7 @@ ControlOutput StateMachine::deposit(int64_t now_ns) {
     } else if (now_ns >= state_deadline_ns_) {
         out.arm = ArmAction::Ready;
         enter(GameState::CHASE_BALL);
+        out.reset_odometry = true;
     }
     return out;
 }

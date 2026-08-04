@@ -11,12 +11,13 @@
 
 namespace tennis {
 
-// The five game states required by the demo. GRAB and DEPOSIT are modelled as
+// GRAB and DEPOSIT are modelled as
 // explicit (brief, non-blocking) states rather than folded into a transition,
 // so the state trace is unambiguous.
 enum class GameState {
     CHASE_BALL,
     GRAB,
+    RETURN_TO_BUCKET,
     FIND_BUCKET,
     APPROACH_BUCKET,
     DEPOSIT,
@@ -102,6 +103,24 @@ struct Config {
 
     // Ball lost search.
     int search_pivot_spd = 30;
+
+    // Optional wheel-RPM odometry. The generic default remains off; the
+    // calibrated Orange Pi live configuration enables it explicitly.
+    bool odometry_enabled = false;
+    double odometry_wheel_radius_m = 0.03;
+    double odometry_wheel_base_m = 0.18;
+    int odometry_sample_ms = 100;
+    int odometry_stale_ms = 500;
+    int odometry_max_gap_ms = 500;
+    int odometry_max_rpm = 300;
+
+    // Coarse return-to-bucket guidance; vision takes priority in this state.
+    double return_heading_tolerance_deg = 15.0;
+    double return_stop_radius_m = 0.50;
+    double return_max_distance_m = 10.0;
+    int return_timeout_ms = 15000;
+    int return_pivot_spd = 30;
+    int return_forward_spd = 30;
 
     // Bucket approach.
     float bucket_area_deposit = 0.90f;

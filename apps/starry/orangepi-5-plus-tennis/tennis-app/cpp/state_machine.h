@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "actuator/arm_backend.h"
+#include "odometry.h"
 #include "types.h"
 
 namespace tennis {
@@ -23,6 +24,7 @@ struct ControlOutput {
     int left = 0;  // valid when motor_op == Drive
     int right = 0; // valid when motor_op == Drive
     ArmAction arm = ArmAction::None;
+    bool reset_odometry = false;
 };
 
 class StateMachine {
@@ -39,6 +41,10 @@ public:
     // Detector the perception stage should run for the next frame.
     PerceptionMode perception_mode() const;
 
+    void set_odometry(const OdometryEstimate &estimate) {
+        odometry_ = estimate;
+    }
+
     GameState state() const { return state_; }
 
     // A verified empty grasp resumes ball search instead of advancing to the
@@ -54,6 +60,7 @@ private:
 
     ControlOutput chase_ball(const BallObs &ball, int64_t now_ns);
     ControlOutput grab(int64_t now_ns);
+    ControlOutput return_to_bucket(const BucketObs &bucket, int64_t now_ns);
     ControlOutput find_bucket(const BucketObs &bucket);
     ControlOutput approach_bucket(const BucketObs &bucket, int64_t now_ns);
     ControlOutput deposit(int64_t now_ns);
@@ -77,6 +84,9 @@ private:
     // deadline rather than a frame count that changes with camera load.
     bool state_action_started_ = false;
     int64_t state_deadline_ns_ = 0;
+
+    OdometryEstimate odometry_;
+    int64_t return_start_ns_ = 0;
 
     // Bucket bookkeeping.
     int bucket_confirm_ = 0;

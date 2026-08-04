@@ -246,7 +246,7 @@ static void usage(const char *prog) {
         "  --arm-backend <kind>     virtual|uart (default virtual)\n"
         "  --arm-device <path>      arm UART device (default /dev/ttyS3)\n"
         "  --motor-min-speed <n>    real motor dead-zone floor (default 20)\n"
-        "  --area-stop <f>          ball area ratio that starts final alignment\n"
+        "  --area-stop <f>          ball area ratio that stops the approach\n"
         "  --area-reverse <f>       ball area ratio that triggers reverse\n"
         "  --stop-center-offset <n> gripper target offset from image center\n"
         "  --stop-center-zone <n>   final horizontal tolerance in pixels\n"
@@ -255,6 +255,10 @@ static void usage(const char *prog) {
         "  --chase-pivot-speed <n>  ball alignment rotation speed\n"
         "  --reverse-speed <n>      too-close reverse speed\n"
         "  --search-pivot-speed <n> ball search rotation speed\n"
+        "  --odometry-enabled <bool> enable RPM odometry return guidance\n"
+        "  --odometry-sample-ms <n> RPM sampling interval\n"
+        "  --return-timeout-ms <n>  odometry return timeout\n"
+        "  --return-stop-radius <f> stop radius before visual bucket search\n"
         "  --camera-warmup-frames <n> consecutive startup frames (default 3)\n"
         "  --camera-warmup-timeout-ms <n> startup deadline (default 3000)\n"
         "  --camera-watchdog-ms <n> no-frame stop timeout (default 2000)\n"
@@ -357,6 +361,32 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.reverse_speed = std::atoi(value.c_str());
     else if (key == "search-pivot-speed")
         o.cfg.search_pivot_spd = std::atoi(value.c_str());
+    else if (key == "odometry-enabled") {
+        if (!parse_config_bool(value, o.cfg.odometry_enabled)) return false;
+    } else if (key == "odometry-wheel-radius-m")
+        o.cfg.odometry_wheel_radius_m = std::atof(value.c_str());
+    else if (key == "odometry-wheel-base-m")
+        o.cfg.odometry_wheel_base_m = std::atof(value.c_str());
+    else if (key == "odometry-sample-ms")
+        o.cfg.odometry_sample_ms = std::atoi(value.c_str());
+    else if (key == "odometry-stale-ms")
+        o.cfg.odometry_stale_ms = std::atoi(value.c_str());
+    else if (key == "odometry-max-gap-ms")
+        o.cfg.odometry_max_gap_ms = std::atoi(value.c_str());
+    else if (key == "odometry-max-rpm")
+        o.cfg.odometry_max_rpm = std::atoi(value.c_str());
+    else if (key == "return-heading-tolerance-deg")
+        o.cfg.return_heading_tolerance_deg = std::atof(value.c_str());
+    else if (key == "return-stop-radius")
+        o.cfg.return_stop_radius_m = std::atof(value.c_str());
+    else if (key == "return-max-distance")
+        o.cfg.return_max_distance_m = std::atof(value.c_str());
+    else if (key == "return-timeout-ms")
+        o.cfg.return_timeout_ms = std::atoi(value.c_str());
+    else if (key == "return-pivot-speed")
+        o.cfg.return_pivot_spd = std::atoi(value.c_str());
+    else if (key == "return-forward-speed")
+        o.cfg.return_forward_spd = std::atoi(value.c_str());
     else if (key == "camera-warmup-frames")
         o.camera_warmup_frames = std::atoi(value.c_str());
     else if (key == "camera-warmup-timeout-ms")
@@ -476,6 +506,16 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--chase-pivot-speed", v)) { o.cfg.chase_pivot_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--reverse-speed", v)) { o.cfg.reverse_speed = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--search-pivot-speed", v)) { o.cfg.search_pivot_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--odometry-enabled", v)) {
+            if (!parse_config_bool(v, o.cfg.odometry_enabled)) {
+                std::fprintf(stderr, "TENNIS_ERROR invalid --odometry-enabled\n");
+                return 2;
+            }
+            continue;
+        }
+        if (arg_val(argc, argv, i, "--odometry-sample-ms", v)) { o.cfg.odometry_sample_ms = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--return-timeout-ms", v)) { o.cfg.return_timeout_ms = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--return-stop-radius", v)) { o.cfg.return_stop_radius_m = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-frames", v)) { o.camera_warmup_frames = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-timeout-ms", v)) { o.camera_warmup_timeout_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-watchdog-ms", v)) { o.camera_watchdog_ms = std::atoi(v.c_str()); continue; }
@@ -518,6 +558,22 @@ static int parse_options(int argc, char **argv, Options &o) {
         o.cfg.search_pivot_spd > 100) {
         std::fprintf(stderr,
                      "TENNIS_ERROR invalid ball pursuit values\n");
+        return 2;
+    }
+    if (o.cfg.odometry_wheel_radius_m <= 0.0 ||
+        o.cfg.odometry_wheel_base_m <= 0.0 || o.cfg.odometry_sample_ms <= 0 ||
+        o.cfg.odometry_stale_ms < o.cfg.odometry_sample_ms ||
+        o.cfg.odometry_max_gap_ms < o.cfg.odometry_sample_ms ||
+        o.cfg.odometry_max_rpm <= 0 || o.cfg.return_heading_tolerance_deg <= 0.0 ||
+        o.cfg.return_heading_tolerance_deg >= 180.0 ||
+        o.cfg.return_stop_radius_m <= 0.0 ||
+        o.cfg.return_max_distance_m <= o.cfg.return_stop_radius_m ||
+        o.cfg.return_timeout_ms <= 0 ||
+        o.cfg.return_pivot_spd < o.cfg.motor_min_speed ||
+        o.cfg.return_pivot_spd > 100 ||
+        o.cfg.return_forward_spd < o.cfg.motor_min_speed ||
+        o.cfg.return_forward_spd > 100) {
+        std::fprintf(stderr, "TENNIS_ERROR invalid odometry return values\n");
         return 2;
     }
     if (o.camera_warmup_frames < 0 || o.camera_warmup_timeout_ms <= 0 ||

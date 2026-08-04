@@ -9,8 +9,25 @@ namespace tennis {
 
 Controller::Controller(const Config &cfg, MotorBackend &motor, ArmBackend &arm,
                        Metrics &metrics, int log_every)
-    : sm_(cfg), motor_(motor), arm_(arm), metrics_(metrics),
-      log_every_(log_every < 1 ? 1 : log_every) {}
+    : cfg_(cfg), sm_(cfg), odometry_(cfg), motor_(motor), arm_(arm),
+      metrics_(metrics), log_every_(log_every < 1 ? 1 : log_every) {
+    sm_.set_odometry(odometry_.estimate(monotonic_ns()));
+}
+
+void Controller::poll_odometry(int64_t now_ns) {
+    if (!cfg_.odometry_enabled) return;
+    if (next_odometry_sample_ns_ != 0 && now_ns < next_odometry_sample_ns_) {
+        sm_.set_odometry(odometry_.estimate(now_ns));
+        return;
+    }
+    next_odometry_sample_ns_ = now_ns +
+                               static_cast<int64_t>(cfg_.odometry_sample_ms) *
+                                   1000000;
+    WheelRpm rpm;
+    if (motor_.read_wheel_rpm(rpm) == TelemetryResult::Sample)
+        (void)odometry_.update(rpm.left, rpm.right, monotonic_ns());
+    sm_.set_odometry(odometry_.estimate(monotonic_ns()));
+}
 
 bool Controller::apply_motor(const ControlOutput &out) {
     const bool changed =
@@ -34,7 +51,9 @@ bool Controller::apply_motor(const ControlOutput &out) {
 
 bool Controller::process(const Detection &det) {
     const GameState acting_state = sm_.state();
-    const int64_t now = monotonic_ns();
+    int64_t now = monotonic_ns();
+    poll_odometry(now);
+    now = monotonic_ns();
     const double frame_age_ms = ns_to_ms(now - det.capture_ts_ns);
 
     const bool had_ball = det.mode == PerceptionMode::BALL && det.ball.found;
@@ -52,14 +71,18 @@ bool Controller::process(const Detection &det) {
     if ((frame_count_++ % static_cast<unsigned long long>(log_every_)) == 0) {
         const int mleft = out.motor_op == MotorOp::Drive ? out.left : 0;
         const int mright = out.motor_op == MotorOp::Drive ? out.right : 0;
+        const OdometryEstimate odom = odometry_.estimate(decision_ts);
         std::printf("TENNIS_STATE frame=%llu state=%s detections=%d "
                     "bucket_visible=%d ball_area=%.4f ball_cx=%.1f "
-                    "frame_age_ms=%.3f\n",
+                    "odom_valid=%d odom_x=%.3f odom_y=%.3f "
+                    "odom_heading=%.3f odom_distance=%.3f frame_age_ms=%.3f\n",
                     static_cast<unsigned long long>(det.seq),
                     to_string(acting_state), had_ball ? 1 : 0,
                     had_bucket ? 1 : 0,
                     had_ball ? det.ball.area_ratio : 0.0f,
-                    had_ball ? det.ball.cx : 0.0f, frame_age_ms);
+                    had_ball ? det.ball.cx : 0.0f, odom.valid ? 1 : 0,
+                    odom.x, odom.y, odom.heading, odom.distance_to_anchor,
+                    frame_age_ms);
         std::printf("TENNIS_CMD frame=%llu state=%s motor_left=%d "
                     "motor_right=%d arm_action=%s capture_ts_ns=%lld "
                     "decision_ts_ns=%lld frame_to_command_ms=%.3f\n",
@@ -73,6 +96,7 @@ bool Controller::process(const Detection &det) {
 }
 
 bool Controller::tick(int64_t now_ns) {
+    poll_odometry(now_ns);
     const auto output = sm_.tick(now_ns);
     return !output || dispatch(*output);
 }
@@ -106,6 +130,11 @@ bool Controller::dispatch(const ControlOutput &out) {
         return false;
     }
     metrics_.on_arm_command();
+    if (out.reset_odometry) {
+        odometry_.reset_anchor();
+        sm_.set_odometry(odometry_.estimate(monotonic_ns()));
+        std::printf("TENNIS_ODOMETRY anchor_reset=1\n");
+    }
     return true;
 }
 

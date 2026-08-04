@@ -24,6 +24,7 @@ gcc -O3 -DNDEBUG -std=gnu11 "${includes[@]}" \
 sources=(
     cpp/main.cc
     cpp/controller.cc
+    cpp/odometry.cc
     cpp/state_machine.cc
     cpp/bench/metrics.cc
     cpp/actuator/actuator_factory.cc

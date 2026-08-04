@@ -23,6 +23,9 @@ public:
     }
     bool brake() override { return backend_->brake(); }
     bool standby() override { return backend_->standby(); }
+    TelemetryResult read_wheel_rpm(WheelRpm &rpm) override {
+        return backend_->read_wheel_rpm(rpm);
+    }
 
 private:
     int map(int speed) const {
