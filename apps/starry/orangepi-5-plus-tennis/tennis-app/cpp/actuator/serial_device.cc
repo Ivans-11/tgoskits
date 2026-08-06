@@ -116,4 +116,8 @@ void SerialDevice::flush() {
     tcflush(fd_, TCIOFLUSH);
 }
 
+void SerialDevice::flush_input() {
+    tcflush(fd_, TCIFLUSH);
+}
+
 } // namespace tennis

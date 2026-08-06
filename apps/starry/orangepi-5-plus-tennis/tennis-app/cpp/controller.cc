@@ -9,24 +9,13 @@ namespace tennis {
 
 Controller::Controller(const Config &cfg, MotorBackend &motor, ArmBackend &arm,
                        Metrics &metrics, int log_every)
-    : cfg_(cfg), sm_(cfg), odometry_(cfg), motor_(motor), arm_(arm),
+    : sm_(cfg), odometry_(cfg, motor), motor_(motor), arm_(arm),
       metrics_(metrics), log_every_(log_every < 1 ? 1 : log_every) {
     sm_.set_odometry(odometry_.estimate(monotonic_ns()));
 }
 
-void Controller::poll_odometry(int64_t now_ns) {
-    if (!cfg_.odometry_enabled) return;
-    if (next_odometry_sample_ns_ != 0 && now_ns < next_odometry_sample_ns_) {
-        sm_.set_odometry(odometry_.estimate(now_ns));
-        return;
-    }
-    next_odometry_sample_ns_ = now_ns +
-                               static_cast<int64_t>(cfg_.odometry_sample_ms) *
-                                   1000000;
-    WheelRpm rpm;
-    if (motor_.read_wheel_rpm(rpm) == TelemetryResult::Sample)
-        (void)odometry_.update(rpm.left, rpm.right, monotonic_ns());
-    sm_.set_odometry(odometry_.estimate(monotonic_ns()));
+void Controller::refresh_odometry(int64_t now_ns) {
+    sm_.set_odometry(odometry_.estimate(now_ns));
 }
 
 bool Controller::apply_motor(const ControlOutput &out) {
@@ -52,7 +41,7 @@ bool Controller::apply_motor(const ControlOutput &out) {
 bool Controller::process(const Detection &det) {
     const GameState acting_state = sm_.state();
     int64_t now = monotonic_ns();
-    poll_odometry(now);
+    refresh_odometry(now);
     now = monotonic_ns();
     const double frame_age_ms = ns_to_ms(now - det.capture_ts_ns);
 
@@ -96,7 +85,7 @@ bool Controller::process(const Detection &det) {
 }
 
 bool Controller::tick(int64_t now_ns) {
-    poll_odometry(now_ns);
+    refresh_odometry(now_ns);
     const auto output = sm_.tick(now_ns);
     return !output || dispatch(*output);
 }

@@ -21,6 +21,7 @@ public:
     bool read_byte(uint8_t &byte, int timeout_ms);
     bool drain();
     void flush();
+    void flush_input();
     bool is_open() const { return fd_ >= 0; }
 
 private:

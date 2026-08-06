@@ -10,7 +10,7 @@
 #include "actuator/arm_backend.h"
 #include "actuator/motor_backend.h"
 #include "bench/metrics.h"
-#include "odometry.h"
+#include "odometry_worker.h"
 #include "state_machine.h"
 #include "types.h"
 
@@ -30,11 +30,10 @@ public:
 private:
     bool apply_motor(const ControlOutput &out);
     bool dispatch(const ControlOutput &out);
-    void poll_odometry(int64_t now_ns);
+    void refresh_odometry(int64_t now_ns);
 
-    Config cfg_;
     StateMachine sm_;
-    OdometryTracker odometry_;
+    OdometryWorker odometry_;
     MotorBackend &motor_;
     ArmBackend &arm_;
     Metrics &metrics_;
@@ -43,7 +42,6 @@ private:
     MotorOp last_op_ = MotorOp::Standby;
     int last_left_ = 1 << 20; // force the first drive command to emit
     int last_right_ = 1 << 20;
-    int64_t next_odometry_sample_ns_ = 0;
 };
 
 } // namespace tennis

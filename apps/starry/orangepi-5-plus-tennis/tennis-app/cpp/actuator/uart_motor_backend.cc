@@ -61,7 +61,10 @@ bool UartMotorBackend::send_command(uint8_t command, const uint8_t *payload,
     uint8_t frame[37] = {kSof0, kSof1, command, size};
     if (size > 0) std::memcpy(frame + 4, payload, size);
     frame[4 + size] = checksum(command, size, payload);
-    if (!serial_.write_all(frame, 5 + size)) return false;
+    {
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        if (!serial_.write_all(frame, 5 + size)) return false;
+    }
     if (!expect_ack || receive_ack(500)) return true;
     std::fprintf(stderr, "TENNIS_ERROR motor command 0x%02x failed\n",
                  command);
@@ -122,7 +125,7 @@ bool UartMotorBackend::standby() {
 
 TelemetryResult UartMotorBackend::read_wheel_rpm(WheelRpm &rpm) {
     const uint8_t all_motors = 2;
-    serial_.flush();
+    serial_.flush_input();
     if (!send_command(kCmdGetRpm, &all_motors, 1, false))
         return TelemetryResult::Failed;
 

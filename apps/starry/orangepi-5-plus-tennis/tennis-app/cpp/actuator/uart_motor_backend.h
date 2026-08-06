@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "motor_backend.h"
@@ -30,6 +31,7 @@ private:
     bool stop();
 
     SerialDevice serial_;
+    std::mutex write_mutex_;
     bool ready_ = false;
 };
 

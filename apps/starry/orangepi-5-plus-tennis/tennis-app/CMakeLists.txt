@@ -21,12 +21,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(TENNIS_HOST_DRYRUN "Build only the host dry-run (no RKNN/UVC/RGA)" OFF)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # Tennis-specific sources that are safe to compile on any host (no RKNN/UVC).
 set(TENNIS_CORE_SRC
     cpp/main.cc
     cpp/controller.cc
     cpp/odometry.cc
+    cpp/odometry_worker.cc
     cpp/state_machine.cc
     cpp/bench/metrics.cc
     cpp/actuator/actuator_factory.cc
@@ -40,12 +43,10 @@ if(TENNIS_HOST_DRYRUN)
     target_compile_definitions(tennis_app PRIVATE TENNIS_HOST_DRYRUN)
     target_include_directories(tennis_app PRIVATE cpp)
     target_compile_options(tennis_app PRIVATE -Wall -Wextra)
+    target_link_libraries(tennis_app PRIVATE Threads::Threads)
 
     include(CTest)
     if(BUILD_TESTING)
-        set(THREADS_PREFER_PTHREAD_FLAG ON)
-        find_package(Threads REQUIRED)
-
         add_executable(tennis_state_machine_test
             cpp/tests/state_machine_test.cc
             cpp/state_machine.cc
@@ -142,6 +143,7 @@ else()
         ${LIBJPEG}
         ${LIBRGA}
         ${LIBMPP}
+        Threads::Threads
         dl
     )
 
@@ -149,12 +151,6 @@ else()
     # on the board's libstdc++/libgcc_s versions (the cross toolchain may be newer
     # than the board's runtime). glibc itself stays dynamic and forward-compatible.
     target_link_options(tennis_app PRIVATE -static-libstdc++ -static-libgcc)
-
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        set(THREADS_PREFER_PTHREAD_FLAG ON)
-        find_package(Threads REQUIRED)
-        target_link_libraries(tennis_app Threads::Threads)
-    endif()
 
     install(TARGETS tennis_app DESTINATION .)
     # Deploy librockchip_mpp alongside the binary (RPATH is $ORIGIN/lib).
