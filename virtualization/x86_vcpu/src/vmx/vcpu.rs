@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     arch::naked_asm,
     fmt::{Debug, Formatter, Result},
@@ -26,7 +26,7 @@ use axaddrspace::{
     device::{AccessWidth, Port, SysRegAddr, SysRegAddrRange},
 };
 use axdevice_base::BaseDeviceOps;
-use axvcpu::{AxArchVCpu, AxVCpuExitReason};
+use axvcpu::{AxArchVCpu, AxVCpuCpuidEntry, AxVCpuExitReason};
 use axvisor_api::{
     memory::{self, PhysAddr},
     vmm::{VCpuId, VMId},
@@ -156,6 +156,8 @@ pub struct VmxVcpu {
     vcpu_count: usize,
     /// Whether this vCPU exposes KVM-compatible hypervisor CPUID leaves.
     expose_kvm_hypervisor: bool,
+    /// Userspace-configured CPUID results.
+    cpuid: Vec<AxVCpuCpuidEntry>,
     // /// Whether this VCPU is a host VCpu. Used in type 1.5 hypervisor.
     // is_host: bool, temporary removed because we don't care about type 1.5 now
 
@@ -209,6 +211,7 @@ impl VmxVcpu {
             vcpu_id,
             vcpu_count: config.vcpu_count.max(1),
             expose_kvm_hypervisor: false,
+            cpuid: Vec::new(),
             // is_host: false,
             vmcs: VmxRegion::new(vmcs_revision_id, false)?,
             io_bitmap: IOBitmap::passthrough_all()?,
@@ -1574,77 +1577,117 @@ impl VmxVcpu {
 
         let regs_clone = *self.regs_mut();
         let function = regs_clone.rax as u32;
-        let res = match function {
-            LEAF_FEATURE_INFO => {
-                const FEATURE_VMX: u32 = 1 << 5;
-                const FEATURE_HYPERVISOR: u32 = 1 << 31;
-                const FEATURE_MCE: u32 = 1 << 7;
-                const FEATURE_MTRR: u32 = 1 << 12;
-                const FEATURE_MCA: u32 = 1 << 14;
-                const FEATURE_X2APIC: u32 = 1 << 21;
-                const FEATURE_TSC_DEADLINE: u32 = 1 << 24;
-                const FEATURE_APIC: u32 = 1 << 9;
-                const MAX_LOGICAL_PROCESSORS_MASK: u32 = 0xff << 16;
-                const INITIAL_APIC_ID_MASK: u32 = 0xff << 24;
-                let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                res.ecx &= !FEATURE_VMX;
-                res.ecx |= FEATURE_X2APIC;
-                res.ecx &= !FEATURE_TSC_DEADLINE;
-                res.ecx |= FEATURE_HYPERVISOR;
-                res.edx &= !(FEATURE_MCE | FEATURE_MTRR | FEATURE_MCA);
-                res.edx |= FEATURE_APIC;
-                res.ebx &= !(MAX_LOGICAL_PROCESSORS_MASK | INITIAL_APIC_ID_MASK);
-                res.ebx |= virtual_logical_processors << 16;
-                res.ebx |= (self.vcpu_id as u32 & 0xff) << 24;
-                res
-            }
-            0xb | 0x1f => CpuIdResult {
-                eax: 0,
-                ebx: 0,
-                ecx: regs_clone.rcx as u32,
-                edx: 0,
-            },
-            // See SDM Table 3-8. Information Returned by CPUID Instruction (Contd.)
-            LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
-                let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                if regs_clone.rcx == 0 {
-                    // Bit 05: WAITPKG.
-                    res.ecx.set_bit(5, false); // clear waitpkg
-                    // Bit 16: LA57. Supports 57-bit linear addresses and five-level paging if 1.
-                    res.ecx.set_bit(16, false); // clear LA57
-                }
+        // Allow userspace to disable guest-managed extended-state features.
+        // Keep every other CPUID field under backend control so a userspace
+        // CPU model cannot replace topology, timing, or instruction semantics.
+        let configured_feature_info = (function == LEAF_FEATURE_INFO)
+            .then(|| {
+                self.cpuid
+                    .iter()
+                    .find(|entry| entry.function == LEAF_FEATURE_INFO && entry.index == 0)
+            })
+            .flatten();
+        let res = if let Some(entry) = configured_feature_info {
+            match function {
+                LEAF_FEATURE_INFO => {
+                    const FEATURE_VMX: u32 = 1 << 5;
+                    const FEATURE_HYPERVISOR: u32 = 1 << 31;
+                    const FEATURE_MCE: u32 = 1 << 7;
+                    const FEATURE_MTRR: u32 = 1 << 12;
+                    const FEATURE_MCA: u32 = 1 << 14;
+                    const FEATURE_X2APIC: u32 = 1 << 21;
+                    const FEATURE_TSC_DEADLINE: u32 = 1 << 24;
+                    const FEATURE_APIC: u32 = 1 << 9;
+                    const MAX_LOGICAL_PROCESSORS_MASK: u32 = 0xff << 16;
+                    const INITIAL_APIC_ID_MASK: u32 = 0xff << 24;
+                    const USER_RESTRICTABLE_ECX: u32 = (1 << 26) | (1 << 27) | (1 << 28);
+                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
 
-                res
+                    res.ecx &= entry.ecx | !USER_RESTRICTABLE_ECX;
+                    res.ecx &= !(FEATURE_VMX | FEATURE_TSC_DEADLINE);
+                    res.ecx |= FEATURE_X2APIC | FEATURE_HYPERVISOR;
+                    res.edx &= !(FEATURE_MCE | FEATURE_MTRR | FEATURE_MCA);
+                    res.edx |= FEATURE_APIC;
+                    res.ebx &= !(MAX_LOGICAL_PROCESSORS_MASK | INITIAL_APIC_ID_MASK);
+                    res.ebx |= virtual_logical_processors << 16;
+                    res.ebx |= (self.vcpu_id as u32 & 0xff) << 24;
+                    res
+                }
+                _ => unreachable!(),
             }
-            LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => {
-                self.load_guest_xstate();
-                let res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                self.load_host_xstate();
+        } else {
+            match function {
+                LEAF_FEATURE_INFO => {
+                    const FEATURE_VMX: u32 = 1 << 5;
+                    const FEATURE_HYPERVISOR: u32 = 1 << 31;
+                    const FEATURE_MCE: u32 = 1 << 7;
+                    const FEATURE_MTRR: u32 = 1 << 12;
+                    const FEATURE_MCA: u32 = 1 << 14;
+                    const FEATURE_X2APIC: u32 = 1 << 21;
+                    const FEATURE_TSC_DEADLINE: u32 = 1 << 24;
+                    const FEATURE_APIC: u32 = 1 << 9;
+                    const MAX_LOGICAL_PROCESSORS_MASK: u32 = 0xff << 16;
+                    const INITIAL_APIC_ID_MASK: u32 = 0xff << 24;
+                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    res.ecx &= !FEATURE_VMX;
+                    res.ecx |= FEATURE_X2APIC;
+                    res.ecx &= !FEATURE_TSC_DEADLINE;
+                    res.ecx |= FEATURE_HYPERVISOR;
+                    res.edx &= !(FEATURE_MCE | FEATURE_MTRR | FEATURE_MCA);
+                    res.edx |= FEATURE_APIC;
+                    res.ebx &= !(MAX_LOGICAL_PROCESSORS_MASK | INITIAL_APIC_ID_MASK);
+                    res.ebx |= virtual_logical_processors << 16;
+                    res.ebx |= (self.vcpu_id as u32 & 0xff) << 24;
+                    res
+                }
+                0xb | 0x1f => CpuIdResult {
+                    eax: 0,
+                    ebx: 0,
+                    ecx: regs_clone.rcx as u32,
+                    edx: 0,
+                },
+                // See SDM Table 3-8. Information Returned by CPUID Instruction (Contd.)
+                LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
+                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    if regs_clone.rcx == 0 {
+                        // Bit 05: WAITPKG.
+                        res.ecx.set_bit(5, false); // clear waitpkg
+                        // Bit 16: LA57. Supports 57-bit linear addresses and five-level paging if 1.
+                        res.ecx.set_bit(16, false); // clear LA57
+                    }
 
-                res
-            }
-            crate::kvm::KVM_HYPERVISOR_INFO_LEAF | crate::kvm::KVM_HYPERVISOR_FEATURE_LEAF => {
-                if self.expose_kvm_hypervisor {
-                    crate::kvm::kvm_hypervisor_cpuid(function).expect("known KVM CPUID leaf")
-                } else {
-                    crate::kvm::rustvisor_hypervisor_cpuid(function)
-                        .expect("known hypervisor CPUID leaf")
+                    res
                 }
-            }
-            LEAF_FREQUENCY_INFO => {
-                let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                if res.eax == 0 {
-                    let frequency_mhz =
-                        crate::host_tsc_frequency_mhz().unwrap_or(FALLBACK_TSC_FREQUENCY_MHZ);
-                    warn!(
-                        "handle_cpuid: Failed to get TSC frequency by CPUID, default to \
-                         {frequency_mhz} MHz"
-                    );
-                    res.eax = frequency_mhz;
+                LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => {
+                    self.load_guest_xstate();
+                    let res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    self.load_host_xstate();
+
+                    res
                 }
-                res
+                crate::kvm::KVM_HYPERVISOR_INFO_LEAF | crate::kvm::KVM_HYPERVISOR_FEATURE_LEAF => {
+                    if self.expose_kvm_hypervisor {
+                        crate::kvm::kvm_hypervisor_cpuid(function).expect("known KVM CPUID leaf")
+                    } else {
+                        crate::kvm::rustvisor_hypervisor_cpuid(function)
+                            .expect("known hypervisor CPUID leaf")
+                    }
+                }
+                LEAF_FREQUENCY_INFO => {
+                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    if res.eax == 0 {
+                        let frequency_mhz =
+                            crate::host_tsc_frequency_mhz().unwrap_or(FALLBACK_TSC_FREQUENCY_MHZ);
+                        warn!(
+                            "handle_cpuid: Failed to get TSC frequency by CPUID, default to \
+                             {frequency_mhz} MHz"
+                        );
+                        res.eax = frequency_mhz;
+                    }
+                    res
+                }
+                _ => cpuid!(regs_clone.rax, regs_clone.rcx),
             }
-            _ => cpuid!(regs_clone.rax, regs_clone.rcx),
         };
 
         trace!(
@@ -1823,6 +1866,12 @@ impl AxArchVCpu for VmxVcpu {
     fn setup(&mut self, config: Self::SetupConfig) -> AxResult {
         self.setup_vmcs(self.entry.unwrap(), self.ept_root.unwrap(), config)?;
         self.entry_dirty = false;
+        Ok(())
+    }
+
+    fn set_cpuid(&mut self, entries: &[AxVCpuCpuidEntry]) -> AxResult {
+        self.cpuid.clear();
+        self.cpuid.extend_from_slice(entries);
         Ok(())
     }
 

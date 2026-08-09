@@ -18,6 +18,18 @@ use axvisor_api::vmm::{VCpuId, VMId};
 
 use crate::exit::AxVCpuExitReason;
 
+/// One userspace-configured x86 CPUID result.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AxVCpuCpuidEntry {
+    pub function: u32,
+    pub index: u32,
+    pub flags: u32,
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+}
+
 /// Interrupt trigger mode.
 ///
 /// Represents the trigger mode of an interrupt in a platform-neutral way.
@@ -79,6 +91,11 @@ pub trait AxArchVCpu: Sized {
     /// Configures whether guest HLT instructions should cause a VM exit.
     fn set_hlt_exiting(&mut self, _enabled: bool) -> AxResult {
         Ok(())
+    }
+
+    /// Replaces the x86 CPUID values exposed to this vCPU.
+    fn set_cpuid(&mut self, _entries: &[AxVCpuCpuidEntry]) -> AxResult {
+        Err(AxError::Unsupported)
     }
 
     /// Binds the VCpu to the current physical CPU for execution.

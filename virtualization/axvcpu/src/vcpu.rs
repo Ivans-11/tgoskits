@@ -19,7 +19,7 @@ use ax_kspin::SpinNoIrq as Mutex;
 use axaddrspace::{GuestPhysAddr, HostPhysAddr};
 use axvisor_api::vmm::{VCpuId, VMId};
 
-use super::{AxArchVCpu, AxVCpuExitReason, InterruptTriggerMode};
+use super::{AxArchVCpu, AxVCpuCpuidEntry, AxVCpuExitReason, InterruptTriggerMode};
 
 /// Immutable configuration data for a virtual CPU.
 ///
@@ -280,6 +280,11 @@ impl<A: AxArchVCpu> AxVCpu<A> {
     /// Configures whether guest HLT instructions should cause a VM exit.
     pub fn set_hlt_exiting(&self, enabled: bool) -> AxResult {
         self.get_arch_vcpu().set_hlt_exiting(enabled)
+    }
+
+    /// Replaces the x86 CPUID values exposed to this vCPU.
+    pub fn set_cpuid(&self, entries: &[AxVCpuCpuidEntry]) -> AxResult {
+        self.with_bound_arch_vcpu(|vcpu| vcpu.set_cpuid(entries))
     }
 
     /// Bind the VCpu to the current physical CPU.

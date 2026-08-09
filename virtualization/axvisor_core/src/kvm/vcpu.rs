@@ -411,7 +411,9 @@ pub(in crate::kvm) fn default_xcrs() -> Vec<u8> {
     xcrs
 }
 
-fn get_vcpu(control_file: api_control::ControlFileId) -> AxResult<axvm::AxVCpuRef> {
+pub(in crate::kvm) fn get_vcpu(
+    control_file: api_control::ControlFileId,
+) -> AxResult<axvm::AxVCpuRef> {
     let (vm, vcpu_id) = {
         let control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {

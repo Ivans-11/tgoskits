@@ -15,6 +15,7 @@
 use alloc::vec::Vec;
 
 use ax_errno::{AxResult, ax_err};
+use axvcpu::AxVCpuCpuidEntry;
 use axvisor_api::control as api_control;
 
 use super::{CONTROL_FILES, ControlFileState};
@@ -22,6 +23,7 @@ use crate::kvm::{
     abi::raw as abi,
     state::KvmCpuidEntry2,
     util::{checked_add, read_u32_user, write_u32_user},
+    vcpu::get_vcpu,
 };
 
 // This module owns host probing and userspace copy logic. The CPUID entry shape
@@ -37,11 +39,26 @@ pub(in crate::kvm) fn set_cpuid2(
     arg: usize,
 ) -> AxResult<isize> {
     let entries = read_cpuid_entries(arg)?;
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    vcpu.cpuid = entries;
+    {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        vcpu.cpuid = entries.clone();
+    }
+    let arch_entries: Vec<_> = entries
+        .iter()
+        .map(|entry| AxVCpuCpuidEntry {
+            function: entry.function,
+            index: entry.index,
+            flags: entry.flags,
+            eax: entry.eax,
+            ebx: entry.ebx,
+            ecx: entry.ecx,
+            edx: entry.edx,
+        })
+        .collect();
+    get_vcpu(control_file)?.set_cpuid(&arch_entries)?;
     Ok(0)
 }
 
@@ -305,12 +322,29 @@ fn host_cpuid(function: u32, index: u32) -> KvmCpuidEntry2 {
             const CPUID_MCA: u32 = 1 << 14;
             entry.ecx |= 1 << 31; // hypervisor present
             entry.ecx &= !(1 << 5); // VMX
+            #[cfg(feature = "svm")]
+            {
+                entry.ecx &= !((1 << 17) | (1 << 24)); // PCID, TSC deadline
+            }
             entry.edx &= !(CPUID_MCE | CPUID_MTRR | CPUID_MCA);
         }
         0x8000_0001 => {
             entry.ecx &= !(1 << 2); // SVM
         }
         7 => {
+            #[cfg(feature = "svm")]
+            if index == 0 {
+                const UNSUPPORTED_EBX: u32 = (1 << 0) | (1 << 7) | (1 << 20);
+                const UNSUPPORTED_ECX: u32 =
+                    (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7) | (1 << 16) | (1 << 31);
+                entry.ebx &= !UNSUPPORTED_EBX;
+                entry.ecx &= !UNSUPPORTED_ECX;
+                entry.edx &= !(1 << 20);
+            }
+            #[cfg(feature = "vmx")]
+            if index == 0 {
+                entry.ecx &= !((1 << 5) | (1 << 16)); // WAITPKG, LA57
+            }
             const AMX_FEATURES: u32 = (1 << 22) | (1 << 24) | (1 << 25);
             entry.edx &= !AMX_FEATURES;
             if index == 1 {
