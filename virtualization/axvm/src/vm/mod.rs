@@ -55,8 +55,14 @@ pub(crate) type AxVCpuRef<A = crate::arch::ArchVCpu> = Arc<AxVCpu<A>>;
 /// A reference to a VM.
 pub type AxVMRef = Arc<AxVM>;
 
-struct VmDmaAccess<'a> {
+pub(crate) struct VmDmaAccess<'a> {
     vm: &'a AxVM,
+}
+
+impl<'a> VmDmaAccess<'a> {
+    pub(crate) const fn new(vm: &'a AxVM) -> Self {
+        Self { vm }
+    }
 }
 
 impl DeviceAccess for VmDmaAccess<'_> {
@@ -326,11 +332,8 @@ impl VmRuntimeHandle {
     /// The dispatcher releases its queue lock before this method notifies
     /// waiters or invokes the host IPI boundary.
     #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "architecture interrupt routers dispatch in later modules"
-        )
+        not(target_arch = "riscv64"),
+        expect(dead_code, reason = "currently consumed by the RISC-V IPI router")
     )]
     pub(crate) fn dispatch_vcpu_interrupt(
         &self,
@@ -882,6 +885,10 @@ impl AxVM {
         f(runtime)
     }
 
+    #[cfg_attr(
+        not(target_arch = "riscv64"),
+        expect(dead_code, reason = "currently consumed by the RISC-V IPI router")
+    )]
     pub(crate) fn current_interrupt_runtime(&self) -> AxVmResult<Arc<VmRuntimeHandle>> {
         let machine = self.machine.lock();
         Ok(machine.interrupt_runtime()?.clone())

@@ -17,6 +17,7 @@ use std::{ptr::NonNull, string::String, vec::Vec};
 use ax_memory_addr::MemoryAddr;
 use axvmconfig::GuestConfig;
 use fdt_edit::{Fdt, Node, NodeId, Property};
+use fdt_raw::RegInfo;
 
 use super::tree::{FdtTree, GuestMemorySpec};
 use crate::{
@@ -358,6 +359,7 @@ pub(crate) fn patch_guest_fdt_for_runtime(
         gic_profile,
         plic_profile,
     )?;
+    install_configured_virtio_net(&mut tree, crate_config, gic_profile, plic_profile)?;
     super::timer::install_machine_timer(&mut tree, timer_profile)?;
     super::serial::install_machine_serial(&mut tree, serial_profile, serial_identity)?;
     for serial in additional_serials {
@@ -368,6 +370,96 @@ pub(crate) fn patch_guest_fdt_for_runtime(
         ax_err_type!(InvalidData, std::format!("invalid patched FDT: {error:?}"))
     })?;
     Ok(bytes)
+}
+
+fn install_configured_virtio_net(
+    tree: &mut FdtTree,
+    config: &GuestConfig,
+    gic_profile: Option<&crate::machine::GuestGicProfile>,
+    plic_profile: Option<&crate::machine::GuestPlicProfile>,
+) -> AxVmResult {
+    if !config
+        .devices
+        .virtual_devices
+        .iter()
+        .any(|device| device.model == "virtio-net")
+    {
+        return Ok(());
+    }
+
+    const BASE: u32 = 0x0a00_0000;
+    const SIZE: u32 = 0x200;
+    let interrupt = virtio_net_interrupt_binding(gic_profile, plic_profile)?;
+    let node_id = tree.ensure_path("/virtio_mmio@a000000")?;
+    tree.set_property(
+        node_id,
+        super::tree::prop_string("compatible", "virtio,mmio"),
+    )?;
+    tree.inner_mut()
+        .view_typed_mut(node_id)
+        .ok_or_else(|| ax_err_type!(InvalidData, "new virtio-net node is missing"))?
+        .set_regs(&[RegInfo::new(BASE as u64, Some(SIZE as u64))]);
+    tree.set_property(node_id, u32_list_property("interrupts", interrupt.cells()))?;
+    tree.set_property(
+        node_id,
+        u32_list_property("interrupt-parent", &[interrupt.parent()]),
+    )?;
+    tree.set_property(node_id, Property::new("dma-coherent", std::vec![]))?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VirtioNetInterruptBinding {
+    Gic { parent: u32 },
+    Plic { parent: u32 },
+}
+
+impl VirtioNetInterruptBinding {
+    const fn parent(self) -> u32 {
+        match self {
+            Self::Gic { parent } | Self::Plic { parent } => parent,
+        }
+    }
+
+    const fn cells(self) -> &'static [u32] {
+        // AxVisor routes controller input 48 to virtio-net. GIC firmware
+        // describes that input as SPI 16 (SPIs start at 32), while a PLIC
+        // binding uses the controller input directly as source 48.
+        match self {
+            Self::Gic { .. } => &[0, 16, 1],
+            Self::Plic { .. } => &[48],
+        }
+    }
+}
+
+fn virtio_net_interrupt_binding(
+    gic_profile: Option<&crate::machine::GuestGicProfile>,
+    plic_profile: Option<&crate::machine::GuestPlicProfile>,
+) -> AxVmResult<VirtioNetInterruptBinding> {
+    match (gic_profile, plic_profile) {
+        (Some(gic), None) => gic
+            .node_phandle
+            .map(|parent| VirtioNetInterruptBinding::Gic { parent })
+            .ok_or_else(|| ax_err_type!(InvalidData, "guest GIC has no phandle for virtio-net")),
+        (None, Some(plic)) => plic
+            .node_phandle
+            .map(|parent| VirtioNetInterruptBinding::Plic { parent })
+            .ok_or_else(|| ax_err_type!(InvalidData, "guest PLIC has no phandle for virtio-net")),
+        (Some(_), Some(_)) => Err(ax_err_type!(
+            InvalidData,
+            "virtio-net cannot select between guest GIC and PLIC"
+        )),
+        (None, None) => Err(ax_err_type!(
+            InvalidData,
+            "virtio-net requires a guest GIC or PLIC interrupt controller"
+        )),
+    }
+}
+
+fn u32_list_property(name: &str, values: &[u32]) -> Property {
+    let mut property = Property::new(name, std::vec![]);
+    property.set_u32_ls(values);
+    property
 }
 
 pub(crate) fn calculate_dtb_load_addr(vm: AxVMRef, fdt_size: usize) -> AxVmResult<GuestPhysAddr> {
@@ -405,14 +497,22 @@ pub(crate) fn calculate_dtb_load_addr(vm: AxVMRef, fdt_size: usize) -> AxVmResul
 
 #[cfg(test)]
 mod tests {
-    use axvmconfig::GuestConfig;
+    use axvmconfig::{GuestConfig, VirtualDeviceRequest};
     use fdt_edit::{Fdt, Node, Property};
     use fdt_raw::RegInfo;
 
     use super::{
-        super::tree::sanitize_bootargs, cpu_node_id, initrd_range_from_image_config, need_cpu_node,
+        super::{
+            device::find_all_passthrough_devices,
+            tree::{FdtTree, sanitize_bootargs},
+        },
+        cpu_node_id, find_node_by_phandle, initrd_range_from_image_config, need_cpu_node,
     };
-    use crate::{GuestPhysAddr, config::RamdiskInfo};
+    use crate::{
+        GuestPhysAddr,
+        config::{AxVMConfig, AxVMConfigParams, HostDeviceAssignment, PhysCpuList, RamdiskInfo},
+        machine::{GuestGicCpuRegion, GuestGicProfile, GuestMmioRegion, GuestPlicProfile},
+    };
 
     fn prop_u32(name: &str, value: u32) -> Property {
         let mut prop = Property::new(name, std::vec![]);
@@ -441,6 +541,100 @@ mod tests {
         }
 
         fdt
+    }
+
+    fn virtio_net_config() -> GuestConfig {
+        let mut config = GuestConfig::default();
+        config.devices.virtual_devices.push(VirtualDeviceRequest {
+            id: "virtnet0".into(),
+            model: "virtio-net".into(),
+            options: Default::default(),
+        });
+        config
+    }
+
+    fn gic_profile(phandle: u32) -> GuestGicProfile {
+        GuestGicProfile {
+            compatible: "arm,gic-400".into(),
+            node_path: "/interrupt-controller@8000000".into(),
+            node_phandle: Some(phandle),
+            distributor: GuestMmioRegion {
+                base: 0x0800_0000,
+                length: 0x1000,
+            },
+            cpu_region: GuestGicCpuRegion::CpuInterface(GuestMmioRegion {
+                base: 0x0801_0000,
+                length: 0x2000,
+            }),
+            its: std::vec![],
+        }
+    }
+
+    fn plic_profile(phandle: u32) -> GuestPlicProfile {
+        GuestPlicProfile {
+            node_path: "/soc/interrupt-controller@c000000".into(),
+            node_phandle: Some(phandle),
+            base: 0x0c00_0000,
+            length: 0x60_0000,
+        }
+    }
+
+    #[test]
+    fn riscv_virtio_net_uses_one_cell_plic_interrupt_binding() {
+        let mut tree = FdtTree::new();
+        super::install_configured_virtio_net(
+            &mut tree,
+            &virtio_net_config(),
+            None,
+            Some(&plic_profile(9)),
+        )
+        .unwrap();
+        let node = tree.inner().get_by_path("/virtio_mmio@a000000").unwrap();
+
+        assert_eq!(
+            node.as_node()
+                .get_property("interrupt-parent")
+                .unwrap()
+                .get_u32(),
+            Some(9)
+        );
+        assert_eq!(
+            node.as_node()
+                .get_property("interrupts")
+                .unwrap()
+                .get_u32_iter()
+                .collect::<std::vec::Vec<_>>(),
+            [48]
+        );
+    }
+
+    #[test]
+    fn aarch64_virtio_net_uses_three_cell_gic_interrupt_binding() {
+        let mut tree = FdtTree::new();
+        super::install_configured_virtio_net(
+            &mut tree,
+            &virtio_net_config(),
+            Some(&gic_profile(7)),
+            None,
+        )
+        .unwrap();
+        let node = tree.inner().get_by_path("/virtio_mmio@a000000").unwrap();
+
+        assert_eq!(
+            node.as_node()
+                .get_property("interrupt-parent")
+                .unwrap()
+                .get_u32(),
+            Some(7)
+        );
+        assert_eq!(
+            node.as_node()
+                .get_property("interrupts")
+                .unwrap()
+                .get_u32_iter()
+                .collect::<std::vec::Vec<_>>(),
+            [0, 16, 1]
+        );
     }
 
     #[test]
@@ -647,5 +841,47 @@ mod tests {
                 .collect::<std::vec::Vec<_>>(),
             [8, 11, 8, 9]
         );
+    }
+
+    #[test]
+    fn orangepi_5_plus_guest_fdt_keeps_cpu_power_dependencies_resolvable() {
+        let host = Fdt::from_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../os/axvisor/configs/board/orangepi-5-plus.dtb"
+        )))
+        .unwrap();
+        let vm_cfg = AxVMConfig::new(AxVMConfigParams {
+            phys_cpu_ls: PhysCpuList::new(1, Some(std::vec![0]), None),
+            pass_through_devices: std::vec![HostDeviceAssignment {
+                name: "/".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let passthrough_devices = find_all_passthrough_devices(&vm_cfg, &host);
+        let cfg = GuestConfig {
+            base: axvmconfig::VMBaseConfig {
+                phys_cpu_ids: Some(std::vec![0]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let dtb = super::create_guest_fdt(&host, &passthrough_devices, &cfg).unwrap();
+        let guest = Fdt::from_bytes(&dtb).unwrap();
+        let cpu = guest.get_by_path("/cpus/cpu@0").unwrap().as_node();
+
+        assert!(cpu.get_property("#cooling-cells").is_some());
+        assert!(cpu.get_property("dynamic-power-coefficient").is_some());
+        for property_name in ["operating-points-v2", "cpu-supply"] {
+            let phandle = cpu
+                .get_property(property_name)
+                .and_then(Property::get_u32)
+                .unwrap();
+            assert!(
+                find_node_by_phandle(&guest, phandle).is_some(),
+                "{property_name} references missing guest phandle {phandle:#x}"
+            );
+        }
     }
 }

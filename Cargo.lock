@@ -901,6 +901,7 @@ dependencies = [
  "ax-percpu",
  "ax-plat",
  "axplat-dyn",
+ "axtest",
  "cfg-if",
  "cpu-local",
  "fdt-parser",
@@ -1067,32 +1068,6 @@ dependencies = [
  "ringbuf",
  "smoltcp",
  "spin",
-]
-
-[[package]]
-name = "ax-page-table-entry"
-version = "0.8.12"
-dependencies = [
- "aarch64-cpu 11.2.0",
- "ax-memory-addr",
- "axtest",
- "bitflags 2.13.1",
- "x86_64",
-]
-
-[[package]]
-name = "ax-page-table-multiarch"
-version = "0.8.15"
-dependencies = [
- "arrayvec",
- "ax-errno",
- "ax-memory-addr",
- "ax-page-table-entry",
- "bitmaps",
- "log",
- "rand 0.10.2",
- "riscv",
- "x86",
 ]
 
 [[package]]
@@ -1572,6 +1547,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "axvirtio-common"
+version = "0.1.0"
+dependencies = [
+ "ax-kspin",
+ "ax-memory-addr",
+ "axaddrspace",
+ "axvm-types",
+ "log",
+]
+
+[[package]]
+name = "axvirtio-net"
+version = "0.1.0"
+dependencies = [
+ "ax-kspin",
+ "ax-memory-addr",
+ "axaddrspace",
+ "axdevice_base",
+ "axvirtio-common",
+ "axvm-types",
+ "log",
+]
+
+[[package]]
 name = "axvisor"
 version = "0.5.24"
 dependencies = [
@@ -1582,8 +1581,13 @@ dependencies = [
  "ax-task",
  "axbacktrace",
  "axbuild",
+ "axdevice",
+ "axdevice_base",
  "axtest",
+ "axvirtio-common",
+ "axvirtio-net",
  "axvm",
+ "axvm-types",
  "axvmconfig",
  "clap",
  "log",
