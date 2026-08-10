@@ -604,11 +604,8 @@ impl Device {
                 match self.port_speed {
                     Speed::High | Speed::SuperSpeed | Speed::SuperSpeedPlus => {
                         // HighSpeed, SuperSpeed, SuperSpeedPlus ISO 端点
-                        // xHCI 6.2.3.6: Interval = bInterval - 1 (编码为 2^Interval 个
-                        // 125µs 微帧)。bInterval 取值 1..=16 映射到 Interval 0..=15。
-                        // 若改用 clamp(1,16)，bInterval=1 的高带宽端点会被编码为每 2 个
-                        // 微帧服务一次，实际带宽减半，导致相机 FIFO 溢出、等时帧被截断。
-                        let interval = binterval.saturating_sub(1).clamp(0, 15);
+                        // Interval = max(1, min(16, bInterval))
+                        let interval = binterval.clamp(1, 16);
                         debug!(
                             "ISO endpoint HS/SS: bInterval={} -> XHCI interval={}",
                             binterval, interval
@@ -637,8 +634,8 @@ impl Device {
                 match self.port_speed {
                     Speed::High | Speed::SuperSpeed | Speed::SuperSpeedPlus => {
                         // HighSpeed, SuperSpeed, SuperSpeedPlus 中断端点
-                        // xHCI 6.2.3.6: Interval = bInterval - 1，与等时端点同理。
-                        let interval = binterval.saturating_sub(1).clamp(0, 15);
+                        // Interval = max(1, min(16, bInterval))
+                        let interval = binterval.clamp(1, 16);
                         debug!(
                             "INT endpoint HS/SS: bInterval={} -> XHCI interval={}",
                             binterval, interval

@@ -15,3 +15,4 @@ fail_regex = [
   "failed to determine root device",
 ]
 timeout = 600
+
