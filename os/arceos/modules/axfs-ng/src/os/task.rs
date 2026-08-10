@@ -10,6 +10,9 @@ use super::time::{has_time_provider, wall_time};
 
 pub trait BlockTaskOps: Send + Sync {
     fn current_task_id(&self) -> Option<u64>;
+    fn can_block(&self) -> bool {
+        self.current_task_id().is_some()
+    }
     fn task_yield(&self);
     fn task_wait(&self);
     fn task_wait_timeout(&self, dur: Duration) -> bool {
@@ -78,6 +81,10 @@ fn task_ops() -> Option<&'static dyn BlockTaskOps> {
 
 pub fn current_task_id() -> Option<u64> {
     task_ops().and_then(|ops| ops.current_task_id())
+}
+
+pub fn task_can_block() -> bool {
+    task_ops().is_some_and(|ops| ops.can_block())
 }
 
 pub fn task_yield() {
