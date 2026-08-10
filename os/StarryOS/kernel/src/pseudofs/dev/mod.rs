@@ -3,8 +3,10 @@
 mod card0;
 #[cfg(feature = "rknpu")]
 mod card1;
-#[cfg(feature = "dma-heap")]
-pub(crate) mod dma_heap;
+// The real contiguous coherent dma-heap is shared by every accelerator that
+// exchanges buffers (JPU / NPU / RGA).
+#[cfg(any(feature = "jpeg", feature = "rknpu", feature = "rga"))]
+mod dmaheap;
 mod drm;
 #[cfg(feature = "input")]
 pub mod event;
@@ -17,10 +19,10 @@ mod log;
 mod r#loop;
 #[cfg(feature = "ext4")]
 mod loop_block;
-#[cfg(feature = "rga")]
-mod rga;
 #[cfg(feature = "jpeg")]
 mod mpp_service;
+#[cfg(feature = "rga")]
+pub(crate) mod rga;
 #[cfg(feature = "ext4")]
 pub use r#loop::LoopDevice;
 #[cfg(feature = "sg2002")]
@@ -439,9 +441,11 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         }
     }
 
-    // /dev/mpp_service — Rockchip MPP-compatible JPEG decoder node.
+    // /dev/mpp_service — Rockchip MPP-compatible JPEG decoder node. Registered
+    // unconditionally under `jpeg`; the node itself reports an error if the
+    // hardware was not probed.
     #[cfg(feature = "jpeg")]
-    if ax_driver::jpeg::is_available() {
+    {
         root.add(
             "mpp_service",
             Device::new(
@@ -450,6 +454,30 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                 mpp_service::MPP_SERVICE_DEVICE_ID,
                 Arc::new(mpp_service::MppService::new()),
             ),
+        );
+    }
+
+    // /dev/dma_heap — the real contiguous, DMA-coherent allocator that the
+    // accelerators share buffers from (zero-copy across JPU / NPU / RGA). Every
+    // heap name maps to the same allocator. Available under any accelerator
+    // feature, not just `jpeg`.
+    #[cfg(any(feature = "jpeg", feature = "rknpu", feature = "rga"))]
+    {
+        let mut dma_heap_dir = DirMapping::new();
+        for name in dmaheap::HEAP_NAMES {
+            dma_heap_dir.add(
+                *name,
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    dmaheap::DMA_HEAP_DEVICE_ID,
+                    Arc::new(dmaheap::DmaHeap),
+                ),
+            );
+        }
+        root.add(
+            "dma_heap",
+            SimpleDir::new_maker(fs.clone(), Arc::new(dma_heap_dir)),
         );
     }
 
@@ -491,61 +519,6 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         ),
     );
 
-    #[cfg(feature = "dma-heap")]
-    {
-        // Real dma-buf allocator, shared by the NPU and RGA import paths.
-        // /dev/dma_heap/{system,cma} are aliases over the same contiguous allocator.
-        let heap = Arc::new(dma_heap::DmaHeap::new());
-        let mut dma_heap_dir = DirMapping::new();
-        dma_heap_dir.add(
-            "system",
-            Device::new(
-                fs.clone(),
-                NodeType::CharacterDevice,
-                dma_heap::DMA_HEAP_SYSTEM_DEVICE_ID,
-                heap.clone(),
-            ),
-        );
-        dma_heap_dir.add(
-            "cma",
-            Device::new(
-                fs.clone(),
-                NodeType::CharacterDevice,
-                dma_heap::DMA_HEAP_CMA_DEVICE_ID,
-                heap.clone(),
-            ),
-        );
-        // librockchip_mpp enumerates these node names (including the `-dma32` and
-        // `-uncached` variants) at startup and picks one by buffer flags. Expose
-        // each as an alias over the same contiguous allocator so MPP finds its
-        // preferred heap instead of falling back to a fragile dup-a-sibling path.
-        for (i, name) in [
-            "system-uncached",
-            "system-dma32",
-            "system-uncached-dma32",
-            "cma-uncached",
-            "cma-dma32",
-            "cma-uncached-dma32",
-        ]
-        .iter()
-        .enumerate()
-        {
-            dma_heap_dir.add(
-                *name,
-                Device::new(
-                    fs.clone(),
-                    NodeType::CharacterDevice,
-                    DeviceId::new(252, 8 + i as u32),
-                    heap.clone(),
-                ),
-            );
-        }
-        root.add(
-            "dma_heap",
-            SimpleDir::new_maker(fs.clone(), Arc::new(dma_heap_dir)),
-        );
-    }
-
     #[cfg(feature = "rga")]
     root.add(
         "rga",
@@ -559,7 +532,9 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
 
     #[cfg(feature = "rknpu")]
     {
-        // RockChip-specific NPU companion card (DRM card1).
+        // RockChip-specific NPU companion card (DRM card1). The contiguous
+        // `/dev/dma_heap` it allocates from is registered above under the shared
+        // accelerator gate.
         dri_dir.add(
             "card1",
             Device::new(

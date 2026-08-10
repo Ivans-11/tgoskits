@@ -22,6 +22,10 @@ use crate::{
 
 // RK3588 jpegd (VDPU720) constants, from the OrangePi-5-Plus device tree.
 const PD_VDPU: usize = 21;
+// Synthetic `ClkId` keys into the rockchip-soc gate table — NOT the DT binding
+// numbers. The canonical `ACLK/HCLK_JPEG_DECODER` = 421/422 are already taken by
+// the USB3OTG1 entries in that crate, so 436/437 are used as unique keys instead.
+// The actual hardware gate is the verified `CLKGATE_CON(45)` bit 2/3 in gate.rs.
 const CLK_ACLK_JPEG_DECODER: u32 = 436;
 const CLK_HCLK_JPEG_DECODER: u32 = 437;
 const RST_VIDEO_A: u64 = 722;
@@ -30,6 +34,7 @@ const RST_VIDEO_H: u64 = 723;
 // The per-block Rockchip IOMMU v2 sits 0x480 into the same register page.
 const IOMMU_OFFSET: usize = 0x480;
 const RK_MMU_DTE_ADDR: usize = 0x00;
+const RK_MMU_STATUS: usize = 0x04;
 const RK_MMU_COMMAND: usize = 0x08;
 const RK_MMU_INT_MASK: usize = 0x1c;
 const RK_MMU_CMD_DISABLE_PAGING: u32 = 1;
@@ -118,6 +123,16 @@ fn bypass_iommu(base: NonNull<u8>) {
         mmu.add(RK_MMU_COMMAND)
             .cast::<u32>()
             .write_volatile(RK_MMU_CMD_FORCE_RESET);
+        // The force-reset is asynchronous — the block ignores register writes while
+        // it is in flight (like Linux `rk_iommu_force_reset`). Wait for it to settle
+        // (STATUS reads back 0) before reprogramming, bounded so a wedged block can
+        // never hang probe; the volatile read also orders the following writes.
+        for _ in 0..1000 {
+            if mmu.add(RK_MMU_STATUS).cast::<u32>().read_volatile() == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
         mmu.add(RK_MMU_DTE_ADDR).cast::<u32>().write_volatile(0);
         mmu.add(RK_MMU_COMMAND)
             .cast::<u32>()
@@ -129,11 +144,12 @@ fn bypass_iommu(base: NonNull<u8>) {
 #[cfg(feature = "jpu-selftest")]
 fn run_selftest(jpeg: &mut RockchipJpeg) {
     let mut clock = axklib::time::monotonic_nanos;
-    match jpeg.decode_jpeg(
-        rockchip_jpeg::SELFTEST_JPEG,
-        &mut clock,
-        SELFTEST_TIMEOUT_NS,
-    ) {
+    let mut buf = [0u8; rockchip_jpeg::SELFTEST_JPEG_CAPACITY];
+    let Some(len) = rockchip_jpeg::write_selftest_jpeg(&mut buf) else {
+        info!("JPU_SELFTEST_FAIL: could not encode the self-test JPEG");
+        return;
+    };
+    match jpeg.decode_jpeg(&buf[..len], &mut clock, SELFTEST_TIMEOUT_NS) {
         Ok(status) if status.is_success() => {
             info!("JPU_SELFTEST_PASS reg1={:#010x}", status.raw())
         }
