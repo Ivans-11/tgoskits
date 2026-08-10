@@ -4,11 +4,12 @@ const C_DEFINE_FEATURE_PREFIX: &str = "c-define:";
 const REMOVED_AX_DRIVER_PLAT_STATIC_FEATURE: &str = concat!("ax-driver/", "plat", "-static");
 
 pub(super) fn dynamic_pie_for_c_app(features: &[String]) -> bool {
-    has_feature(features, "plat-dyn")
+    let _ = features;
+    true
 }
 
 pub(super) fn c_config_features(features: &[String]) -> BTreeSet<String> {
-    let mut config_features: BTreeSet<_> = features
+    let config_features: BTreeSet<_> = features
         .iter()
         .filter_map(|feature| {
             if feature.starts_with(C_DEFINE_FEATURE_PREFIX) {
@@ -24,16 +25,11 @@ pub(super) fn c_config_features(features: &[String]) -> BTreeSet<String> {
                 .or(Some(feature.as_str()))
         })
         .filter(|feature| {
-            !matches!(
-                *feature,
-                "ax-libc" | "ax-feat" | "ax-std" | "defplat" | "myplat" | "plat-dyn"
-            ) && !feature.contains('/')
+            !matches!(*feature, "ax-libc" | "ax-feat" | "ax-std" | "plat-dyn")
+                && !feature.contains('/')
         })
         .map(str::to_string)
         .collect();
-    if has_feature(features, "plat-dyn") {
-        config_features.insert("smp".to_string());
-    }
     config_features
 }
 
@@ -106,9 +102,7 @@ pub(super) fn map_c_app_features(
         }
         match normalized {
             "ax-std" | "ax-feat" | "ax-libc" => {}
-            "defplat" | "myplat" | "plat-dyn" => {
-                features.insert(normalized.to_string());
-            }
+            "plat-dyn" => {}
             "smp" => {
                 features.insert("smp".to_string());
             }
@@ -133,9 +127,10 @@ pub(super) fn map_c_app_features(
             features.insert(feature.clone());
             continue;
         }
-        if LIB_FEATURES.contains(&normalized)
-            || matches!(normalized, "defplat" | "myplat" | "plat-dyn" | "smp")
-        {
+        if normalized == "plat-dyn" {
+            continue;
+        }
+        if LIB_FEATURES.contains(&normalized) || normalized == "smp" {
             features.insert(normalized.to_string());
         } else {
             features.insert(format!("ax-feat/{normalized}"));
@@ -146,9 +141,6 @@ pub(super) fn map_c_app_features(
         .any(|feature| matches!(feature.as_str(), "fs" | "net" | "pipe" | "select" | "epoll"))
     {
         features.insert("fd".to_string());
-    }
-    if features.contains("plat-dyn") {
-        features.insert("smp".to_string());
     }
     features.into_iter().collect()
 }

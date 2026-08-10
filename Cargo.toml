@@ -44,18 +44,16 @@ members = [
     "components/sdhci-cv1800",
     "components/sdio-host",
     "components/sdio-host2",
-    "components/someboot",
-    "components/somehal-macros",
     "components/starry-process",
     "components/starry-signal",
     "components/starry-vm",
     "components/timer_list",
-    "components/axconfig-gen/axconfig-gen",
-    "components/axconfig-gen/axconfig-macros",
     "platforms/ax-plat",
     "platforms/ax-plat-macros",
     "platforms/axplat-dyn",
+    "platforms/someboot",
     "platforms/somehal",
+    "platforms/somehal-macros",
     "components/crate_interface/test_crates/*",
     "components/ctor_bare/ctor_bare",
     "components/ctor_bare/ctor_bare_macros",
@@ -96,7 +94,6 @@ members = [
     "os/StarryOS/starryos",
     "os/arceos/api/*",
     "os/arceos/modules/axalloc",
-    "os/arceos/modules/axconfig",
     "os/arceos/modules/axdisplay",
     "os/arceos/modules/axdma",
     "os/arceos/modules/axfs-ng",
@@ -126,7 +123,6 @@ members = [
 ]
 exclude = [
     "apps/arceos/helloworld-myplat",
-    "components/spin",
     "os/StarryOS/lkm/linux-hello",
     "virtualization/test_crates",
 ]
@@ -142,9 +138,6 @@ ax-alloc = { version = "0.8.7", path = "os/arceos/modules/axalloc", default-feat
 ax-allocator = { version = "0.5.5", path = "memory/axallocator" }
 ax-api = { version = "0.6.4", path = "os/arceos/api/arceos_api" }
 ax-arm-pl031 = { version = "0.4.7", path = "drivers/rtc/arm_pl031" }
-ax-config = { version = "0.5.15", path = "os/arceos/modules/axconfig" }
-ax-config-gen = { version = "0.4.12", path = "components/axconfig-gen/axconfig-gen" }
-ax-config-macros = { version = "0.4.12", path = "components/axconfig-gen/axconfig-macros" }
 ax-cpu = { version = "0.8.1", path = "components/axcpu" }
 ax-cpumask = { version = "0.3.5", path = "components/cpumask" }
 ax-crate-interface = { version = "0.5.7", path = "components/crate_interface" }
@@ -268,6 +261,7 @@ usb-if = { version = "0.7.2", path = "drivers/usb/usb-if" }
 usb-serial = { version = "0.1.0", path = "drivers/usb/usb-serial" }
 dwmmc-host = { version = "0.3.0", path = "drivers/blk/dwmmc-host", default-features = false }
 phytium-mci-host = { version = "0.3.0", path = "drivers/blk/phytium-mci-host", default-features = false }
+cv181x-sdhci = { version = "0.1.0", path = "drivers/blk/cv181x-sdhci", default-features = false }
 sdhci-host = { version = "0.3.0", path = "drivers/blk/sdhci-host", default-features = false }
 sdmmc-protocol = { version = "0.3.0", path = "drivers/blk/sdmmc-protocol", default-features = false }
 smoltcp = { version = "0.13.1", default-features = false }
@@ -286,11 +280,11 @@ httpboot-protocol = { version = "0.1.0", default-features = false }
 x86_vcpu = { version = "0.5.16", path = "virtualization/x86_vcpu", default-features = false }
 x86_vlapic = { version = "0.4.17", path = "virtualization/x86_vlapic" }
 page-table-generic = { version = "0.7.3", path = "memory/page-table-generic" }
-someboot = { version = "0.3.1", path = "components/someboot" }
+someboot = { version = "0.3.1", path = "platforms/someboot" }
 some-serial = { version = "0.7.0", path = "drivers/serial/some-serial" }
 kernutil = { path = "components/kernutil", version = "0.2.2" }
 ranges-ext = { version = "0.6.4", path = "memory/ranges-ext" }
-somehal-macros = { path = "components/somehal-macros", version = "0.1.4" }
+somehal-macros = { path = "platforms/somehal-macros", version = "0.1.4" }
 kasm-aarch64 = { path = "components/kasm-aarch64", version = "0.2.1" }
 somehal = { version = "0.7.4", path = "platforms/somehal" }
 
@@ -315,7 +309,7 @@ dma-api = { version = "0.9.1", path = "memory/dma-api" }
 mmio-api = { version = "0.2.2", path = "memory/mmio-api" }
 lock_api = { version = "0.4", default-features = false }
 log = "0.4"
-spin = { version = "0.12", path = "components/spin" }
+spin = { version = "=0.12.0", default-features = false, features = ["lock_api", "once", "lazylock"] }
 atomic-waker = { version = "1.1", default-features = false }
 ostool = { version = "0.24.0" }
 riscv = { version = "0.16.1", default-features = false }
