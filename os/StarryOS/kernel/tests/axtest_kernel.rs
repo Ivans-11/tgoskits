@@ -49,4 +49,14 @@ mod tests {
     fn fcntl_setpipe_size_returns_capacity() {
         ax_assert!(axtest_exports::fcntl_setpipe_size_returns_capacity());
     }
+
+    #[test]
+    fn private_mmap_rejects_fault_at_file_eof() {
+        ax_assert!(axtest_exports::private_mmap_rejects_fault_at_file_eof());
+    }
+
+    #[test]
+    fn concurrent_epoll_reverse_add_is_serialized() {
+        ax_assert!(axtest_exports::concurrent_epoll_reverse_add_is_serialized());
+    }
 }

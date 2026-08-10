@@ -38,8 +38,12 @@ mod rtc;
 pub mod tpu;
 pub mod tty;
 
-#[cfg(feature = "sg2002")]
+#[cfg(feature = "sg2002-cvi-usb-camera")]
+mod cvi_jpu;
+#[cfg(feature = "sg2002-cvi-usb-camera")]
 mod cvi_usb_camera;
+#[cfg(feature = "sg2002-cvi-usb-camera")]
+mod cvi_vdec;
 
 use alloc::{format, sync::Arc};
 use core::{
@@ -255,7 +259,7 @@ fn random_seed() -> [u8; 32] {
     let mut state = time_entropy() ^ counter ^ stack_addr.rotate_left(17);
     let mut seed = [0; 32];
 
-    for chunk in seed.chunks_exact_mut(core::mem::size_of::<u64>()) {
+    for chunk in seed.as_chunks_mut::<{ core::mem::size_of::<u64>() }>().0 {
         state = splitmix64(state.wrapping_add(RANDOM_SEED_STEP));
         chunk.copy_from_slice(&state.to_le_bytes());
     }
@@ -711,15 +715,28 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                 Arc::new(pinmux::PinmuxDev),
             ),
         );
-        root.add(
-            "cvi-usb-camera0",
-            Device::new(
-                fs.clone(),
-                NodeType::CharacterDevice,
-                DeviceId::new(10, 202),
-                Arc::new(cvi_usb_camera::CviCamera::new()),
-            ),
-        );
+        #[cfg(feature = "sg2002-cvi-usb-camera")]
+        {
+            let jpu = Arc::new(cvi_jpu::CviJpu::new());
+            root.add(
+                "cvi-usb-camera0",
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    DeviceId::new(10, 202),
+                    Arc::new(cvi_usb_camera::CviCamera::new(jpu.clone())),
+                ),
+            );
+            root.add(
+                "cvi_vc_dec0",
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    DeviceId::new(10, 203),
+                    Arc::new(cvi_vdec::CviVdec::new(jpu)),
+                ),
+            );
+        }
     }
     SimpleDir::new_maker(fs, Arc::new(root))
 }

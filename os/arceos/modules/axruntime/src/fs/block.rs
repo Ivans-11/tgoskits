@@ -73,7 +73,11 @@ impl BlockTaskOps for RuntimeTaskOps {
         BLOCK_IO_WAIT_WQ.wait_until(condition);
     }
 
-    fn task_wait_until_timeout(&self, condition: &dyn Fn() -> bool, timeout: core::time::Duration) -> bool {
+    fn task_wait_until_timeout(
+        &self,
+        condition: &dyn Fn() -> bool,
+        timeout: core::time::Duration,
+    ) -> bool {
         // `wait_timeout_until` returns true on timeout, false if the condition
         // became true; invert so we return true iff the condition was observed.
         !BLOCK_IO_WAIT_WQ.wait_timeout_until(timeout, condition)

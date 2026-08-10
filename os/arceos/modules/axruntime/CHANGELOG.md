@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.3...ax-runtime-v0.10.4) - 2026-07-10
+
+### Added
+
+- *(msi)* add hierarchical MSI-X irq domains ([#1526](https://github.com/rcore-os/tgoskits/pull/1526))
+
+## [0.10.3](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.2...ax-runtime-v0.10.3) - 2026-07-08
+
+### Fixed
+
+- *(platforms)* route DMA cache sync through platform cache ops ([#1542](https://github.com/rcore-os/tgoskits/pull/1542))
+
+## [0.10.2](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.1...ax-runtime-v0.10.2) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-plat, ax-alloc, axklib, ax-driver, ax-hal, ax-ipi, ax-mm, ax-task, ax-display, ax-fs-ng, ax-net, ax-input
+
+## [0.10.1](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.0...ax-runtime-v0.10.1) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-kspin, ax-task, dma-api, rd-net, aic8800, axfs-ng-vfs, rdrive, ax-plat, ax-alloc, axklib, rdif-block, ax-driver, ax-hal, ax-ipi, ax-mm, ax-display, ax-fs-ng, ax-log, ax-net, ax-input
+
 ## [0.10.0](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.9.0...ax-runtime-v0.10.0) - 2026-07-07
 
 ### Added

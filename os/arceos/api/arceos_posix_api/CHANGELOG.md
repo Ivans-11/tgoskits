@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.29](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.28...ax-posix-api-v0.5.29) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-alloc, ax-task, ax-sync, ax-fs-ng, ax-net
+
+## [0.5.28](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.27...ax-posix-api-v0.5.28) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-alloc, ax-task, ax-sync, ax-fs-ng, ax-net
+
+## [0.5.27](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.26...ax-posix-api-v0.5.27) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-alloc, ax-hal, ax-task, ax-sync, ax-fs-ng, ax-net, ax-runtime
+
+## [0.5.26](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.25...ax-posix-api-v0.5.26) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-kspin, ax-task, ax-alloc, axpoll, ax-hal, ax-sync, ax-fs-ng, ax-log, ax-net, ax-runtime
+
 ## [0.5.25](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.24...ax-posix-api-v0.5.25) - 2026-07-07
 
 ### Added

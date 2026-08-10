@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.28](https://github.com/rcore-os/tgoskits/compare/ax-hal-v0.5.27...ax-hal-v0.5.28) - 2026-07-10
+
+### Added
+
+- *(msi)* add hierarchical MSI-X irq domains ([#1526](https://github.com/rcore-os/tgoskits/pull/1526))
+
+## [0.5.27](https://github.com/rcore-os/tgoskits/compare/ax-hal-v0.5.26...ax-hal-v0.5.27) - 2026-07-08
+
+### Fixed
+
+- *(platforms)* route DMA cache sync through platform cache ops ([#1542](https://github.com/rcore-os/tgoskits/pull/1542))
+
+## [0.5.26](https://github.com/rcore-os/tgoskits/compare/ax-hal-v0.5.25...ax-hal-v0.5.26) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-cpu, ax-plat, ax-alloc, axplat-dyn
+
+## [0.5.25](https://github.com/rcore-os/tgoskits/compare/ax-hal-v0.5.24...ax-hal-v0.5.25) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-kspin, rdrive, ax-plat, ax-alloc, axplat-dyn
+
 ## [0.5.24](https://github.com/rcore-os/tgoskits/compare/ax-hal-v0.5.23...ax-hal-v0.5.24) - 2026-07-07
 
 ### Other

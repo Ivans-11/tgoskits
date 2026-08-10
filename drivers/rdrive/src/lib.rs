@@ -11,7 +11,7 @@ use core::ptr::NonNull;
 // paths that must not trigger task preemption hooks on lock release.
 use ax_kspin::SpinRaw as Mutex;
 pub use fdt_edit::{Fdt, Phandle};
-use register::{DriverRegister, ProbeLevel};
+use register::{DriverRegister, ProbeLevel, ProbePriority};
 use spin::Once;
 
 mod descriptor;
@@ -43,6 +43,7 @@ pub enum Platform {
     Static,
     Fdt { addr: NonNull<u8> },
     Acpi(probe::acpi::AcpiRoot),
+    AcpiWithoutAml(probe::acpi::AcpiRoot),
 }
 
 unsafe impl Send for Platform {}
@@ -52,6 +53,7 @@ pub enum PlatformSource {
     Static,
     Fdt(NonNull<u8>),
     Acpi(probe::acpi::AcpiRoot),
+    AcpiWithoutAml(probe::acpi::AcpiRoot),
 }
 
 unsafe impl Send for PlatformSource {}
@@ -69,6 +71,7 @@ pub fn init(platform: Platform) -> Result<(), DriverError> {
         Platform::Static => init_sources(&[PlatformSource::Static])?,
         Platform::Fdt { addr } => init_sources(&[PlatformSource::Fdt(addr)])?,
         Platform::Acpi(root) => init_sources(&[PlatformSource::Acpi(root)])?,
+        Platform::AcpiWithoutAml(root) => init_sources(&[PlatformSource::AcpiWithoutAml(root)])?,
     }
     Ok(())
 }
@@ -78,7 +81,9 @@ pub fn init_sources(sources: &[PlatformSource]) -> Result<(), DriverError> {
         match source {
             PlatformSource::Static => {}
             PlatformSource::Fdt(addr) => probe::fdt::check_addr(*addr)?,
-            PlatformSource::Acpi(root) => probe::acpi::check_root(*root)?,
+            PlatformSource::Acpi(root) | PlatformSource::AcpiWithoutAml(root) => {
+                probe::acpi::check_root(*root)?
+            }
         }
     }
 
@@ -87,6 +92,7 @@ pub fn init_sources(sources: &[PlatformSource]) -> Result<(), DriverError> {
             PlatformSource::Static => probe::static_::init()?,
             PlatformSource::Fdt(addr) => probe::fdt::init(*addr)?,
             PlatformSource::Acpi(root) => probe::acpi::init(*root)?,
+            PlatformSource::AcpiWithoutAml(root) => probe::acpi::init_without_aml(*root)?,
         }
     }
 
@@ -119,25 +125,60 @@ pub fn register_append(registers: &[DriverRegister]) {
     edit(|manager| manager.registers.append(registers))
 }
 
-pub fn probe_pre_kernel() -> Result<(), ProbeError> {
+pub fn probe_pre_kernel_until(
+    max_priority: ProbePriority,
+    stop_if_fail: bool,
+) -> Result<(), ProbeError> {
     let unregistered = edit(|manager| manager.unregistered())?;
-
-    let ls = unregistered
-        .iter()
-        .filter(|one| matches!(one.level, ProbeLevel::PreKernel));
-
-    probe_system(ls, true)?;
+    let registers = unregistered
+        .into_iter()
+        .filter(|one| matches!(one.level, ProbeLevel::PreKernel))
+        .filter(|one| one.priority <= max_priority)
+        .collect::<Vec<_>>();
+    probe_system(&registers, stop_if_fail)?;
 
     Ok(())
 }
 
-fn probe_system<'a>(
-    registers: impl Iterator<Item = &'a DriverRegister>,
+pub fn probe_pre_kernel() -> Result<(), ProbeError> {
+    probe_pre_kernel_until(ProbePriority::LAST, true)
+}
+
+fn probe_system(registers: &[DriverRegister], stop_if_fail: bool) -> Result<(), ProbeError> {
+    let mut start = 0;
+    while start < registers.len() {
+        let level = registers[start].level;
+        let priority = registers[start].priority;
+        let mut end = start + 1;
+        while end < registers.len()
+            && registers[end].level == level
+            && registers[end].priority == priority
+        {
+            end += 1;
+        }
+        probe_priority_group(&registers[start..end], priority, stop_if_fail)?;
+        start = end;
+    }
+
+    Ok(())
+}
+
+fn probe_priority_group(
+    registers: &[DriverRegister],
+    priority: ProbePriority,
     stop_if_fail: bool,
 ) -> Result<(), ProbeError> {
     for one in registers {
         probe_backend(one, probe::static_::try_probe_register(one), stop_if_fail)?;
-        probe_backend(one, probe::fdt::try_probe_register(one), stop_if_fail)?;
+    }
+
+    probe_backend_results(
+        "fdt",
+        probe::fdt::try_probe_registers_by_fdt_order(registers, priority),
+        stop_if_fail,
+    )?;
+
+    for one in registers {
         probe_backend(one, probe::acpi::try_probe_register(one), stop_if_fail)?;
     }
 
@@ -146,6 +187,14 @@ fn probe_system<'a>(
 
 fn probe_backend(
     register: &DriverRegister,
+    results: Option<Result<Vec<Result<(), OnProbeError>>, ProbeError>>,
+    stop_if_fail: bool,
+) -> Result<(), ProbeError> {
+    probe_backend_results(register.name, results, stop_if_fail)
+}
+
+fn probe_backend_results(
+    name: &str,
     results: Option<Result<Vec<Result<(), OnProbeError>>, ProbeError>>,
     stop_if_fail: bool,
 ) -> Result<(), ProbeError> {
@@ -161,7 +210,7 @@ fn probe_backend(
                 if stop_if_fail {
                     return Err(e.into());
                 } else {
-                    warn!("Probe failed for [{}]: {}", register.name, e);
+                    warn!("Probe failed for [{name}]: {e}");
                 }
             }
         }
@@ -172,7 +221,7 @@ fn probe_backend(
 
 pub fn probe_all(stop_if_fail: bool) -> Result<(), ProbeError> {
     let unregistered = edit(|manager| manager.unregistered())?;
-    probe_system(unregistered.iter(), stop_if_fail)?;
+    probe_system(&unregistered, stop_if_fail)?;
 
     debug!("probe pci devices");
     probe::pci::probe_with(&unregistered, stop_if_fail)?;

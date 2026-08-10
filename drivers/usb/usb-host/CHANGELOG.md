@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/rcore-os/tgoskits/compare/crab-usb-v0.10.1...crab-usb-v0.10.2) - 2026-07-10
+
+### Added
+
+- *(crab-usb)* add SG2002 DWC2 host axtest ([#1496](https://github.com/rcore-os/tgoskits/pull/1496))
+
+## [0.10.1](https://github.com/rcore-os/tgoskits/compare/crab-usb-v0.10.0...crab-usb-v0.10.1) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-kspin, dma-api
+
 ## [0.10.0](https://github.com/rcore-os/tgoskits/compare/crab-usb-v0.9.10...crab-usb-v0.10.0) - 2026-07-07
 
 ### Added
