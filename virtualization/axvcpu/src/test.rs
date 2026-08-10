@@ -103,6 +103,10 @@ mod tests {
             Ok(AxVCpuExitReason::Halt)
         }
 
+        fn has_pending_event(&self) -> bool {
+            !self.pending_interrupts.is_empty()
+        }
+
         fn bind(&mut self) -> AxResult {
             self.call_log.borrow_mut().push("bind".to_string());
             if !self.is_setup {
@@ -298,8 +302,10 @@ mod tests {
     fn test_vcpu_interrupt_injection() {
         let (vcpu, call_log) = create_mock_vcpu();
 
+        assert!(!vcpu.has_pending_event());
         let result = vcpu.inject_interrupt(32);
         assert!(result.is_ok());
+        assert!(vcpu.has_pending_event());
 
         assert!(
             call_log

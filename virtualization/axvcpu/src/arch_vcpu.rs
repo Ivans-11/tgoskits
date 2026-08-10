@@ -98,6 +98,11 @@ pub trait AxArchVCpu: Sized {
         Err(AxError::Unsupported)
     }
 
+    /// Returns whether an architecture-specific event is waiting for delivery.
+    fn has_pending_event(&self) -> bool {
+        false
+    }
+
     /// Binds the VCpu to the current physical CPU for execution.
     ///
     /// This method performs any necessary architecture-specific initialization

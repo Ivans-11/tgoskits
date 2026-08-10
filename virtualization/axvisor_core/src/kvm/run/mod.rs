@@ -217,7 +217,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 )? => {}
             #[cfg(target_arch = "x86_64")]
             AxVCpuExitReason::SysRegWrite { addr, value }
-                if handle_kvm_msr_write(&vm, addr.addr(), value)? =>
+                if handle_kvm_msr_write(&vm, &vcpu, addr.addr(), value)? =>
             {
                 super::set_emulated_msr(control_file, addr.addr() as u32, value)?;
                 axvisor_api::task::yield_now();
@@ -330,7 +330,7 @@ fn wait_for_halted_vcpu_wakeup(
             return Err(AxErrorKind::Interrupted.into());
         }
         crate::vmm::timer::check_events();
-        if current_vcpu_has_pending_interrupt(control_file)? {
+        if current_vcpu_has_pending_interrupt(control_file)? || vcpu.has_pending_event() {
             set_current_vcpu_halted(control_file, false)?;
             return Ok(());
         }

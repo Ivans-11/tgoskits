@@ -133,9 +133,6 @@ impl ApicTimer {
         self.shared
             .lvt_timer_register
             .store(value, Ordering::Release);
-        if self.is_masked() {
-            self.stop_timer()?;
-        }
         Ok(())
     }
 
@@ -496,6 +493,46 @@ mod tests {
         // Mask timer (bit 16 = 1)
         assert!(timer.write_lvt(0x10050).is_ok()); // vector 0x50, masked
         assert!(timer.is_masked());
+    }
+
+    #[test]
+    fn test_mask_does_not_stop_running_timer() {
+        let vm_id = VMId::from(1 as usize);
+        let vcpu_id = VCpuId::from(0 as usize);
+        let mut timer = ApicTimer::new(vm_id, vcpu_id);
+
+        // Model an armed periodic timer without registering a host callback.
+        timer.initial_count_register = 100;
+        timer.cancel_token = Some(1);
+        timer.deadline_ns = 200;
+        timer
+            .shared
+            .interval_ns
+            .store(100, core::sync::atomic::Ordering::Release);
+        timer
+            .shared
+            .deadline_ns
+            .store(200, core::sync::atomic::Ordering::Release);
+
+        assert!(timer.write_lvt(0x3_0040).is_ok());
+        assert!(timer.is_masked());
+        assert!(timer.is_started());
+        assert_eq!(timer.cancel_token, Some(1));
+        assert_eq!(timer.deadline_ns, 200);
+        assert_eq!(
+            timer
+                .shared
+                .interval_ns
+                .load(core::sync::atomic::Ordering::Acquire),
+            100
+        );
+        assert_eq!(
+            timer
+                .shared
+                .deadline_ns
+                .load(core::sync::atomic::Ordering::Acquire),
+            200
+        );
     }
 
     #[test]

@@ -262,7 +262,7 @@ pub(in crate::kvm) fn set_msrs(
     for (index, data) in entries {
         #[cfg(target_arch = "x86_64")]
         if is_kvm_pv_msr(index) {
-            apply_kvm_pv_msr_write(&vm, index as usize, data)?;
+            apply_kvm_pv_msr_write(&vm, &vcpu, index as usize, data)?;
             set_emulated_msr(control_file, index, data)?;
             processed += 1;
             continue;

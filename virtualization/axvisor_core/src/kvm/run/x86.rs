@@ -41,7 +41,12 @@ use crate::kvm::{
 use crate::vmm::vcpus::guest_cpu_id_to_vcpu_id;
 
 #[cfg(target_arch = "x86_64")]
-pub(super) fn handle_kvm_msr_write(vm: &AxVMRef, msr: usize, value: u64) -> AxResult<bool> {
+pub(super) fn handle_kvm_msr_write(
+    vm: &AxVMRef,
+    vcpu: &axvm::AxVCpuRef,
+    msr: usize,
+    value: u64,
+) -> AxResult<bool> {
     match msr {
         abi::MSR_KVM_WALL_CLOCK | abi::MSR_KVM_WALL_CLOCK_NEW => {
             if value != 0 {
@@ -52,7 +57,7 @@ pub(super) fn handle_kvm_msr_write(vm: &AxVMRef, msr: usize, value: u64) -> AxRe
         abi::MSR_KVM_SYSTEM_TIME | abi::MSR_KVM_SYSTEM_TIME_NEW => {
             if value & abi::KVM_SYSTEM_TIME_ENABLE != 0 {
                 let gpa = GuestPhysAddr::from((value & !abi::KVM_SYSTEM_TIME_ENABLE) as usize);
-                write_kvm_system_time(vm, gpa)?;
+                write_kvm_system_time(vm, vcpu, gpa)?;
             }
             Ok(true)
         }
@@ -63,10 +68,11 @@ pub(super) fn handle_kvm_msr_write(vm: &AxVMRef, msr: usize, value: u64) -> AxRe
 #[cfg(target_arch = "x86_64")]
 pub(in crate::kvm) fn apply_kvm_pv_msr_write(
     vm: &AxVMRef,
+    vcpu: &axvm::AxVCpuRef,
     msr: usize,
     value: u64,
 ) -> AxResult<bool> {
-    handle_kvm_msr_write(vm, msr, value)
+    handle_kvm_msr_write(vm, vcpu, msr, value)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -225,16 +231,23 @@ fn write_kvm_wall_clock(vm: &AxVMRef, gpa: GuestPhysAddr) -> AxResult {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn write_kvm_system_time(vm: &AxVMRef, gpa: GuestPhysAddr) -> AxResult {
+fn write_kvm_system_time(vm: &AxVMRef, vcpu: &axvm::AxVCpuRef, gpa: GuestPhysAddr) -> AxResult {
+    const IA32_TSC: u32 = 0x10;
+
     let tsc_khz = default_tsc_khz().max(1);
     let info = PvClockVcpuTimeInfo {
         version: 2,
         pad0: 0,
-        tsc_timestamp: unsafe { core::arch::x86_64::_rdtsc() },
+        // The guest observes the hardware TSC plus the per-vCPU offset.  The
+        // pvclock reference point must use that same domain; using the raw
+        // host TSC makes clocks disagree as execution migrates between vCPUs.
+        tsc_timestamp: vcpu.get_kvm_msr(IA32_TSC)?,
         system_time: axvisor_api::time::current_time_nanos() as u64,
         tsc_to_system_mul: tsc_to_system_mul(tsc_khz),
         tsc_shift: 0,
-        flags: abi::PVCLOCK_TSC_STABLE_BIT,
+        // Do not claim cross-vCPU TSC stability until offset synchronization
+        // and migration handling provide that guarantee.
+        flags: 0,
         pad: [0; 2],
     };
     vm.write_to_guest_of(gpa, &info)

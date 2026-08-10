@@ -287,6 +287,11 @@ impl<A: AxArchVCpu> AxVCpu<A> {
         self.with_bound_arch_vcpu(|vcpu| vcpu.set_cpuid(entries))
     }
 
+    /// Returns whether an architecture-specific event is waiting for delivery.
+    pub fn has_pending_event(&self) -> bool {
+        self.get_arch_vcpu().has_pending_event()
+    }
+
     /// Bind the VCpu to the current physical CPU.
     pub fn bind(&self) -> AxResult {
         self.manipulate_arch_vcpu(VCpuState::Free, VCpuState::Ready, |arch_vcpu| {

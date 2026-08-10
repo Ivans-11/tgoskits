@@ -1875,6 +1875,10 @@ impl AxArchVCpu for VmxVcpu {
         Ok(())
     }
 
+    fn has_pending_event(&self) -> bool {
+        !self.pending_events.is_empty()
+    }
+
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
         let inner_exit = self.inner_run();
         match inner_exit {

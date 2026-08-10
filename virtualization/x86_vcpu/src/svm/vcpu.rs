@@ -1713,6 +1713,10 @@ impl AxArchVCpu for SvmVcpu {
         Ok(())
     }
 
+    fn has_pending_event(&self) -> bool {
+        self.virtual_interrupt_vector().is_some() || !self.pending_events.is_empty()
+    }
+
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
         {
             let exit_result = self.inner_run()?;
