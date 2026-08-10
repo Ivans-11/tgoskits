@@ -218,6 +218,22 @@ log = "Info"
 }
 
 #[test]
+fn load_target_from_plain_build_config_returns_none() {
+    let root = tempdir().unwrap();
+    let path = root.path().join(".build-target.toml");
+    fs::write(
+        &path,
+        r#"
+features = ["net"]
+log = "Info"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(load_target_from_build_config(&path).unwrap(), None);
+}
+
+#[test]
 fn load_build_info_prefers_request_override_without_writing_file() {
     let root = tempdir().unwrap();
     let path = root.path().join(".build-target.toml");
@@ -383,11 +399,32 @@ fn patch_starry_cargo_config_removes_qemu_for_dynamic_platforms() {
 }
 
 #[test]
-fn aarch64_qemu_virt_is_not_a_default_static_starry_platform() {
-    assert_eq!(
-        default_starry_qemu_platform_feature("ax-hal/aarch64-qemu-virt"),
-        None
+fn patch_starry_cargo_config_keeps_loongarch64_dynamic_platform_dynamic() {
+    let request = request(
+        PathBuf::from("/tmp/.build.toml"),
+        "loongarch64",
+        "loongarch64-unknown-none-softfloat",
     );
+    let build_info = StarryBuildInfo {
+        env: HashMap::new(),
+        features: vec!["ax-hal/plat-dyn".to_string(), "axplat-dyn/efi".to_string()],
+        log: LogLevel::Info,
+        max_cpu_num: None,
+        axconfig_overrides: Vec::new(),
+        plat_dyn: true,
+    };
+    let mut cargo = build_info.into_base_cargo_config_with_log(
+        STARRY_PACKAGE.to_string(),
+        request.target.clone(),
+        vec![],
+    );
+    let metadata = crate::build::workspace_metadata().unwrap();
+    patch_starry_cargo_config(&mut cargo, &request, &metadata).unwrap();
+
+    assert!(!cargo.features.contains(&"qemu".to_string()));
+    assert!(cargo.features.contains(&"ax-hal/plat-dyn".to_string()));
+    assert!(cargo.features.contains(&"axplat-dyn/efi".to_string()));
+    assert!(!cargo.env.contains_key("AX_PLATFORM"));
 }
 
 #[test]
@@ -402,6 +439,14 @@ fn aarch64_has_no_static_starry_default_platform() {
 fn riscv64_has_no_starry_default_platform() {
     assert_eq!(
         crate::context::starry_default_platform_for_arch_checked("riscv64").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn loongarch64_has_no_starry_default_platform() {
+    assert_eq!(
+        crate::context::starry_default_platform_for_arch_checked("loongarch64").unwrap(),
         None
     );
 }
@@ -494,25 +539,31 @@ fn render_uimage_its_template_replaces_build_placeholders() {
 }
 
 #[test]
-fn load_cargo_config_treats_sg2002_as_explicit_platform_feature() {
+fn load_cargo_config_keeps_sg2002_as_device_feature_without_static_platform_alias() {
     let mut request = request(
         PathBuf::from("/tmp/.build.toml"),
         "riscv64",
         "riscv64gc-unknown-none-elf",
     );
     request.build_info_override = Some(StarryBuildInfo {
-        features: vec!["sg2002".to_string()],
-        plat_dyn: false,
+        features: vec![
+            "plat-dyn".to_string(),
+            "starry-kernel/sg2002".to_string(),
+            "axplat-dyn/thead-mae".to_string(),
+        ],
+        plat_dyn: true,
         ..default_starry_build_info_for_target("riscv64gc-unknown-none-elf")
     });
 
     let cargo = load_cargo_config(&request).unwrap();
+    let removed_sg2002_platform = concat!("ax-hal/", "riscv64", "-sg2002");
 
-    assert!(cargo.features.contains(&"sg2002".to_string()));
+    assert!(cargo.features.contains(&"starry-kernel/sg2002".to_string()));
     assert!(
         cargo
             .features
-            .contains(&"ax-hal/riscv64-sg2002".to_string())
+            .iter()
+            .all(|feature| feature != removed_sg2002_platform)
     );
     assert!(
         !cargo
@@ -521,10 +572,7 @@ fn load_cargo_config_treats_sg2002_as_explicit_platform_feature() {
             .any(|feature| feature.starts_with("qemu"))
     );
     assert!(!cargo.features.contains(&"qemu".to_string()));
-    assert_eq!(
-        cargo.env.get("AX_PLATFORM").map(String::as_str),
-        Some("riscv64-sg2002")
-    );
+    assert_eq!(cargo.env.get("AX_PLATFORM"), None);
 }
 
 #[test]

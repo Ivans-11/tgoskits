@@ -26,11 +26,12 @@ mod platform;
 mod std_build;
 
 pub(crate) use config_file::{
-    ensure_build_info, load_build_info, reject_arceos_app_c_field, reject_removed_std_field,
+    ensure_build_info, load_build_info, load_toml_with_rejector, read_toml_with_rejector,
+    reject_arceos_app_c_field, reject_removed_std_field,
 };
 pub(crate) use info::{
-    ARCEOS_LINKER_SCRIPT, BuildInfo, build_info_enables_backtrace_path,
-    toolchain_rustflags_for_features,
+    ARCEOS_LINKER_SCRIPT, BuildInfo, append_encoded_rustflags, build_info_enables_backtrace_path,
+    env_truthy, toolchain_rustflags_for_features,
 };
 use info::{AXSTD_STD_PACKAGE, PIE_TARGET_DIR, STD_TARGET_DIR, TARGET_JSON_ROOT};
 #[cfg(test)]

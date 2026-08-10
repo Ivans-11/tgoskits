@@ -41,21 +41,16 @@
 //! the slot — *before* dropping that `Arc`. The handler therefore only ever
 //! dereferences a pointer whose target is still alive.
 
-use core::{ptr::NonNull, sync::atomic::Ordering};
+use core::sync::atomic::Ordering;
 
-use ax_hal::irq::{IrqContext, IrqReturn};
+use ax_hal::irq::{IrqContext, IrqId, IrqReturn};
 use ax_kernel_guard::NoPreemptIrqSave;
 use ax_task::IrqNotify;
 use kbpf_basic::linux_bpf::perf_event_mmap_page;
 
-/// Architecturally fixed PMUv3 overflow interrupt INTID.
-///
-/// On ARMv8 the PMU overflow interrupt is wired as PPI 7, i.e. GIC INTID 23
-/// (`16 + 7`). This is hardcoded for M2: the proper path is to read the
-/// `interrupts` property of the FDT `arm,armv8-pmuv3` node, which is a deferred
-/// follow-up. On the RK3588 (and the QEMU `virt` machine) the PMU PPI is INTID
-/// 23, matching this constant.
-const PMU_IRQ: usize = 23;
+fn pmu_irq() -> Result<IrqId, ax_hal::irq::IrqError> {
+    ax_hal::pmu::irq()
+}
 
 /// Maximum programmable counter index (matches [`ax_cpu::pmu::counter`] /
 /// [`ax_cpu::pmu::overflow`]); the registry is sized one past this for indexing.
@@ -250,25 +245,28 @@ pub fn unregister(n: usize) {
 /// Ensures [`pmu_overflow_handler`] is registered with the IRQ framework and the
 /// PMU overflow line is enabled on the current core.
 ///
-/// Idempotent: the first caller installs the per-CPU action for [`PMU_IRQ`]
+/// Idempotent: the first caller installs the per-CPU action for the PMU IRQ
 /// across all online CPUs. Every caller (re-)enables INTID 23 on the *current*
 /// core. The explicit `set_enable` is required: the framework's per-core line
 /// enable runs at `cpu_online`/boot, before this handler is ever registered, so
 /// under smp1 the PMU PPI would otherwise stay masked and the overflow IRQ would
 /// never fire on cpu0.
 pub fn ensure_pmu_irq_registered() {
+    let pmu_irq = match pmu_irq() {
+        Ok(irq) => irq,
+        Err(err) => {
+            warn!("perf sampling: failed to resolve PMU overflow IRQ: {err:?}");
+            return;
+        }
+    };
+
     if REGISTERED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
         let cpus = ax_hal::irq::CpuMask::first_n(ax_hal::cpu_num());
         // Mirror the timer's unit-data pattern: the handler does not use `data`.
-        if let Err(err) = ax_hal::irq::request_percpu_irq(
-            PMU_IRQ,
-            cpus,
-            pmu_overflow_handler,
-            NonNull::dangling(),
-        ) {
+        if let Err(err) = ax_hal::irq::request_percpu_irq(pmu_irq, cpus, pmu_overflow_handler) {
             // Roll back so a later open can retry registration.
             REGISTERED.store(false, Ordering::Release);
             warn!("perf sampling: failed to register PMU overflow IRQ: {err:?}");
@@ -278,7 +276,9 @@ pub fn ensure_pmu_irq_registered() {
     // Enable the PMU PPI on the core this sampling event runs on. Required even
     // when the action was registered by an earlier event: the per-core line is
     // not auto-enabled for runtime-registered PPIs.
-    ax_hal::irq::set_enable(PMU_IRQ, true);
+    if let Err(err) = ax_hal::irq::set_enable(pmu_irq, true) {
+        warn!("perf sampling: failed to enable PMU overflow IRQ {pmu_irq:?}: {err:?}");
+    }
 }
 
 /// PMU overflow IRQ handler (hard-IRQ context).
@@ -296,7 +296,7 @@ pub fn ensure_pmu_irq_registered() {
 ///
 /// Must only be invoked by the IRQ framework in hard-IRQ context on the core the
 /// overflow fired on. Performs no allocation and takes no sleeping locks.
-pub unsafe fn pmu_overflow_handler(_ctx: IrqContext, _data: NonNull<()>) -> IrqReturn {
+pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
     // Capture the interrupted context before doing anything that could fault or
     // overwrite ELR_EL1 / SPSR_EL1.
     let ip = ax_cpu::pmu::interrupted_pc();

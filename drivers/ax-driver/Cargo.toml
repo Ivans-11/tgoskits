@@ -13,7 +13,6 @@ name = "ax_driver"
 [features]
 default = []
 
-plat-static = []
 plat-dyn = ["dep:fdt-edit"]
 irq = []
 pci = ["dep:ax-kspin", "dep:pcie", "dep:rdif-pcie"]
@@ -24,6 +23,7 @@ display = ["dep:ax-errno", "dep:rdif-display"]
 input = ["dep:ax-errno", "dep:rdif-input"]
 vsock = ["dep:ax-errno", "dep:rdif-vsock"]
 rtc = ["plat-dyn"]
+pinctrl = ["dep:rdif-pinctrl", "rdif-pinctrl/fdt"]
 
 virtio-core = ["dep:ax-alloc", "dep:virtio-drivers", "virtio-drivers/alloc"]
 virtio = ["virtio-core"]
@@ -38,7 +38,6 @@ bcm2835-sdhci = ["block", "dep:bcm2835-sdhci"]
 ahci = ["block", "pci", "dep:simple-ahci"]
 nvme = ["block", "pci", "dep:nvme-driver"]
 cvsd = ["block", "plat-dyn", "dep:sg200x-bsp"]
-ixgbe = ["net", "pci", "dep:ax-alloc", "dep:ixgbe-driver"]
 fxmac = ["net", "dep:ax-alloc", "dep:ax-crate-interface", "dep:fxmac_rs"]
 intel-net = ["net", "pci", "dep:eth-intel"]
 realtek-rtl8125 = ["net", "pci", "dep:realtek-rtl8125"]
@@ -62,7 +61,6 @@ serial = [
     "dep:rdif-serial",
     "dep:some-serial",
 ]
-sg2002-placeholder = ["plat-dyn"]
 rknpu = ["plat-dyn", "rockchip-pm", "rockchip-soc", "dep:rockchip-npu"]
 rga = ["plat-dyn", "rockchip-pm", "dep:rockchip-rga"]
 jpeg = ["plat-dyn", "rockchip-pm", "rockchip-soc", "dep:rockchip-jpeg"]
@@ -70,6 +68,7 @@ jpu-selftest = ["jpeg"]
 rockchip-sdhci = [
     "block",
     "plat-dyn",
+    "rockchip-pm",
     "rockchip-soc",
     "dep:ax-kspin",
     "dep:rdif-clk",
@@ -95,6 +94,7 @@ k230-sdhci = [
 rockchip-dwmmc = [
     "block",
     "plat-dyn",
+    "rockchip-pm",
     "rockchip-soc",
     "dep:arm-scmi-rs",
     "dep:ax-kspin",
@@ -117,7 +117,7 @@ rk3588-pcie = [
     "rockchip-pm",
     "dep:rk3588-pci",
 ]
-rockchip-soc = ["plat-dyn", "dep:rdif-clk", "dep:rockchip-soc"]
+rockchip-soc = ["plat-dyn", "pinctrl", "dep:rdif-clk", "dep:rockchip-soc"]
 rockchip-pm = ["rockchip-soc", "dep:rockchip-pm"]
 list-pci-devices = ["pci"]
 pci-list-devices = ["list-pci-devices"]
@@ -140,7 +140,7 @@ eth-intel = { workspace = true, optional = true }
 fdt-edit = { workspace = true, optional = true }
 fxmac_rs = { workspace = true, optional = true }
 heapless.workspace = true
-ixgbe-driver = { workspace = true, optional = true }
+irq-framework.workspace = true
 log.workspace = true
 mmio-api.workspace = true
 nvme-driver = { workspace = true, optional = true }
@@ -154,6 +154,7 @@ rdif-input = { workspace = true, optional = true }
 rdif-serial = { workspace = true, optional = true }
 rdif-intc.workspace = true
 rdif-pcie = { workspace = true, optional = true }
+rdif-pinctrl = { workspace = true, optional = true }
 rdif-vsock = { workspace = true, optional = true }
 realtek-rtl8125 = { workspace = true, optional = true }
 rdrive.workspace = true

@@ -199,9 +199,9 @@ struct ClassDir {
 
 impl SimpleDirOps for ClassDir {
     fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
-        #[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+        #[cfg(feature = "sg2002")]
         let names: &'static [&'static str] = &["drm", "graphics", "input", "pwm"];
-        #[cfg(any(not(feature = "sg2002"), feature = "plat-dyn"))]
+        #[cfg(not(feature = "sg2002"))]
         let names: &'static [&'static str] = &["drm", "graphics", "input"];
         Box::new(names.iter().copied().map(Cow::Borrowed))
     }
@@ -218,7 +218,7 @@ impl SimpleDirOps for ClassDir {
                 Arc::new(ClassSubsystemDir::new(fs, "graphics", &["fb0"])),
             ),
             "input" => SimpleDir::new_maker(fs.clone(), Arc::new(InputClassDir { fs })),
-            #[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+            #[cfg(feature = "sg2002")]
             "pwm" => crate::pseudofs::dev::pwm::pwm_class_dir_maker(fs),
             _ => return Err(VfsError::NotFound),
         }))
@@ -423,7 +423,7 @@ impl SimpleDirOps for EventSourceDevicesDir {
         // The ARM PMUv3 CPU PMU is a hardware (counting/sampling) event source,
         // distinct from the tracing sources above. It is always listed on
         // aarch64 — the device is a static description of the architectural PMU,
-        // so it is advertised regardless of `ax_cpu::pmu::probe()` (which a
+        // so it is advertised regardless of `ax_hal::pmu::info()` (which a
         // `perf_event_open` against the type still consults and may reject).
         #[cfg(target_arch = "aarch64")]
         let pmu = core::iter::once(Cow::Borrowed(ARMV8_PMUV3_DEVICE));

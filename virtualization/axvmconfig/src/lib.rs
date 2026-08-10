@@ -26,8 +26,9 @@ use alloc::{string::String, vec::Vec};
 
 use ax_errno::AxResult;
 pub use axvm_types::{
-    EmulatedDeviceConfig, EmulatedDeviceType, PassThroughAddressConfig, PassThroughDeviceConfig,
-    VMBootProtocol, VMInterruptMode, VMType, VmMemConfig, VmMemMappingType,
+    AddressSpacePolicy, EmulatedDeviceConfig, EmulatedDeviceType, PassThroughAddressConfig,
+    PassThroughDeviceConfig, PassThroughPortConfig, ReservedAddressConfig, VMBootProtocol,
+    VMInterruptMode, VMType, VmMemConfig, VmMemMappingType,
 };
 
 mod emu_device_type_serde {
@@ -53,6 +54,54 @@ mod emu_device_type_serde {
                 "unknown emulated device type value: {value}"
             ))),
         }
+    }
+}
+
+#[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum AddressSpacePolicySerde {
+    #[serde(rename = "virtualized", alias = "virtual")]
+    #[default]
+    Virtualized,
+    #[serde(rename = "passthrough", alias = "pt")]
+    Passthrough,
+}
+
+impl From<AddressSpacePolicySerde> for AddressSpacePolicy {
+    fn from(value: AddressSpacePolicySerde) -> Self {
+        match value {
+            AddressSpacePolicySerde::Virtualized => Self::Virtualized,
+            AddressSpacePolicySerde::Passthrough => Self::Passthrough,
+        }
+    }
+}
+
+impl From<&AddressSpacePolicy> for AddressSpacePolicySerde {
+    fn from(value: &AddressSpacePolicy) -> Self {
+        match value {
+            AddressSpacePolicy::Virtualized => Self::Virtualized,
+            AddressSpacePolicy::Passthrough => Self::Passthrough,
+        }
+    }
+}
+
+mod address_space_policy_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::*;
+
+    pub fn serialize<S>(value: &AddressSpacePolicy, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        AddressSpacePolicySerde::from(value).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<AddressSpacePolicy, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(AddressSpacePolicySerde::deserialize(deserializer)?.into())
     }
 }
 
@@ -349,6 +398,73 @@ mod passthrough_address_config_vec_serde {
 
 #[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PassThroughPortConfigSerde {
+    #[serde(default)]
+    base: u16,
+    #[serde(default)]
+    length: u16,
+}
+
+impl From<PassThroughPortConfigSerde> for PassThroughPortConfig {
+    fn from(value: PassThroughPortConfigSerde) -> Self {
+        Self {
+            base: value.base,
+            length: value.length,
+        }
+    }
+}
+
+impl From<&PassThroughPortConfig> for PassThroughPortConfigSerde {
+    fn from(value: &PassThroughPortConfig) -> Self {
+        Self {
+            base: value.base,
+            length: value.length,
+        }
+    }
+}
+
+mod passthrough_port_config_vec_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+    use super::*;
+
+    pub fn serialize<S>(value: &[PassThroughPortConfig], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = value
+            .iter()
+            .map(PassThroughPortConfigSerde::from)
+            .collect::<Vec<_>>();
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<PassThroughPortConfig>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<PassThroughPortConfigSerde>::deserialize(deserializer)?
+            .into_iter()
+            .map(|value| {
+                let port = PassThroughPortConfig::from(value);
+                if port.length == 0 {
+                    return Err(de::Error::custom("passthrough port range has zero length"));
+                }
+                if port.base.checked_add(port.length - 1).is_none() {
+                    return Err(de::Error::custom(alloc::format!(
+                        "passthrough port range overflows: base={:#x}, length={:#x}",
+                        port.base,
+                        port.length
+                    )));
+                }
+                Ok(port)
+            })
+            .collect()
+    }
+}
+
+#[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum VMBootProtocolSerde {
     #[serde(rename = "direct", alias = "kernel")]
     #[default]
@@ -590,14 +706,14 @@ impl VMKernelConfig {
 
         match self.effective_boot_protocol() {
             VMBootProtocol::Uefi => {
-                if arch != "x86_64" {
+                if !matches!(arch, "x86_64" | "loongarch64") {
                     warn!(
-                        "boot_protocol=uefi is only supported on x86_64; rejecting config on \
-                         {arch}"
+                        "boot_protocol=uefi is only supported on x86_64 and loongarch64; \
+                         rejecting config on {arch}"
                     );
                     return Err(ax_errno::ax_err_type!(
                         InvalidInput,
-                        "UEFI boot is only supported on x86_64"
+                        "UEFI boot is only supported on x86_64 and loongarch64"
                     ));
                 }
                 if self.boot_firmware_path().is_none() {
@@ -669,6 +785,14 @@ const BUILD_TARGET_ARCH: &str = "unknown";
 #[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VMDevicesConfig {
+    /// Guest physical address space population policy.
+    #[serde(default)]
+    #[cfg_attr(
+        all(feature = "std", any(windows, unix)),
+        schemars(with = "AddressSpacePolicySerde")
+    )]
+    #[serde(with = "address_space_policy_serde")]
+    pub address_space_policy: AddressSpacePolicy,
     /// Emu device Information
     #[cfg_attr(
         all(feature = "std", any(windows, unix)),
@@ -702,6 +826,14 @@ pub struct VMDevicesConfig {
     )]
     #[serde(with = "passthrough_address_config_vec_serde")]
     pub passthrough_addresses: Vec<PassThroughAddressConfig>,
+    /// Host I/O port ranges passed through to the VM.
+    #[serde(default)]
+    #[cfg_attr(
+        all(feature = "std", any(windows, unix)),
+        schemars(with = "Vec<PassThroughPortConfigSerde>")
+    )]
+    #[serde(with = "passthrough_port_config_vec_serde")]
+    pub passthrough_ports: Vec<PassThroughPortConfig>,
 }
 
 /// The configuration structure for the guest VM serialized from a toml file provided by user,

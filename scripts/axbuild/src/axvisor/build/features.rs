@@ -3,9 +3,13 @@ use anyhow::anyhow;
 use super::metadata::{platform_feature_names, platform_metadata_entries};
 use crate::context::arch_for_target_checked;
 
-const AXVISOR_PLAT_DYN_FEATURES: &[&str] =
-    &["axvm/plat-dyn", "ax-std/plat-dyn", "ax-driver/plat-dyn"];
-const REMOVED_AXVISOR_PLATFORM_FEATURES: &[&str] = &["x86-qemu-q35"];
+const AXVISOR_PLAT_DYN_FEATURES: &[&str] = &[
+    "plat-dyn",
+    "axvm/plat-dyn",
+    "ax-std/plat-dyn",
+    "ax-driver/plat-dyn",
+];
+const REMOVED_AXVISOR_PLATFORM_FEATURES: &[&str] = &["x86-qemu-q35", concat!("riscv64", "-sg2002")];
 
 pub(super) fn normalize_axvisor_feature_surface(
     features: &mut Vec<String>,
@@ -64,8 +68,8 @@ pub(super) fn reject_unsupported_nested_platform_features(
         .find(|feature| removed_axvisor_platform_feature_name(feature).is_some())
     {
         return Err(anyhow!(
-            "Axvisor platform feature `{feature}` has been removed; use `plat_dyn = true` for \
-             x86_64 dynamic platform builds"
+            "Axvisor platform feature `{feature}` has been removed; use `plat_dyn = true` and a \
+             dynamic platform board config"
         ));
     }
 

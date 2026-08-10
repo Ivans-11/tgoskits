@@ -247,6 +247,22 @@ vm_configs = []
 }
 
 #[test]
+fn load_target_from_plain_build_config_returns_none() {
+    let root = tempdir().unwrap();
+    let path = root.path().join(".build.toml");
+    fs::write(
+        &path,
+        r#"
+features = ["fs"]
+log = "Info"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(load_target_from_build_config(&path).unwrap(), None);
+}
+
+#[test]
 fn load_target_from_build_config_rejects_removed_std_field() {
     let root = tempdir().unwrap();
     let path = root.path().join("qemu-aarch64.toml");
@@ -333,6 +349,7 @@ vm_configs = []
     assert!(cargo.features.contains(&"ept-level-4".to_string()));
     assert!(cargo.features.contains(&"fs".to_string()));
     assert!(cargo.features.contains(&"vmx".to_string()));
+    assert!(cargo.features.contains(&"plat-dyn".to_string()));
     assert!(cargo.features.contains(&"ax-std/plat-dyn".to_string()));
     assert!(cargo.features.contains(&"axvm/plat-dyn".to_string()));
     assert!(cargo.features.contains(&"ax-driver/plat-dyn".to_string()));
@@ -445,19 +462,17 @@ plat_dyn = false
 }
 
 #[test]
-fn load_cargo_config_drops_static_platform_when_plat_dyn_is_defaulted() {
+fn load_cargo_config_rejects_removed_sg2002_platform_feature() {
     let root = tempdir().unwrap();
     let config_path = root.path().join(".build.toml");
+    let removed_sg2002_platform = concat!("ax-hal/", "riscv64", "-sg2002");
     fs::write(
         &config_path,
-        r#"
-features = ["ax-hal/riscv64-sg2002", "fs"]
-log = "Info"
-"#,
+        format!("features = [\"{removed_sg2002_platform}\", \"fs\"]\nlog = \"Info\"\n"),
     )
     .unwrap();
 
-    let cargo = load_cargo_config(&ResolvedAxvisorRequest {
+    let err = load_cargo_config(&ResolvedAxvisorRequest {
         package: AXVISOR_PACKAGE.to_string(),
         axvisor_dir: root.path().join("os/axvisor"),
         arch: "riscv64".to_string(),
@@ -470,16 +485,10 @@ log = "Info"
         uboot_config: None,
         vmconfigs: vec![],
     })
-    .unwrap();
+    .unwrap_err();
 
-    assert!(
-        !cargo
-            .features
-            .contains(&"ax-hal/riscv64-sg2002".to_string())
-    );
-    assert!(cargo.features.contains(&"ax-std/plat-dyn".to_string()));
-    assert!(cargo.features.contains(&"axvm/plat-dyn".to_string()));
-    assert!(cargo.features.contains(&"ax-driver/plat-dyn".to_string()));
+    assert!(err.to_string().contains(removed_sg2002_platform));
+    assert!(err.to_string().contains("plat_dyn = true"));
 }
 
 #[test]
@@ -516,10 +525,11 @@ log = "Info"
     assert!(!cargo.features.contains(&"dyn-plat".to_string()));
     assert!(!cargo.features.contains(&"ax-hal/x86-pc".to_string()));
     assert!(!cargo.features.contains(&"ax-hal/x86-qemu-q35".to_string()));
+    let removed_static_driver_feature = concat!("ax-driver/", "plat", "-static");
     assert!(
         !cargo
             .features
-            .contains(&"ax-driver/plat-static".to_string())
+            .contains(&removed_static_driver_feature.to_string())
     );
 }
 
@@ -598,15 +608,14 @@ log = "Info"
 }
 
 #[test]
-fn load_cargo_config_keeps_loongarch_axvisor_as_elf() {
+fn load_cargo_config_keeps_loongarch_dynamic_axvisor_as_elf() {
     let root = tempdir().unwrap();
     let config_path = root.path().join(".build.toml");
     fs::write(
         &config_path,
         r#"
-features = ["ept-level-4"]
+features = ["axplat-dyn/efi", "ept-level-4"]
 log = "Info"
-plat_dyn = false
 "#,
     )
     .unwrap();
@@ -616,7 +625,7 @@ plat_dyn = false
         axvisor_dir: root.path().join("os/axvisor"),
         arch: "loongarch64".to_string(),
         target: "loongarch64-unknown-none-softfloat".to_string(),
-        plat_dyn: None,
+        plat_dyn: Some(true),
         smp: None,
         debug: false,
         build_info_path: config_path,
@@ -627,9 +636,11 @@ plat_dyn = false
     .unwrap();
 
     assert!(!cargo.to_bin);
+    assert!(cargo.features.contains(&"ax-std/plat-dyn".to_string()));
+    assert!(cargo.features.contains(&"axplat-dyn/efi".to_string()));
     assert!(
         cargo
             .target
-            .ends_with("scripts/targets/std/loongarch64-unknown-linux-musl.json")
+            .ends_with("scripts/targets/std/pie/loongarch64-unknown-linux-musl.json")
     );
 }

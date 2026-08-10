@@ -31,12 +31,15 @@ plat-dyn = [
     "dep:axplat-dyn",
     "ax-feat/plat-dyn",
     "ax-feat/usb",
+    "ax-driver/plat-dyn",
     "ax-driver/usb",
 ]
 vsock = ["ax-feat/vsock"]
 dynamic_debug = ["ipi"]
 sg2002 = [
+    "plat-dyn",
     "dep:ax-dma",
+    "dep:axklib",
     "dep:sg2002-tpu",
     "dep:some-serial",
     "dep:sg200x-bsp",
@@ -51,8 +54,10 @@ sg2002-wifi = [
 ]
 stack-guard-page = ["ax-feat/stack-guard-page"]
 stack-protector = ["ax-feat/stack-protector"]
+axtest = ["dep:axtest"]
 
 [dependencies]
+axtest = { workspace = true, optional = true }
 ax-feat = { workspace = true, features = [
     "fp-simd",
     "irq",

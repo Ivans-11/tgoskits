@@ -9,35 +9,24 @@ license.workspace = true
 
 [features]
 smp = [
-    "ax-plat-riscv64-sg2002?/smp",
-    "ax-plat-loongarch64-qemu-virt?/smp",
     "axplat-dyn?/smp",
     "ax-plat/smp",
 ]
 irq = [
-    "ax-plat-riscv64-sg2002?/irq",
-    "ax-plat-loongarch64-qemu-virt?/irq",
     "ax-plat/irq",
     "axplat-dyn?/irq",
     "dep:ax-kspin",
 ]
 fp-simd = [
     "ax-cpu/fp-simd",
-    "ax-plat-riscv64-sg2002?/fp-simd",
-    "ax-plat-loongarch64-qemu-virt?/fp-simd",
     "axplat-dyn?/fp-simd",
 ]
 xuantie-c9xx = ["ax-cpu/xuantie-c9xx"]
-rtc = [
-    "ax-plat-riscv64-sg2002?/rtc",
-    "ax-plat-loongarch64-qemu-virt?/rtc",
-    "axplat-dyn?/rtc",
-]
+rtc = ["axplat-dyn?/rtc"]
 paging = [
     "dep:ax-alloc",
     "dep:ax-page-table-multiarch",
     "ax-page-table-multiarch/ax-errno",
-    "ax-plat-loongarch64-qemu-virt?/paging",
 ]
 tls = ["ax-cpu/tls"]
 uspace = ["paging", "ax-cpu/uspace", "axplat-dyn?/uspace"]
@@ -54,9 +43,7 @@ axvisor-linker = []
 host-test = []
 myplat = []
 plat-dyn = ["axplat-dyn"]
-riscv64-sg2002 = ["dep:ax-plat-riscv64-sg2002"]
-loongarch64-qemu-virt = ["dep:ax-plat-loongarch64-qemu-virt"]
-defplat = ["dep:ax-plat-loongarch64-qemu-virt"]
+defplat = []
 
 default = []
 ipi = ["irq"]
@@ -78,11 +65,6 @@ axplat-dyn = { workspace = true, default-features = false, optional = true }
 rdrive.workspace = true
 spin.workspace = true
 
-[target.'cfg(target_arch = "riscv64")'.dependencies]
-ax-plat-riscv64-sg2002 = { workspace = true, optional = true }
-
-[target.'cfg(target_arch = "loongarch64")'.dependencies]
-ax-plat-loongarch64-qemu-virt = { workspace = true, optional = true }
-
 [build-dependencies]
+quote = "1.0"
 toml.workspace = true

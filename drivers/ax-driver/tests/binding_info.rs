@@ -1,22 +1,23 @@
-use ax_driver::BindingInfo;
 #[cfg(feature = "pci")]
 use ax_driver::PciIrqRequirement;
 #[cfg(feature = "plat-dyn")]
 use ax_driver::binding_info_from_acpi_route;
-#[cfg(feature = "plat-dyn")]
-use ax_driver::binding_info_from_fdt;
 #[cfg(feature = "pci")]
 use ax_driver::binding_info_from_pci;
+#[cfg(feature = "plat-dyn")]
+use ax_driver::{BindingIrq, BindingIrqSource};
+#[cfg(feature = "plat-dyn")]
+use ax_driver::{binding_info_from_fdt, binding_irq_from_named_fdt_interrupt};
 #[cfg(feature = "pci")]
 use rdrive::probe::pci::{PciAddress, PciInfo};
 #[cfg(feature = "plat-dyn")]
 use {
     axklib::{
-        AxError, AxResult, IrqCpuMask, IrqHandle, Klib, PhysAddr, RawIrqHandler, VirtAddr,
-        impl_trait,
+        AxError, AxResult, BoxedIrqHandler, ConcurrentBoxedIrqHandler, IrqCpuMask, IrqHandle,
+        IrqId, Klib, PhysAddr, VirtAddr, impl_trait,
     },
     core::time::Duration,
-    fdt_edit::{Fdt, Node, Property},
+    fdt_edit::{Fdt, Node, Phandle, Property},
     rdrive::{
         DriverGeneric, Platform, PlatformDevice,
         probe::{
@@ -30,11 +31,14 @@ use {
 };
 
 #[cfg(feature = "plat-dyn")]
-static CAPTURED_IRQ: Mutex<Option<Option<usize>>> = Mutex::new(None);
+static CAPTURED_IRQ: Mutex<Option<Option<BindingIrq>>> = Mutex::new(None);
 #[cfg(feature = "plat-dyn")]
 static SETUP_SPECIFIER: Mutex<Option<Vec<u32>>> = Mutex::new(None);
 #[cfg(feature = "plat-dyn")]
 static SETUP_ACPI_ROUTE: Mutex<Option<AcpiGsiRoute>> = Mutex::new(None);
+
+#[cfg(feature = "plat-dyn")]
+const TEST_INTC_DOMAIN: irq_framework::IrqDomainId = irq_framework::IrqDomainId(0);
 
 #[cfg(feature = "plat-dyn")]
 static TEST_INTC_PROBE_KINDS: &[ProbeKind] = &[ProbeKind::Fdt {
@@ -91,21 +95,28 @@ impl_trait! {
             false
         }
 
-        fn irq_set_enable(_irq: usize, _enabled: bool) {}
+        fn irq_set_enable(_irq: IrqId, _enabled: bool) -> axklib::AxResult {
+            Ok(())
+        }
 
         fn irq_request_shared(
-            _irq: usize,
-            _handler: RawIrqHandler,
-            _data: core::ptr::NonNull<()>,
+            _irq: IrqId,
+            _handler: BoxedIrqHandler,
+        ) -> AxResult<IrqHandle> {
+            Err(AxError::Unsupported)
+        }
+
+        fn irq_request_shared_disabled(
+            _irq: IrqId,
+            _handler: BoxedIrqHandler,
         ) -> AxResult<IrqHandle> {
             Err(AxError::Unsupported)
         }
 
         fn irq_request_percpu(
-            _irq: usize,
+            _irq: IrqId,
             _cpus: IrqCpuMask,
-            _handler: RawIrqHandler,
-            _data: core::ptr::NonNull<()>,
+            _handler: ConcurrentBoxedIrqHandler,
         ) -> AxResult<IrqHandle> {
             Err(AxError::Unsupported)
         }
@@ -122,20 +133,6 @@ impl_trait! {
             Err(AxError::Unsupported)
         }
     }
-}
-
-#[test]
-fn empty_binding_info_has_no_irq() {
-    let info = BindingInfo::empty();
-
-    assert_eq!(info.irq_num(), None);
-}
-
-#[test]
-fn explicit_binding_info_reports_numbered_irq() {
-    let info = BindingInfo::with_irq(Some(33));
-
-    assert_eq!(info.irq_num(), Some(33));
 }
 
 #[test]
@@ -174,7 +171,7 @@ fn required_pci_binding_info_reports_unresolved_irq() {
 
 #[cfg(feature = "plat-dyn")]
 #[test]
-fn fdt_binding_info_resolves_first_irq_during_probe() {
+fn fdt_binding_info_carries_first_irq_specifier_without_setup() {
     *CAPTURED_IRQ.lock().unwrap() = None;
     *SETUP_SPECIFIER.lock().unwrap() = None;
 
@@ -196,20 +193,88 @@ fn fdt_binding_info_resolves_first_irq_during_probe() {
     });
     rdrive::probe_all(true).unwrap();
 
-    assert_eq!(*CAPTURED_IRQ.lock().unwrap(), Some(Some(77)));
-    assert_eq!(*SETUP_SPECIFIER.lock().unwrap(), Some(vec![0, 42, 4]));
+    let captured = CAPTURED_IRQ.lock().unwrap().clone();
+    let Some(Some(BindingIrq::Source(BindingIrqSource::FdtInterrupt(spec)))) = captured else {
+        panic!("expected captured FDT interrupt binding");
+    };
+    assert_eq!(spec.cells, vec![0, 42, 4]);
+    let controller = rdrive::fdt_phandle_to_device_id(Phandle::from(1)).unwrap();
+    assert_eq!(spec.controller, controller);
+    assert_eq!(*SETUP_SPECIFIER.lock().unwrap(), None);
 }
 
 #[cfg(feature = "plat-dyn")]
 #[test]
-fn acpi_binding_info_sets_up_intc_during_registration() {
+fn named_fdt_interrupt_binding_selects_matching_specifier() {
+    *CAPTURED_IRQ.lock().unwrap() = None;
+    *SETUP_SPECIFIER.lock().unwrap() = None;
+
+    let fdt_data = Box::leak(Box::new(minimal_irq_fdt().encode()));
+    let fdt_addr = NonNull::new(fdt_data.as_ref().as_ptr() as *mut u8).unwrap();
+
+    rdrive::init(Platform::Fdt { addr: fdt_addr }).unwrap();
+    rdrive::register_add(DriverRegister {
+        name: "binding-info-fdt-test-intc",
+        level: ProbeLevel::PostKernel,
+        priority: ProbePriority::INTC,
+        probe_kinds: TEST_INTC_PROBE_KINDS,
+    });
+    rdrive::register_add(DriverRegister {
+        name: "binding-info-fdt-test-device",
+        level: ProbeLevel::PostKernel,
+        priority: ProbePriority::DEFAULT,
+        probe_kinds: TEST_DEVICE_PROBE_KINDS,
+    });
+    rdrive::probe_all(true).unwrap();
+
+    let captured = CAPTURED_IRQ.lock().unwrap().clone();
+    let Some(Some(BindingIrq::Source(BindingIrqSource::FdtInterrupt(first)))) = captured else {
+        panic!("expected captured FDT interrupt binding");
+    };
+    assert_eq!(first.cells, vec![0, 42, 4]);
+
+    let irq = rdrive::with_fdt(|fdt| {
+        let node = fdt.find_compatible(&["test,binding-info"]).pop().unwrap();
+        binding_irq_from_named_fdt_interrupt(&node, "backup")
+    })
+    .unwrap()
+    .unwrap()
+    .unwrap();
+
+    let BindingIrq::Source(BindingIrqSource::FdtInterrupt(spec)) = irq else {
+        panic!("expected named FDT interrupt binding");
+    };
+    let controller = rdrive::fdt_phandle_to_device_id(Phandle::from(1)).unwrap();
+    assert_eq!(spec.controller, controller);
+    assert_eq!(spec.cells, vec![0, 43, 4]);
+    assert_eq!(*SETUP_SPECIFIER.lock().unwrap(), None);
+}
+
+#[cfg(feature = "plat-dyn")]
+#[test]
+fn acpi_binding_info_preserves_route_without_setup() {
     *SETUP_ACPI_ROUTE.lock().unwrap() = None;
     ensure_rdrive_static_intc();
 
     let info = binding_info_from_acpi_route("\\_SB.TEST", Some(acpi_route())).unwrap();
 
-    assert_eq!(info.irq_num(), Some(88));
-    assert_eq!(*SETUP_ACPI_ROUTE.lock().unwrap(), Some(acpi_route()));
+    assert_eq!(info.irq_num(), None);
+    assert_eq!(*SETUP_ACPI_ROUTE.lock().unwrap(), None);
+    assert_eq!(
+        info.irq(),
+        Some(&BindingIrq::Source(BindingIrqSource::AcpiGsiRoute(
+            irq_framework::AcpiGsiRoute {
+                gsi: acpi_route().gsi,
+                vector: acpi_route().vector,
+                controller: irq_framework::AcpiGsiController::IoApic,
+                controller_id: acpi_route().controller_id,
+                controller_address: acpi_route().controller_address,
+                controller_input: acpi_route().controller_input,
+                trigger: irq_framework::AcpiIrqTrigger::Level,
+                polarity: irq_framework::AcpiIrqPolarity::ActiveLow,
+            }
+        )))
+    );
 }
 
 #[cfg(feature = "plat-dyn")]
@@ -228,14 +293,32 @@ impl rdif_intc::Interface for TestIntc {
         *route == acpi_route()
     }
 
-    fn setup_irq_by_fdt(&mut self, irq_prop: &[u32]) -> rdif_intc::IrqId {
+    fn translate_fdt(
+        &self,
+        irq_prop: &[u32],
+    ) -> Result<rdif_intc::ControllerIrqTranslation, rdif_intc::IrqError> {
         *SETUP_SPECIFIER.lock().unwrap() = Some(irq_prop.to_vec());
-        77.into()
+        Ok(rdif_intc::ControllerIrqTranslation::new(
+            irq_framework::HwIrq(77),
+        ))
     }
 
-    fn setup_irq_by_acpi(&mut self, route: &AcpiGsiRoute) -> rdif_intc::IrqId {
+    fn translate_acpi(
+        &self,
+        _route: &AcpiGsiRoute,
+    ) -> Result<rdif_intc::ControllerIrqTranslation, rdif_intc::IrqError> {
+        Ok(rdif_intc::ControllerIrqTranslation::new(
+            irq_framework::HwIrq(88),
+        ))
+    }
+
+    fn configure_acpi(
+        &mut self,
+        _translation: &rdif_intc::IrqTranslation,
+        route: &AcpiGsiRoute,
+    ) -> Result<(), rdif_intc::IrqError> {
         *SETUP_ACPI_ROUTE.lock().unwrap() = Some(*route);
-        88.into()
+        Ok(())
     }
 }
 
@@ -243,13 +326,13 @@ impl rdif_intc::Interface for TestIntc {
 fn register_test_intc(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     probe
         .into_platform_device()
-        .register(rdif_intc::Intc::new(TestIntc));
+        .register(rdif_intc::Intc::new(TEST_INTC_DOMAIN, TestIntc));
     Ok(())
 }
 
 #[cfg(feature = "plat-dyn")]
 fn register_static_test_intc(plat_dev: PlatformDevice) -> Result<(), OnProbeError> {
-    plat_dev.register(rdif_intc::Intc::new(TestIntc));
+    plat_dev.register(rdif_intc::Intc::new(TEST_INTC_DOMAIN, TestIntc));
     Ok(())
 }
 
@@ -274,7 +357,7 @@ fn ensure_rdrive_static_intc() {
 
 #[cfg(feature = "plat-dyn")]
 fn capture_binding_info(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
-    *CAPTURED_IRQ.lock().unwrap() = Some(binding_info_from_fdt(probe.info())?.irq_num());
+    *CAPTURED_IRQ.lock().unwrap() = Some(binding_info_from_fdt(probe.info())?.irq_cloned());
     Ok(())
 }
 
