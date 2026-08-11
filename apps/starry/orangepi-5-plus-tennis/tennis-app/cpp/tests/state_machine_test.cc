@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <cstdio>
 
+#include "actuator/motor_dead_zone.h"
 #include "state_machine.h"
 
 namespace {
@@ -164,6 +165,27 @@ bool chase_uses_only_discrete_executable_actions() {
                   "a close offset ball must pivot without a timed sub-state");
 }
 
+bool motor_dead_zone_lifts_base_before_steering_bias() {
+    auto command = tennis::apply_motor_dead_zone(25, 25, 30);
+    if (!expect(command.left == 30 && command.right == 30,
+                "straight motion must lift its base speed to the floor"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(33, 17, 30);
+    if (!expect(command.left == 38 && command.right == 22,
+                "far bucket steering bias must survive base-speed lifting"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(13, -3, 30);
+    if (!expect(command.left == 38 && command.right == 22,
+                "near bucket steering must not become an in-place turn"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(12, -12, 30);
+    return expect(command.left == 30 && command.right == -30,
+                  "a true in-place turn must lift both wheel magnitudes");
+}
+
 bool captured_ball_uses_odom_return_and_visual_takeover() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
@@ -272,6 +294,7 @@ int main() {
     if (!empty_grab_resumes_ball_search()) return 1;
     if (!ball_search_keeps_one_way_scan()) return 1;
     if (!chase_uses_only_discrete_executable_actions()) return 1;
+    if (!motor_dead_zone_lifts_base_before_steering_bias()) return 1;
     if (!captured_ball_uses_odom_return_and_visual_takeover()) return 1;
     if (!deposit_waits_for_brake_and_release()) return 1;
     std::puts("tennis_state_machine_test: OK");

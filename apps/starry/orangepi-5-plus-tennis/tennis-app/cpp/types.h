@@ -142,8 +142,9 @@ struct Config {
     int hsv_h_hi = 340;  // or H >= hsv_h_hi
     int bucket_min_area = 1000;
 
-    // Motor dead-zone: a non-zero command is lifted to at least min_speed so it
-    // overcomes stall. Lives in the abstract Motor layer, not the backend.
+    // Motor dead-zone: the common translation component is lifted to min_speed
+    // before steering bias is restored. Pure pivots lift both wheel magnitudes.
+    // Lives in the abstract Motor layer, not the backend.
     int motor_min_speed = 20;
 
     // Physical action timing. Timed motor phases remain non-blocking, while the

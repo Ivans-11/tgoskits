@@ -245,7 +245,7 @@ static void usage(const char *prog) {
         "  --motor-device <spec>    PWM chip list or UART device (UART default /dev/ttyS6)\n"
         "  --arm-backend <kind>     virtual|uart (default virtual)\n"
         "  --arm-device <path>      arm UART device (default /dev/ttyS3)\n"
-        "  --motor-min-speed <n>    real motor dead-zone floor (default 20)\n"
+        "  --motor-min-speed <n>    translation floor before steering bias (default 20)\n"
         "  --area-far <f>           ball area ratio below which far speed is used\n"
         "  --area-stop <f>          ball area ratio that stops the approach\n"
         "  --area-reverse <f>       ball area ratio that triggers reverse\n"
