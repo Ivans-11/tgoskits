@@ -85,11 +85,13 @@ struct Config {
     float nms_thresh = 0.45f;
 
     // CHASE_BALL distance limits (by ball area_ratio).
+    float area_far = 0.20f;
     float area_stop = 0.28f;
     float area_reverse = 0.50f;
 
     // Discrete chassis commands. These must all be physically executable;
     // unlike the old proportional controller, none relies on dead-zone lifting.
+    int chase_far_spd = 45;
     int chase_forward_spd = 30;
     int chase_pivot_spd = 30;
     int reverse_speed = 30;

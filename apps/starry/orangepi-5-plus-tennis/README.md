@@ -186,12 +186,14 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--arm-backend <virtual\|uart>` | `virtual` | Arm backend |
 | `--arm-device <path>` | `/dev/ttyS3` | ZP10S UART path |
 | `--motor-min-speed <n>` | `20` | Minimum non-zero real motor command |
+| `--area-far <f>` | `0.20` | Ball area ratio below which far approach speed is used |
 | `--area-stop <f>` | `0.28` | Ball area ratio that stops the approach |
 | `--area-reverse <f>` | `0.50` | Ball area ratio that triggers reverse |
 | `--stop-center-offset <n>` | `90` | Gripper target offset from image center in pixels |
 | `--stop-center-zone <n>` | `20` | Horizontal alignment tolerance in pixels |
 | `--stop-confirm-cnt <n>` | `3` | Consecutive close and aligned frames required before grab |
-| `--chase-forward-speed <n>` | `30` | Fixed ball approach speed |
+| `--chase-far-speed <n>` | `45` | Far-distance ball approach speed |
+| `--chase-forward-speed <n>` | `30` | Near-distance ball approach speed |
 | `--chase-pivot-speed <n>` | `30` | Fixed ball alignment rotation speed |
 | `--reverse-speed <n>` | `30` | Fixed too-close reverse speed |
 | `--search-pivot-speed <n>` | `30` | Fixed ball search rotation speed |

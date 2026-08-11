@@ -141,9 +141,15 @@ bool chase_uses_only_discrete_executable_actions() {
         return false;
     output = machine.step(ball_detection(0.1f, target), ms(33));
     if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == config.chase_far_spd &&
+                    output.right == config.chase_far_spd,
+                "an aligned far ball must use the faster approach speed"))
+        return false;
+    output = machine.step(ball_detection(config.area_far, target), ms(50));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
                     output.left == config.chase_forward_spd &&
                     output.right == config.chase_forward_spd,
-                "an aligned distant ball must use fixed forward speed"))
+                "the far-area boundary must switch to near approach speed"))
         return false;
     output = machine.step(
         ball_detection(config.area_stop + 0.01f, target), ms(66));

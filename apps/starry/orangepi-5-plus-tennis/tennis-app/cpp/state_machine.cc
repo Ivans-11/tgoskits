@@ -167,8 +167,10 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball, int64_t now_ns) {
     if (area < cfg_.area_stop) {
         stop_confirm_ = 0;
         out.motor_op = MotorOp::Drive;
-        out.left = cfg_.chase_forward_spd;
-        out.right = cfg_.chase_forward_spd;
+        const int speed = area < cfg_.area_far ? cfg_.chase_far_spd
+                                               : cfg_.chase_forward_spd;
+        out.left = speed;
+        out.right = speed;
         return out;
     }
 

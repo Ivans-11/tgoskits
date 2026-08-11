@@ -246,12 +246,14 @@ static void usage(const char *prog) {
         "  --arm-backend <kind>     virtual|uart (default virtual)\n"
         "  --arm-device <path>      arm UART device (default /dev/ttyS3)\n"
         "  --motor-min-speed <n>    real motor dead-zone floor (default 20)\n"
+        "  --area-far <f>           ball area ratio below which far speed is used\n"
         "  --area-stop <f>          ball area ratio that stops the approach\n"
         "  --area-reverse <f>       ball area ratio that triggers reverse\n"
         "  --stop-center-offset <n> gripper target offset from image center\n"
         "  --stop-center-zone <n>   final horizontal tolerance in pixels\n"
         "  --stop-confirm-cnt <n>   consecutive aligned frames before grab\n"
-        "  --chase-forward-speed <n> ball approach speed\n"
+        "  --chase-far-speed <n>    far-distance ball approach speed\n"
+        "  --chase-forward-speed <n> near-distance ball approach speed\n"
         "  --chase-pivot-speed <n>  ball alignment rotation speed\n"
         "  --reverse-speed <n>      too-close reverse speed\n"
         "  --search-pivot-speed <n> ball search rotation speed\n"
@@ -343,6 +345,8 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.staleness_ms = std::atoi(value.c_str());
     else if (key == "motor-min-speed")
         o.cfg.motor_min_speed = std::atoi(value.c_str());
+    else if (key == "area-far")
+        o.cfg.area_far = std::atof(value.c_str());
     else if (key == "area-stop")
         o.cfg.area_stop = std::atof(value.c_str());
     else if (key == "area-reverse")
@@ -353,6 +357,8 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.stop_center_zone = std::atoi(value.c_str());
     else if (key == "stop-confirm-cnt")
         o.cfg.stop_confirm_cnt = std::atoi(value.c_str());
+    else if (key == "chase-far-speed")
+        o.cfg.chase_far_spd = std::atoi(value.c_str());
     else if (key == "chase-forward-speed")
         o.cfg.chase_forward_spd = std::atoi(value.c_str());
     else if (key == "chase-pivot-speed")
@@ -497,11 +503,13 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--log-every", v)) { o.log_every = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--staleness-ms", v)) { o.cfg.staleness_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--motor-min-speed", v)) { o.cfg.motor_min_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--area-far", v)) { o.cfg.area_far = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--area-stop", v)) { o.cfg.area_stop = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--area-reverse", v)) { o.cfg.area_reverse = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--stop-center-offset", v)) { o.cfg.stop_center_offset = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--stop-center-zone", v)) { o.cfg.stop_center_zone = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--stop-confirm-cnt", v)) { o.cfg.stop_confirm_cnt = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--chase-far-speed", v)) { o.cfg.chase_far_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--chase-forward-speed", v)) { o.cfg.chase_forward_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--chase-pivot-speed", v)) { o.cfg.chase_pivot_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--reverse-speed", v)) { o.cfg.reverse_speed = std::atoi(v.c_str()); continue; }
@@ -546,8 +554,11 @@ static int parse_options(int argc, char **argv, Options &o) {
                      "TENNIS_ERROR --motor-min-speed must be in [1,100]\n");
         return 2;
     }
-    if (o.cfg.area_stop <= 0.0f || o.cfg.area_stop >= o.cfg.area_reverse ||
+    if (o.cfg.area_far <= 0.0f || o.cfg.area_far >= o.cfg.area_stop ||
+        o.cfg.area_stop >= o.cfg.area_reverse ||
         o.cfg.stop_center_zone < 0 || o.cfg.stop_confirm_cnt < 1 ||
+        o.cfg.chase_far_spd < o.cfg.chase_forward_spd ||
+        o.cfg.chase_far_spd > 100 ||
         o.cfg.chase_forward_spd < o.cfg.motor_min_speed ||
         o.cfg.chase_forward_spd > 100 ||
         o.cfg.chase_pivot_spd < o.cfg.motor_min_speed ||
