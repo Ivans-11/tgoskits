@@ -37,6 +37,15 @@ for i in 0 1 2 3 4 5 6 7; do
     touch "/run/udev/data/c13:$((64 + i))" 2>/dev/null || true
 done
 
+# Board images may provide this hook for local services such as network
+# configuration.  Run it detached so a long-lived daemon does not block the
+# interactive shell.
+if [ -f /etc/starry/board-init.sh ]; then
+    echo "[init] /etc/starry/board-init.sh detected, launching board init"
+    setsid sh /etc/starry/board-init.sh </dev/null >/dev/console 2>&1 &
+    echo "[init] /etc/starry/board-init.sh started pid=$!"
+fi
+
 # Visual-CI hook: when run_scenario.sh injects /test_runner.sh into the
 # rootfs, fire it asynchronously before dropping to the login shell.
 # Absence of /test_runner.sh in normal/interactive boots leaves this a

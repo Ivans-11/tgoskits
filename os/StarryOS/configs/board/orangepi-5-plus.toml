@@ -11,7 +11,9 @@ features = [
   "ax-driver/rockchip-sdhci",
   "ax-driver/rockchip-dwmmc",
   "ax-driver/rk3588-cpufreq",
+  "jpeg",
   "rknpu",
+  "rga",
   "rk3588-pwm",
 ]
 log = "Info"
