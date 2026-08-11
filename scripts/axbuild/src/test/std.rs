@@ -97,7 +97,11 @@ fn parse_std_crates_csv(
 }
 
 fn cargo_test_args(package: &str) -> Vec<String> {
-    vec!["test".into(), "-p".into(), package.into()]
+    let mut args = vec!["test".into(), "-p".into(), package.into()];
+    if package == "ax-driver" {
+        args.extend(["--features".into(), "starfive-jh7110-dwmmc".into()]);
+    }
+    args
 }
 
 fn run_std_tests<R: CargoRunner>(
@@ -275,5 +279,19 @@ mod tests {
         let failed = run_std_tests(&mut runner, &root, &packages).unwrap();
 
         assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn ax_driver_uses_visionfive2_mmc_feature() {
+        assert_eq!(
+            cargo_test_args("ax-driver"),
+            vec![
+                "test",
+                "-p",
+                "ax-driver",
+                "--features",
+                "starfive-jh7110-dwmmc",
+            ]
+        );
     }
 }
