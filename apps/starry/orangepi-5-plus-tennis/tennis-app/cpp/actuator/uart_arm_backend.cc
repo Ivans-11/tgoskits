@@ -12,7 +12,7 @@ namespace {
 
 constexpr float kAngleMax = 270.0f;
 constexpr float kOpen = 150.0f;
-constexpr float kClosed = 90.0f;
+constexpr float kClosed = 80.0f;
 constexpr int kStepDelayMs = 1000;
 constexpr int kPositionTimeoutMs = 250;
 constexpr int kGrabPulseThreshold = 1260;

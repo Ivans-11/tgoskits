@@ -261,6 +261,9 @@ static void usage(const char *prog) {
         "  --odometry-sample-ms <n> RPM sampling interval\n"
         "  --return-timeout-ms <n>  odometry return timeout\n"
         "  --return-stop-radius <f> stop radius before visual bucket search\n"
+        "  --bucket-min-area <n>    minimum connected red pixels for a bucket\n"
+        "  --bucket-area-brake <f>  bucket area ratio that selects near speed\n"
+        "  --bucket-area-deposit <f> bucket area ratio that triggers deposit\n"
         "  --camera-warmup-frames <n> consecutive startup frames (default 3)\n"
         "  --camera-warmup-timeout-ms <n> startup deadline (default 3000)\n"
         "  --camera-watchdog-ms <n> no-frame stop timeout (default 2000)\n"
@@ -393,6 +396,12 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.return_pivot_spd = std::atoi(value.c_str());
     else if (key == "return-forward-speed")
         o.cfg.return_forward_spd = std::atoi(value.c_str());
+    else if (key == "bucket-min-area")
+        o.cfg.bucket_min_area = std::atoi(value.c_str());
+    else if (key == "bucket-area-brake")
+        o.cfg.bucket_area_brake = std::atof(value.c_str());
+    else if (key == "bucket-area-deposit")
+        o.cfg.bucket_area_deposit = std::atof(value.c_str());
     else if (key == "camera-warmup-frames")
         o.camera_warmup_frames = std::atoi(value.c_str());
     else if (key == "camera-warmup-timeout-ms")
@@ -524,6 +533,9 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--odometry-sample-ms", v)) { o.cfg.odometry_sample_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--return-timeout-ms", v)) { o.cfg.return_timeout_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--return-stop-radius", v)) { o.cfg.return_stop_radius_m = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-min-area", v)) { o.cfg.bucket_min_area = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-area-brake", v)) { o.cfg.bucket_area_brake = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-area-deposit", v)) { o.cfg.bucket_area_deposit = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-frames", v)) { o.camera_warmup_frames = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-timeout-ms", v)) { o.camera_warmup_timeout_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-watchdog-ms", v)) { o.camera_watchdog_ms = std::atoi(v.c_str()); continue; }
@@ -585,6 +597,17 @@ static int parse_options(int argc, char **argv, Options &o) {
         o.cfg.return_forward_spd < o.cfg.motor_min_speed ||
         o.cfg.return_forward_spd > 100) {
         std::fprintf(stderr, "TENNIS_ERROR invalid odometry return values\n");
+        return 2;
+    }
+    const int64_t frame_pixels =
+        static_cast<int64_t>(o.cfg.frame_w) * o.cfg.frame_h;
+    if (o.cfg.bucket_min_area <= 0 || o.cfg.bucket_min_area > frame_pixels ||
+        !std::isfinite(o.cfg.bucket_area_brake) ||
+        !std::isfinite(o.cfg.bucket_area_deposit) ||
+        o.cfg.bucket_area_brake <= 0.0f ||
+        o.cfg.bucket_area_brake >= o.cfg.bucket_area_deposit ||
+        o.cfg.bucket_area_deposit > 1.0f) {
+        std::fprintf(stderr, "TENNIS_ERROR invalid bucket detection values\n");
         return 2;
     }
     if (o.camera_warmup_frames < 0 || o.camera_warmup_timeout_ms <= 0 ||

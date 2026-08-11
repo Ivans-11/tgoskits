@@ -293,16 +293,16 @@ bool arm_protocol_matches_calibrated_sequence() {
     if (!expect(pty.master >= 0, "open arm PTY")) return false;
 
     const std::string expected =
-        "#000P1685T1000!#001P0722T1000!#002P1166T1000!"
+        "#000P1685T1000!#001P0722T1000!#002P1092T1000!"
         "#002P1611T1000!"
         "#000P2255T1000!#001P1166T1000!#002P1611T1000!"
-        "#002P1166T1000!"
+        "#002P1092T1000!"
         "#002PRAD!"
-        "#000P1462T1000!#001P0722T1000!#002P1166T1000!"
+        "#000P1462T1000!#001P0722T1000!#002P1092T1000!"
         "#002PRAD!"
-        "#000P1685T1000!#001P1314T1000!#002P1166T1000!"
+        "#000P1685T1000!#001P1314T1000!#002P1092T1000!"
         "#002P1611T1000!"
-        "#000P1462T1000!#001P0722T1000!#002P1166T1000!";
+        "#000P1462T1000!#001P0722T1000!#002P1092T1000!";
     const std::string query = "#002PRAD!";
     const std::string position = "#002P1367!";
     std::string received;
@@ -353,9 +353,9 @@ bool arm_ball_lost_after_lift_is_reported() {
     const std::string expected =
         "#002P1611T1000!"
         "#000P2255T1000!#001P1166T1000!#002P1611T1000!"
-        "#002P1166T1000!"
+        "#002P1092T1000!"
         "#002PRAD!"
-        "#000P1462T1000!#001P0722T1000!#002P1166T1000!"
+        "#000P1462T1000!#001P0722T1000!#002P1092T1000!"
         "#002PRAD!";
     const std::string query = "#002PRAD!";
     const std::string held_position = "#002P1367!";

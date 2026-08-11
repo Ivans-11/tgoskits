@@ -201,6 +201,9 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--odometry-sample-ms <n>` | `100` | Wheel-RPM sampling interval |
 | `--return-timeout-ms <n>` | `15000` | Maximum blind return duration |
 | `--return-stop-radius <f>` | `0.50` | Stop radius before visual bucket search |
+| `--bucket-min-area <n>` | `3000` | Minimum connected red pixels required to detect a bucket |
+| `--bucket-area-brake <f>` | `0.70` | Bucket red-area ratio that selects near approach speed |
+| `--bucket-area-deposit <f>` | `0.90` | Bucket red-area ratio that triggers deposit |
 | `--virtual-actuators` | — | Compatibility shorthand selecting both virtual backends |
 | `--camera-warmup-frames <n>` | `3` | Consecutive valid frames required before live control |
 | `--camera-warmup-timeout-ms <n>` | `3000` | Camera startup deadline |

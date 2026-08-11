@@ -79,6 +79,11 @@ if(TENNIS_HOST_DRYRUN)
         endif()
         add_test(NAME tennis_uart_actuator COMMAND tennis_uart_actuator_test)
         set_tests_properties(tennis_uart_actuator PROPERTIES TIMEOUT 15)
+
+        add_test(NAME tennis_live_config COMMAND tennis_app
+            --config ${CMAKE_CURRENT_SOURCE_DIR}/configs/orangepi5plus-live.conf
+            --mode dry-run --virtual-actuators --duration-sec 0.01
+            --log-every 1000)
     endif()
 else()
     # --- Board build: fully self-contained. All RKNN/UVC/RGA/utils code is now

@@ -127,7 +127,7 @@ struct Config {
     // Bucket approach.
     float bucket_area_deposit = 0.90f;
     float bucket_area_brake = 0.70f;
-    int bucket_approach_spd = 25;
+    int bucket_approach_spd = 40;
     int bucket_brake_spd = 5;
     float bucket_k_turn = 20.0f;
     int bucket_max_bias = 8;
@@ -140,7 +140,7 @@ struct Config {
     int hsv_v_min = 50;
     int hsv_h_lo = 20;   // accept H <= hsv_h_lo
     int hsv_h_hi = 340;  // or H >= hsv_h_hi
-    int bucket_min_area = 1000;
+    int bucket_min_area = 3000;
 
     // Motor dead-zone: the common translation component is lifted to min_speed
     // before steering bias is restored. Pure pivots lift both wheel magnitudes.
