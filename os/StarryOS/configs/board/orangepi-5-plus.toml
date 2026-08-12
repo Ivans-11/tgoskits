@@ -16,5 +16,5 @@ features = [
   "rga",
   "rk3588-pwm",
 ]
-log = "Info"
+log = "Error"
 max_cpu_num = 8
