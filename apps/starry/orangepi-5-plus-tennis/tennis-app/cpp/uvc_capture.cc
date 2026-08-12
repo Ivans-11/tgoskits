@@ -438,7 +438,8 @@ static uvc_device *select_device(UvcApi *api, uvc_context *ctx, int index, const
     return selected;
 }
 
-bool start_uvc_capture(UvcCaptureSession *session, const UvcCaptureOptions *options)
+bool uvc_open_and_negotiate(UvcCaptureSession *session,
+                            const UvcCaptureOptions *options)
 {
     const char *log_prefix = options->log_prefix != NULL ? options->log_prefix : "uvc";
     if (!load_uvc_api(&session->api)) {
@@ -518,7 +519,16 @@ bool start_uvc_capture(UvcCaptureSession *session, const UvcCaptureOptions *opti
            session->ctrl.dw_max_payload_transfer_size,
            session->ctrl.b_interface_number);
 
-    ret = session->api.start_streaming(session->devh, &session->ctrl, frame_callback, &session->state, 0);
+    return true;
+}
+
+bool uvc_begin_streaming(UvcCaptureSession *session,
+                         const UvcCaptureOptions *options)
+{
+    const char *log_prefix =
+        options->log_prefix != NULL ? options->log_prefix : "uvc";
+    int ret = session->api.start_streaming(
+        session->devh, &session->ctrl, frame_callback, &session->state, 0);
     if (ret < 0) {
         printf("uvc_start_streaming failed: %s\n", uvc_error(&session->api, ret));
         stop_uvc_capture(session);
@@ -527,6 +537,13 @@ bool start_uvc_capture(UvcCaptureSession *session, const UvcCaptureOptions *opti
     session->streaming = true;
     printf("%s: streaming started\n", log_prefix);
     return true;
+}
+
+bool start_uvc_capture(UvcCaptureSession *session,
+                       const UvcCaptureOptions *options)
+{
+    return uvc_open_and_negotiate(session, options) &&
+           uvc_begin_streaming(session, options);
 }
 
 void stop_uvc_capture(UvcCaptureSession *session)

@@ -23,6 +23,13 @@ public:
     ~Camera();
 
     bool start(int device, int width, int height, int fps);
+
+    // Split start so live mode can overlap USB open/format negotiation with
+    // RKNN model initialization, then defer the interrupt-heavy stream until
+    // the model is ready.
+    bool open_and_negotiate(int device, int width, int height, int fps);
+    bool begin_streaming();
+
     void stop();
 
     // If a frame newer than the last polled one is available, copy it into
@@ -38,6 +45,7 @@ public:
 
 private:
     UvcCaptureSession session_;
+    UvcCaptureOptions opts_{};
     uint64_t last_id_ = 0;
     bool started_ = false;
 };

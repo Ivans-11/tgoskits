@@ -121,6 +121,12 @@ bool load_uvc_api(UvcApi *api);
 void close_uvc_api(UvcApi *api);
 
 bool start_uvc_capture(UvcCaptureSession *session, const UvcCaptureOptions *options);
+// The two phases of start_uvc_capture. begin_streaming must follow a successful
+// open_and_negotiate on the same session.
+bool uvc_open_and_negotiate(UvcCaptureSession *session,
+                            const UvcCaptureOptions *options);
+bool uvc_begin_streaming(UvcCaptureSession *session,
+                         const UvcCaptureOptions *options);
 void stop_uvc_capture(UvcCaptureSession *session);
 bool snapshot_latest_capture(SharedState *state, LatestFrame *frame);
 UvcCaptureCounters capture_counters(SharedState *state);

@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <signal.h>
+#include <thread>
 
 #include "bench/metrics.h"
 #include "actuator/actuator_factory.h"
@@ -80,6 +81,8 @@ static Config make_cfg(const Options &opts) {
 int run_live(const Options &opts) {
     // Cold-start clock: process start ~= run_live entry (arg parse is trivial).
     const int64_t t_proc_start = monotonic_ns();
+    std::printf("TENNIS_PROC_START\n");
+    std::fflush(stdout);
     Config cfg = make_cfg(opts);
     TerminationSignals termination;
 
@@ -92,23 +95,47 @@ int run_live(const Options &opts) {
         }
     }
 
+    // Camera open/negotiation uses USB control transfers and can overlap RKNN
+    // initialization. Actual streaming starts only after rknn_init: starting it
+    // earlier floods xHCI completions and substantially delays the model's
+    // producer/consumer handshakes on StarryOS.
     Camera cam;
-    const int64_t t_cap0 = monotonic_ns();
-    if (!cam.start(opts.device, opts.width, opts.height, opts.fps)) {
+    TennisDetector det;
+    bool camera_open_ok = false;
+    int64_t t_cap_open0 = 0;
+    int64_t t_cap_open1 = 0;
+    std::thread camera_setup([&] {
+        t_cap_open0 = monotonic_ns();
+        camera_open_ok = cam.open_and_negotiate(
+            opts.device, opts.width, opts.height, opts.fps);
+        t_cap_open1 = monotonic_ns();
+    });
+
+    const int64_t t_mdl0 = monotonic_ns();
+    const bool model_ok =
+        det.init(opts.model.c_str(), opts.label.c_str(), cfg, opts.core_mask);
+    const int64_t t_mdl1 = monotonic_ns();
+    camera_setup.join();
+
+    if (!model_ok) {
+        std::fprintf(stderr, "rknn_init fail! model=%s\n", opts.model.c_str());
+        return 1;
+    }
+    if (!camera_open_ok) {
+        std::fprintf(stderr, "uvc open/negotiate failed: device %d\n",
+                     opts.device);
+        return 1;
+    }
+    const int64_t t_cap_stream0 = monotonic_ns();
+    if (!cam.begin_streaming()) {
         std::fprintf(stderr, "uvc_start_streaming failed: device %d\n",
                      opts.device);
         return 1;
     }
     const int64_t t_cap1 = monotonic_ns();
-
-    TennisDetector det;
-    const int64_t t_mdl0 = monotonic_ns();
-    if (!det.init(opts.model.c_str(), opts.label.c_str(), cfg, opts.core_mask)) {
-        std::fprintf(stderr, "rknn_init fail! model=%s\n", opts.model.c_str());
-        cam.stop();
-        return 1;
-    }
-    const int64_t t_mdl1 = monotonic_ns();
+    const double capture_init_ms =
+        ns_to_ms(t_cap_open1 - t_cap_open0) +
+        ns_to_ms(t_cap1 - t_cap_stream0);
 
     if (!cam.warm_up(opts.camera_warmup_frames,
                      opts.camera_warmup_timeout_ms)) {
@@ -232,7 +259,12 @@ int run_live(const Options &opts) {
             bucket.detect(&img, d.bucket);
         }
         d.detect_ts_ns = monotonic_ns();
-        if (t_first_detect == 0) t_first_detect = d.detect_ts_ns;
+        if (t_first_detect == 0) {
+            t_first_detect = d.detect_ts_ns;
+            std::printf("TENNIS_FIRST_INFERENCE ms_since_proc_start=%.1f\n",
+                        ns_to_ms(t_first_detect - t_proc_start));
+            std::fflush(stdout);
+        }
 
         const int64_t t_ctrl0 = monotonic_ns();
         if (!controller.process(d)) {
@@ -275,9 +307,10 @@ int run_live(const Options &opts) {
 
     if (opts.profile) {
         ColdStart cold;
-        cold.capture_init_ms = ns_to_ms(t_cap1 - t_cap0);
+        cold.capture_init_ms = capture_init_ms;
         cold.model_init_ms = ns_to_ms(t_mdl1 - t_mdl0);
-        if (t_first_frame) cold.first_frame_wait_ms = ns_to_ms(t_first_frame - t_mdl1);
+        if (t_first_frame)
+            cold.first_frame_wait_ms = ns_to_ms(t_first_frame - t_cap1);
         if (t_first_detect && t_first_frame)
             cold.first_detection_ms = ns_to_ms(t_first_detect - t_first_frame);
         if (t_first_cmd && t_first_detect)

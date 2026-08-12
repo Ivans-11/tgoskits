@@ -10,14 +10,29 @@ namespace tennis {
 Camera::~Camera() { stop(); }
 
 bool Camera::start(int device, int width, int height, int fps) {
-    UvcCaptureOptions opts;
-    opts.device = device;
-    opts.width = width;
-    opts.height = height;
-    opts.fps = fps;
-    opts.log_prefix = "tennis-uvc";
-    started_ = start_uvc_capture(&session_, &opts);
+    return open_and_negotiate(device, width, height, fps) &&
+           begin_streaming();
+}
+
+bool Camera::open_and_negotiate(int device, int width, int height, int fps) {
+    opts_ = UvcCaptureOptions{};
+    opts_.device = device;
+    opts_.width = width;
+    opts_.height = height;
+    opts_.fps = fps;
+    opts_.log_prefix = "tennis-uvc";
+    // A successful open owns resources even before streaming begins, so stop()
+    // must close them if model initialization later fails.
+    started_ = uvc_open_and_negotiate(&session_, &opts_);
     return started_;
+}
+
+bool Camera::begin_streaming() {
+    if (!started_) return false;
+    if (uvc_begin_streaming(&session_, &opts_)) return true;
+    // uvc_begin_streaming cleans up the session on failure.
+    started_ = false;
+    return false;
 }
 
 void Camera::stop() {
