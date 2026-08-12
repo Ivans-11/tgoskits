@@ -152,25 +152,41 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball, int64_t now_ns) {
         return out;
     }
 
-    // Align first using one physically executable pivot command. The next
-    // camera frame decides whether to keep turning or move forward.
-    if (std::abs(stop_off) > cfg_.stop_center_zone) {
+    // Drive toward the ball while steering in proportion to its horizontal
+    // error. When the base speed is at the physical floor, keep the inside
+    // wheel at that floor and put the complete wheel-speed difference on the
+    // outside wheel.
+    if (area < cfg_.area_stop) {
         stop_confirm_ = 0;
-        int dir = stop_off > 0 ? 1 : -1;
+        const int speed = area < cfg_.area_far ? cfg_.chase_far_spd
+                                               : cfg_.chase_forward_spd;
+        int bias = (std::abs(stop_off) <= cfg_.stop_center_zone)
+                       ? 0
+                       : static_cast<int>(std::lround(
+                             cfg_.chase_turn_k * stop_off /
+                             static_cast<float>(half_w_)));
+        bias = clampi(bias, -cfg_.chase_max_bias, cfg_.chase_max_bias);
         out.motor_op = MotorOp::Drive;
-        out.left = dir * cfg_.chase_pivot_spd;
-        out.right = -out.left;
+        if (speed - std::abs(bias) < cfg_.motor_min_speed) {
+            out.left = clampi(
+                cfg_.motor_min_speed + std::max(2 * bias, 0), 0, 100);
+            out.right = clampi(
+                cfg_.motor_min_speed + std::max(-2 * bias, 0), 0, 100);
+        } else {
+            out.left = clampi(speed + bias, 0, 100);
+            out.right = clampi(speed - bias, 0, 100);
+        }
         return out;
     }
 
-    // Once aligned, drive straight until the ball reaches the grab distance.
-    if (area < cfg_.area_stop) {
+    // A close ball must still be aligned before the grab is confirmed. Pivot
+    // in place at a fixed executable speed so alignment adds no forward motion.
+    if (std::abs(stop_off) > cfg_.stop_center_zone) {
         stop_confirm_ = 0;
+        const int direction = stop_off > 0 ? 1 : -1;
         out.motor_op = MotorOp::Drive;
-        const int speed = area < cfg_.area_far ? cfg_.chase_far_spd
-                                               : cfg_.chase_forward_spd;
-        out.left = speed;
-        out.right = speed;
+        out.left = direction * cfg_.chase_close_pivot_spd;
+        out.right = -out.left;
         return out;
     }
 
@@ -286,8 +302,18 @@ ControlOutput StateMachine::approach_bucket(const BucketObs &bucket,
     int spd = (area >= cfg_.bucket_area_brake) ? cfg_.bucket_brake_spd
                                                : cfg_.bucket_approach_spd;
     out.motor_op = MotorOp::Drive;
-    out.left = clampi(spd + bias, -100, 100);
-    out.right = clampi(spd - bias, -100, 100);
+    if (spd < cfg_.motor_min_speed) {
+        // Below the executable translation floor, subtracting the steering
+        // bias would leave one wheel in the physical dead zone. Start both
+        // wheels at the floor and put twice the original bias on only the
+        // outside wheel. This preserves the requested wheel-speed difference.
+        out.left = clampi(cfg_.motor_min_speed + std::max(2 * bias, 0), 0, 100);
+        out.right =
+            clampi(cfg_.motor_min_speed + std::max(-2 * bias, 0), 0, 100);
+    } else {
+        out.left = clampi(spd + bias, -100, 100);
+        out.right = clampi(spd - bias, -100, 100);
+    }
     return out;
 }
 

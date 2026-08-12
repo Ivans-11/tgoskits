@@ -81,30 +81,32 @@ struct Config {
 
     // Detector.
     int ball_class_id = 0;     // 0 for a single-class tennis model; 32 (sports ball) for COCO yolov8.rknn
-    float conf_thresh = 0.5f;
+    float conf_thresh = 0.75f;
     float nms_thresh = 0.45f;
 
     // CHASE_BALL distance limits (by ball area_ratio).
     float area_far = 0.20f;
-    float area_stop = 0.28f;
-    float area_reverse = 0.50f;
+    float area_stop = 0.56f;
+    float area_reverse = 0.62f;
 
-    // Discrete chassis commands. These must all be physically executable;
-    // unlike the old proportional controller, none relies on dead-zone lifting.
+    // Ball pursuit chassis commands. Steering bias is proportional to the
+    // horizontal error and is composed here above the physical speed floor.
     int chase_far_spd = 45;
     int chase_forward_spd = 30;
-    int chase_pivot_spd = 30;
+    float chase_turn_k = 24.0f;
+    int chase_max_bias = 24;
+    int chase_close_pivot_spd = 30;
     int reverse_speed = 30;
     int center_dead_zone = 15;
 
     // Stop / grab gate. The ball is centred under a gripper mounted right of the
     // optical centre, hence the off-centre stop target.
-    int stop_center_offset = 90;
+    int stop_center_offset = 108;
     int stop_center_zone = 20;
     int stop_confirm_cnt = 3;
 
     // Ball lost search.
-    int search_pivot_spd = 30;
+    int search_pivot_spd = 35;
 
     // Optional wheel-RPM odometry. The generic default remains off; the
     // calibrated Orange Pi live configuration enables it explicitly.
@@ -127,11 +129,11 @@ struct Config {
     // Bucket approach.
     float bucket_area_deposit = 0.90f;
     float bucket_area_brake = 0.70f;
-    int bucket_approach_spd = 40;
-    int bucket_brake_spd = 5;
+    int bucket_approach_spd = 45;
+    int bucket_brake_spd = 35;
     float bucket_k_turn = 20.0f;
     int bucket_max_bias = 8;
-    int bucket_search_spd = 12;
+    int bucket_search_spd = 35;
     int bucket_lost_frames = 10;
     int bucket_confirm_cnt = 3;
 
@@ -142,14 +144,13 @@ struct Config {
     int hsv_h_hi = 340;  // or H >= hsv_h_hi
     int bucket_min_area = 3000;
 
-    // Motor dead-zone: the common translation component is lifted to min_speed
-    // before steering bias is restored. Pure pivots lift both wheel magnitudes.
-    // Lives in the abstract Motor layer, not the backend.
-    int motor_min_speed = 20;
+    // Motor dead-zone: every non-zero wheel command is independently lifted to
+    // this physical floor. Base-speed/bias composition stays in the FSM.
+    int motor_min_speed = 28;
 
     // Physical action timing. Timed motor phases remain non-blocking, while the
     // state machine keeps issuing the latched command until its deadline.
-    int brake_hold_ms = 350;
+    int brake_hold_ms = 200;
     int grab_settle_ms = 100;
     int release_settle_ms = 500;
 

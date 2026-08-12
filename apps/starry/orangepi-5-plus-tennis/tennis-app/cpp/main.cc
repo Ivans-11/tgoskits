@@ -254,7 +254,9 @@ static void usage(const char *prog) {
         "  --stop-confirm-cnt <n>   consecutive aligned frames before grab\n"
         "  --chase-far-speed <n>    far-distance ball approach speed\n"
         "  --chase-forward-speed <n> near-distance ball approach speed\n"
-        "  --chase-pivot-speed <n>  ball alignment rotation speed\n"
+        "  --chase-turn-k <f>       proportional ball steering gain\n"
+        "  --chase-max-bias <n>    maximum ball steering wheel bias\n"
+        "  --chase-close-pivot-speed <n> fixed close-ball alignment speed\n"
         "  --reverse-speed <n>      too-close reverse speed\n"
         "  --search-pivot-speed <n> ball search rotation speed\n"
         "  --odometry-enabled <bool> enable RPM odometry return guidance\n"
@@ -264,6 +266,9 @@ static void usage(const char *prog) {
         "  --bucket-min-area <n>    minimum connected red pixels for a bucket\n"
         "  --bucket-area-brake <f>  bucket area ratio that selects near speed\n"
         "  --bucket-area-deposit <f> bucket area ratio that triggers deposit\n"
+        "  --bucket-approach-speed <n> far-distance bucket approach speed\n"
+        "  --bucket-brake-speed <n> near-distance bucket approach speed\n"
+        "  --bucket-search-speed <n> fixed in-place bucket search speed\n"
         "  --camera-warmup-frames <n> consecutive startup frames (default 3)\n"
         "  --camera-warmup-timeout-ms <n> startup deadline (default 3000)\n"
         "  --camera-watchdog-ms <n> no-frame stop timeout (default 2000)\n"
@@ -364,8 +369,12 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.chase_far_spd = std::atoi(value.c_str());
     else if (key == "chase-forward-speed")
         o.cfg.chase_forward_spd = std::atoi(value.c_str());
-    else if (key == "chase-pivot-speed")
-        o.cfg.chase_pivot_spd = std::atoi(value.c_str());
+    else if (key == "chase-turn-k")
+        o.cfg.chase_turn_k = std::atof(value.c_str());
+    else if (key == "chase-max-bias")
+        o.cfg.chase_max_bias = std::atoi(value.c_str());
+    else if (key == "chase-close-pivot-speed")
+        o.cfg.chase_close_pivot_spd = std::atoi(value.c_str());
     else if (key == "reverse-speed")
         o.cfg.reverse_speed = std::atoi(value.c_str());
     else if (key == "search-pivot-speed")
@@ -402,6 +411,12 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.bucket_area_brake = std::atof(value.c_str());
     else if (key == "bucket-area-deposit")
         o.cfg.bucket_area_deposit = std::atof(value.c_str());
+    else if (key == "bucket-approach-speed")
+        o.cfg.bucket_approach_spd = std::atoi(value.c_str());
+    else if (key == "bucket-brake-speed")
+        o.cfg.bucket_brake_spd = std::atoi(value.c_str());
+    else if (key == "bucket-search-speed")
+        o.cfg.bucket_search_spd = std::atoi(value.c_str());
     else if (key == "camera-warmup-frames")
         o.camera_warmup_frames = std::atoi(value.c_str());
     else if (key == "camera-warmup-timeout-ms")
@@ -520,7 +535,9 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--stop-confirm-cnt", v)) { o.cfg.stop_confirm_cnt = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--chase-far-speed", v)) { o.cfg.chase_far_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--chase-forward-speed", v)) { o.cfg.chase_forward_spd = std::atoi(v.c_str()); continue; }
-        if (arg_val(argc, argv, i, "--chase-pivot-speed", v)) { o.cfg.chase_pivot_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--chase-turn-k", v)) { o.cfg.chase_turn_k = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--chase-max-bias", v)) { o.cfg.chase_max_bias = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--chase-close-pivot-speed", v)) { o.cfg.chase_close_pivot_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--reverse-speed", v)) { o.cfg.reverse_speed = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--search-pivot-speed", v)) { o.cfg.search_pivot_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--odometry-enabled", v)) {
@@ -536,6 +553,9 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--bucket-min-area", v)) { o.cfg.bucket_min_area = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-area-brake", v)) { o.cfg.bucket_area_brake = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-area-deposit", v)) { o.cfg.bucket_area_deposit = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-approach-speed", v)) { o.cfg.bucket_approach_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-brake-speed", v)) { o.cfg.bucket_brake_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-search-speed", v)) { o.cfg.bucket_search_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-frames", v)) { o.camera_warmup_frames = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-warmup-timeout-ms", v)) { o.camera_warmup_timeout_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--camera-watchdog-ms", v)) { o.camera_watchdog_ms = std::atoi(v.c_str()); continue; }
@@ -568,13 +588,16 @@ static int parse_options(int argc, char **argv, Options &o) {
     }
     if (o.cfg.area_far <= 0.0f || o.cfg.area_far >= o.cfg.area_stop ||
         o.cfg.area_stop >= o.cfg.area_reverse ||
+        o.cfg.area_reverse > 1.0f ||
         o.cfg.stop_center_zone < 0 || o.cfg.stop_confirm_cnt < 1 ||
         o.cfg.chase_far_spd < o.cfg.chase_forward_spd ||
         o.cfg.chase_far_spd > 100 ||
         o.cfg.chase_forward_spd < o.cfg.motor_min_speed ||
         o.cfg.chase_forward_spd > 100 ||
-        o.cfg.chase_pivot_spd < o.cfg.motor_min_speed ||
-        o.cfg.chase_pivot_spd > 100 ||
+        !std::isfinite(o.cfg.chase_turn_k) || o.cfg.chase_turn_k <= 0.0f ||
+        o.cfg.chase_max_bias < 1 || o.cfg.chase_max_bias > 50 ||
+        o.cfg.chase_close_pivot_spd < o.cfg.motor_min_speed ||
+        o.cfg.chase_close_pivot_spd > 100 ||
         o.cfg.reverse_speed < o.cfg.motor_min_speed ||
         o.cfg.reverse_speed > 100 ||
         o.cfg.search_pivot_spd < o.cfg.motor_min_speed ||
@@ -606,7 +629,13 @@ static int parse_options(int argc, char **argv, Options &o) {
         !std::isfinite(o.cfg.bucket_area_deposit) ||
         o.cfg.bucket_area_brake <= 0.0f ||
         o.cfg.bucket_area_brake >= o.cfg.bucket_area_deposit ||
-        o.cfg.bucket_area_deposit > 1.0f) {
+        o.cfg.bucket_area_deposit > 1.0f ||
+        o.cfg.bucket_approach_spd < o.cfg.bucket_brake_spd ||
+        o.cfg.bucket_approach_spd > 100 ||
+        o.cfg.bucket_brake_spd < o.cfg.motor_min_speed ||
+        o.cfg.bucket_brake_spd > 100 ||
+        o.cfg.bucket_search_spd < o.cfg.motor_min_speed ||
+        o.cfg.bucket_search_spd > 100) {
         std::fprintf(stderr, "TENNIS_ERROR invalid bucket detection values\n");
         return 2;
     }
