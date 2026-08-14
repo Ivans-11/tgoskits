@@ -1404,8 +1404,16 @@ impl System {
             let phandle_map = self.phandle_2_device_id.clone();
 
             debug!("Probe [{}]->[{}]", node.name(), node_info.name);
-            let res = apply_assigned_clocks(node)
-                .and_then(|()| apply_power_domains(node))
+            // Clock defaults are best-effort, matching Linux
+            // `of_clk_set_defaults`: an unsupported assigned rate must not
+            // prevent the device's own driver from probing.
+            if let Err(err) = apply_assigned_clocks(node) {
+                warn!(
+                    "[{}] assigned-clocks apply failed (best-effort, continuing to probe): {err}",
+                    node.name()
+                );
+            }
+            let res = apply_power_domains(node)
                 .and_then(|()| apply_default_pinctrl(node))
                 .and_then(|()| {
                     let descriptor = Descriptor {
