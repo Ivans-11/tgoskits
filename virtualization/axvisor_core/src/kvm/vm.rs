@@ -23,8 +23,8 @@ use axvisor_api::control as api_control;
 use axvm::{AxVM, VMStatus, config::AxVMConfig};
 
 use super::{
-    CONTROL_FILES, ControlFileState, KVM_CONTROL_OPS, VcpuFileState, VmFileState,
-    next_control_file_id,
+    CONTROL_FILES, ControlFileState, KVM_CONTROL_OPS, VcpuFileState, VcpuOperationLock,
+    VmFileState, next_control_file_id,
 };
 use crate::kvm::{
     abi::raw as abi,
@@ -89,6 +89,15 @@ pub(in crate::kvm) fn create_vcpu_file(
         }
 
         let vcpu_file = next_control_file_id()?;
+        // Without an in-kernel irqchip, userspace is responsible for starting
+        // and interrupting every vCPU, so KVM exposes them as runnable from
+        // creation. With an irqchip, secondary vCPUs wait for the emulated
+        // architectural startup sequence.
+        let mp_state = if vcpu_id == 0 || !vm.irqchip_created {
+            abi::KVM_MP_STATE_RUNNABLE
+        } else {
+            abi::KVM_MP_STATE_STOPPED
+        };
         vm.vcpu_files.insert(vcpu_id, vcpu_file);
         control_files.insert(
             vcpu_file,
@@ -96,14 +105,8 @@ pub(in crate::kvm) fn create_vcpu_file(
                 vm_file: control_file,
                 vcpu_id,
                 mmap_area,
-                mp_state: if vcpu_id == 0 {
-                    abi::KVM_MP_STATE_RUNNABLE
-                } else {
-                    abi::KVM_MP_STATE_STOPPED
-                },
+                mp_state,
                 halted: false,
-                run_diagnostic_started: false,
-                exit_diagnostic_logged: false,
                 pending_interrupts: VecDeque::new(),
                 pending_mmio_read: None,
                 pending_io_read: None,
@@ -116,6 +119,7 @@ pub(in crate::kvm) fn create_vcpu_file(
                 signal_mask: Vec::new(),
                 lapic: vec![0; abi::KVM_X86_LAPIC_STATE_SIZE as usize],
                 vapic_addr: None,
+                operation_lock: VcpuOperationLock::new(),
             }),
         );
         vcpu_file

@@ -44,6 +44,7 @@ const X86_COM1_PORT_BASE: u16 = 0x3f8;
 const X86_COM1_PORT_COUNT: u32 = 8;
 const IA32_TSC: u32 = 0x10;
 const IA32_TSC_ADJUST: u32 = 0x3b;
+const IA32_MISC_FEATURES_ENABLES: u32 = 0x140;
 const IA32_SYSENTER_CS: u32 = 0x174;
 const IA32_SYSENTER_ESP: u32 = 0x175;
 const IA32_SYSENTER_EIP: u32 = 0x176;
@@ -233,6 +234,8 @@ pub struct SvmVcpu {
     tsc_adjust: u64,
     /// Guest-visible IA32_MISC_ENABLE value.
     misc_enable: u64,
+    /// Guest-visible IA32_MISC_FEATURES_ENABLES value.
+    misc_features_enables: u64,
     /// Debug-address registers shared with the host.
     debugregs: crate::debugregs::DebugRegisterState,
     /// Whether HLT exits should be returned to the VMM instead of used as poll points.
@@ -262,6 +265,7 @@ impl SvmVcpu {
             vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
             tsc_adjust: 0,
             misc_enable: 1,
+            misc_features_enables: 0,
             debugregs: crate::debugregs::DebugRegisterState::new(),
             hlt_exiting: false,
             xstate: XState::new(),
@@ -394,6 +398,14 @@ impl SvmVcpu {
         self.msrpm.set_write_intercept(IA32_TSC_ADJUST, true);
         self.msrpm.set_read_intercept(IA32_MISC_ENABLE, true);
         self.msrpm.set_write_intercept(IA32_MISC_ENABLE, true);
+        self.msrpm
+            .set_read_intercept(IA32_MISC_FEATURES_ENABLES, true);
+        self.msrpm
+            .set_write_intercept(IA32_MISC_FEATURES_ENABLES, true);
+        for msr in [IA32_FS_BASE, IA32_GS_BASE, IA32_KERNEL_GS_BASE] {
+            self.msrpm.set_read_intercept(msr, true);
+            self.msrpm.set_write_intercept(msr, true);
+        }
 
         // Keep APIC state in the emulated local APIC instead of exposing the host APIC MSR.
         self.msrpm.set_read_intercept(APIC_BASE_MSR, true);
@@ -647,6 +659,17 @@ impl SvmVcpu {
             Ok(SvmExitCode::MSR) if self.regs().rcx as u32 == IA32_MISC_ENABLE => {
                 Some(self.handle_misc_enable_msr_access(exit_info))
             }
+            Ok(SvmExitCode::MSR) if self.regs().rcx as u32 == IA32_MISC_FEATURES_ENABLES => {
+                Some(self.handle_misc_features_enables_msr_access(exit_info))
+            }
+            Ok(SvmExitCode::MSR)
+                if matches!(
+                    self.regs().rcx as u32,
+                    IA32_FS_BASE | IA32_GS_BASE | IA32_KERNEL_GS_BASE
+                ) =>
+            {
+                Some(self.handle_segment_base_msr_access(exit_info))
+            }
             Ok(SvmExitCode::MSR) if self.regs().rcx as u32 == APIC_BASE_MSR => {
                 Some(self.handle_apic_base_msr_access(exit_info))
             }
@@ -770,6 +793,46 @@ impl SvmVcpu {
             self.write_edx_eax(self.misc_enable);
         } else {
             self.misc_enable = self.read_edx_eax();
+        }
+        self.advance_rip(VM_EXIT_INSTR_LEN_MSR)
+    }
+
+    fn handle_misc_features_enables_msr_access(
+        &mut self,
+        exit_info: &super::vmcb::SvmExitInfo,
+    ) -> AxResult {
+        const VM_EXIT_INSTR_LEN_MSR: u8 = 2;
+
+        if exit_info.exit_info_1 == 0 {
+            self.write_edx_eax(self.misc_features_enables);
+        } else {
+            self.misc_features_enables = self.read_edx_eax();
+        }
+        self.advance_rip(VM_EXIT_INSTR_LEN_MSR)
+    }
+
+    fn handle_segment_base_msr_access(&mut self, exit_info: &super::vmcb::SvmExitInfo) -> AxResult {
+        const VM_EXIT_INSTR_LEN_MSR: u8 = 2;
+
+        let msr = self.regs().rcx as u32;
+        if exit_info.exit_info_1 == 0 {
+            let state = &unsafe { self.vmcb.as_vmcb_ref() }.state;
+            let value = match msr {
+                IA32_FS_BASE => state.fs.base.get(),
+                IA32_GS_BASE => state.gs.base.get(),
+                IA32_KERNEL_GS_BASE => state.kernel_gs_base.get(),
+                _ => unreachable!(),
+            };
+            self.write_edx_eax(value);
+        } else {
+            let value = self.read_edx_eax();
+            let state = &mut unsafe { self.vmcb.as_vmcb() }.state;
+            match msr {
+                IA32_FS_BASE => state.fs.base.set(value),
+                IA32_GS_BASE => state.gs.base.set(value),
+                IA32_KERNEL_GS_BASE => state.kernel_gs_base.set(value),
+                _ => unreachable!(),
+            }
         }
         self.advance_rip(VM_EXIT_INSTR_LEN_MSR)
     }
@@ -1831,19 +1894,9 @@ impl AxArchVCpu for SvmVcpu {
                 }
                 SvmExitCode::NPF => {
                     let info = self.nested_page_fault_info()?;
-                    let write = info.access_flags.contains(MappingFlags::WRITE);
-                    let read = info.access_flags.contains(MappingFlags::READ);
-                    if (read || write)
-                        && let Some((mmio_exit, instr_len)) =
-                            self.decode_npt_mmio_access(&exit_info, info.fault_guest_paddr, write)?
-                    {
-                        self.advance_rip(instr_len)?;
-                        mmio_exit
-                    } else {
-                        AxVCpuExitReason::NestedPageFault {
-                            addr: info.fault_guest_paddr,
-                            access_flags: info.access_flags,
-                        }
+                    AxVCpuExitReason::NestedPageFault {
+                        addr: info.fault_guest_paddr,
+                        access_flags: info.access_flags,
                     }
                 }
                 // SVM has no VMX-style preemption timer. Host interrupts and
@@ -1873,6 +1926,26 @@ impl AxArchVCpu for SvmVcpu {
                 }
             })
         }
+    }
+
+    fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
+        let exit_info = self.exit_info()?;
+        if exit_info.exit_code != Ok(SvmExitCode::NPF) {
+            return Ok(None);
+        }
+        let info = self.nested_page_fault_info()?;
+        let write = info.access_flags.contains(MappingFlags::WRITE);
+        let read = info.access_flags.contains(MappingFlags::READ);
+        if !(read || write) {
+            return Ok(None);
+        }
+        let Some((exit_reason, instruction_len)) =
+            self.decode_npt_mmio_access(&exit_info, info.fault_guest_paddr, write)?
+        else {
+            return Ok(None);
+        };
+        self.advance_rip(instruction_len)?;
+        Ok(Some(exit_reason))
     }
 
     fn bind(&mut self) -> AxResult {
@@ -1905,6 +1978,7 @@ impl AxArchVCpu for SvmVcpu {
             IA32_SYSENTER_ESP => Ok(vmcb.state.sysenter_esp.get()),
             IA32_SYSENTER_EIP => Ok(vmcb.state.sysenter_eip.get()),
             IA32_MISC_ENABLE => Ok(self.misc_enable),
+            IA32_MISC_FEATURES_ENABLES => Ok(self.misc_features_enables),
             IA32_PAT => Ok(vmcb.state.g_pat.get()),
             IA32_EFER => Ok(self.guest_visible_efer()),
             IA32_STAR => Ok(vmcb.state.star.get()),
@@ -1939,6 +2013,10 @@ impl AxArchVCpu for SvmVcpu {
             }
             IA32_MISC_ENABLE => {
                 self.misc_enable = value;
+                Ok(())
+            }
+            IA32_MISC_FEATURES_ENABLES => {
+                self.misc_features_enables = value;
                 Ok(())
             }
             APIC_BASE_MSR => self.vlapic.set_apic_base(value),

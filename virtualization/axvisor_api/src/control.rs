@@ -41,6 +41,9 @@ pub type UserFdRefId = u64;
 /// A host-provided identifier for one pinned userspace page range.
 pub type PinnedUserPagesId = u64;
 
+/// A host-provided identifier for a retained userspace address space.
+pub type UserAddressSpaceId = u64;
+
 /// Host physical pages backing pinned userspace memory.
 pub struct PinnedUserPages {
     /// Host-owned identifier used to release the pinned pages.
@@ -142,15 +145,37 @@ pub trait ControlIf {
     /// and command semantics.
     fn copy_to_user(addr: usize, buf: &[u8]) -> AxResult;
 
-    // Pinned userspace pages.
+    /// Returns whether a signal should interrupt the current userspace control operation.
+    ///
+    /// `blocked_signals` uses the native signal-set representation supplied through
+    /// `KVM_SET_SIGNAL_MASK`. An empty slice asks the host to use the current thread's normal
+    /// signal mask. The host must not consume a deliverable signal when reporting it here.
+    fn current_thread_has_pending_signal(blocked_signals: &[u8]) -> AxResult<bool>;
 
-    /// Pins userspace memory from the current userspace task and returns its backing pages.
+    // Retained userspace address spaces and pinned pages.
+
+    /// Retains the current task's userspace address space.
+    ///
+    /// The returned handle lets a later control operation resolve userspace
+    /// virtual addresses against the address space that registered them,
+    /// even when that operation runs in a different host task.
+    fn retain_current_user_address_space() -> AxResult<UserAddressSpaceId>;
+
+    /// Releases a previously retained userspace address space.
+    fn release_user_address_space(id: UserAddressSpaceId) -> AxResult;
+
+    /// Pins userspace memory from a retained address space and returns its backing pages.
     ///
     /// The host must keep the returned pages stable until [`release_pinned_user_pages`]
     /// is called with the returned handle. The host may implement this by pinning
     /// frames, holding VM object references, or any other mechanism with the same
     /// lifetime semantics.
-    fn pin_user_pages(addr: usize, len: usize, writable: bool) -> AxResult<PinnedUserPages>;
+    fn pin_user_pages(
+        user_address_space: UserAddressSpaceId,
+        addr: usize,
+        len: usize,
+        writable: bool,
+    ) -> AxResult<PinnedUserPages>;
 
     /// Releases a previously pinned userspace page range.
     fn release_pinned_user_pages(id: PinnedUserPagesId) -> AxResult;

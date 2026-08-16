@@ -179,7 +179,13 @@ pub const KVMIO: u32 = 0xae;
 pub const KVM_MAX_VCPUS: usize = 8;
 #[cfg(not(any(target_arch = "riscv64", target_arch = "x86_64")))]
 pub const KVM_MAX_VCPUS: usize = 1;
-pub const KVM_MAX_MEMORY_SLOTS: usize = 32;
+/// Maximum number of userspace memory slots supported by one VM.
+///
+/// KVM users such as gVisor map the host address space as a collection of
+/// physical regions and rely on the legacy KVM baseline of 256 slots.  The
+/// control implementation stores slots dynamically, so this is an ABI limit
+/// rather than a preallocated resource cost.
+pub const KVM_MAX_MEMORY_SLOTS: usize = 256;
 pub const KVM_MAX_CPUID_ENTRIES: usize = 256;
 pub const KVM_MAX_MSR_ENTRIES: usize = 256;
 pub const KVM_VCPU_MMAP_SIZE: usize = 0x1000;
@@ -319,6 +325,7 @@ pub const SUPPORTED_X86_MSRS: &[u32] = &[
     0x0000_0012, // MSR_KVM_SYSTEM_TIME
     0x0000_001b, // IA32_APIC_BASE
     0x0000_003b, // IA32_TSC_ADJUST
+    0x0000_0140, // IA32_MISC_FEATURES_ENABLES
     0x0000_0174, // IA32_SYSENTER_CS
     0x0000_0175, // IA32_SYSENTER_ESP
     0x0000_0176, // IA32_SYSENTER_EIP

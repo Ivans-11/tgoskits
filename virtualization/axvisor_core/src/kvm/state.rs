@@ -23,10 +23,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use axaddrspace::device::AccessWidth;
-use axvisor_api::{control as api_control, task::TaskHandle};
+use axvisor_api::{control as api_control, sync::WaitQueue, task::TaskHandle};
 use axvm::AxVMRef;
 #[cfg(target_arch = "x86_64")]
 pub(in crate::kvm) use kvm_uapi::x86::{PvClockVcpuTimeInfo, PvClockWallClock};
@@ -69,15 +69,13 @@ pub(in crate::kvm) struct VmFileState {
 ///
 /// Some fields, such as FPU/LAPIC/XSAVE blobs, are stored as opaque bytes
 /// because the current control endpoint only needs to preserve KVM ABI payloads.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) vm_file: api_control::ControlFileId,
     pub(in crate::kvm) vcpu_id: u32,
     pub(in crate::kvm) mmap_area: api_control::MmapAreaId,
     pub(in crate::kvm) mp_state: u32,
     pub(in crate::kvm) halted: bool,
-    pub(in crate::kvm) run_diagnostic_started: bool,
-    pub(in crate::kvm) exit_diagnostic_logged: bool,
     pub(in crate::kvm) pending_interrupts: VecDeque<VirtualInterrupt>,
     pub(in crate::kvm) pending_mmio_read: Option<PendingMmioRead>,
     pub(in crate::kvm) pending_io_read: Option<PendingIoRead>,
@@ -90,6 +88,56 @@ pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) signal_mask: Vec<u8>,
     pub(in crate::kvm) lapic: Vec<u8>,
     pub(in crate::kvm) vapic_addr: Option<u64>,
+    pub(in crate::kvm) operation_lock: Arc<VcpuOperationLock>,
+}
+
+/// Serializes stateful ioctls issued through one KVM vCPU file.
+///
+/// KVM userspace may hand a vCPU fd between host threads while interrupting an
+/// earlier `KVM_RUN`.  AxVCpu's architectural state is intentionally owned by
+/// only one host task at a time, so the control endpoint must provide the same
+/// per-vCPU serialization that Linux KVM provides around vCPU ioctls.
+pub(in crate::kvm) struct VcpuOperationLock {
+    held: AtomicBool,
+    wait_queue: WaitQueue,
+}
+
+impl VcpuOperationLock {
+    pub(in crate::kvm) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            held: AtomicBool::new(false),
+            wait_queue: WaitQueue::new(),
+        })
+    }
+
+    pub(in crate::kvm) fn lock(self: &Arc<Self>) -> VcpuOperationGuard {
+        if self
+            .held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            let lock = Arc::clone(self);
+            self.wait_queue.wait_until(move || {
+                lock.held
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+            });
+        }
+        VcpuOperationGuard {
+            lock: Arc::clone(self),
+        }
+    }
+}
+
+pub(in crate::kvm) struct VcpuOperationGuard {
+    lock: Arc<VcpuOperationLock>,
+}
+
+impl Drop for VcpuOperationGuard {
+    fn drop(&mut self) {
+        self.lock.held.store(false, Ordering::Release);
+        self.lock.wait_queue.wake_one();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,13 +164,21 @@ pub(in crate::kvm) enum PendingIoRead {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::kvm) struct MemorySlot {
     pub(in crate::kvm) flags: u32,
     pub(in crate::kvm) guest_phys_addr: u64,
     pub(in crate::kvm) memory_size: u64,
     pub(in crate::kvm) userspace_addr: u64,
+    pub(in crate::kvm) user_address_space: api_control::UserAddressSpaceId,
     pub(in crate::kvm) pinned_pages: api_control::PinnedUserPagesId,
+    pub(in crate::kvm) mapped_pages: BTreeMap<u64, MappedMemoryPage>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::kvm) struct MappedMemoryPage {
+    pub(in crate::kvm) pinned_pages: api_control::PinnedUserPagesId,
+    pub(in crate::kvm) writable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -23,7 +23,7 @@ use axaddrspace::{
     AddrSpace, GuestPhysAddr, HostPhysAddr, HostVirtAddr, MappingFlags, device::AccessWidth,
 };
 use axdevice::{AxVmDeviceConfig, AxVmDevices};
-use axvcpu::{AxVCpu, AxVCpuExitReason};
+use axvcpu::{AxVCpu, AxVCpuExitReason, VCpuState};
 use axvisor_api::vmm::InterruptVector;
 use spin::Once;
 use vm_interrupt::{InterruptControllerRoute, InterruptLineLevel, VmInterruptRouter};
@@ -40,6 +40,9 @@ use crate::{
 };
 
 const VM_ASPACE_BASE: usize = 0x0;
+#[cfg(target_arch = "x86_64")]
+const VM_ASPACE_SIZE: usize = 1 << 48;
+#[cfg(not(target_arch = "x86_64"))]
 const VM_ASPACE_SIZE: usize = 0x7fff_ffff_f000;
 
 /// A vCPU with architecture-independent interface.
@@ -624,30 +627,55 @@ impl AxVM {
     ///
     /// ## Returns
     /// * `AxVCpuExitReason` - the exit reason of the vCPU, wrapped in an `AxResult`.
-    pub fn run_vcpu_raw(&self, vcpu_id: usize) -> AxResult<AxVCpuExitReason> {
+    pub fn run_vcpu_raw<F>(
+        &self,
+        vcpu_id: usize,
+        mut external_page_fault_handler: F,
+    ) -> AxResult<AxVCpuExitReason>
+    where
+        F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
+    {
         let vcpu = self
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
         vcpu.bind()?;
-        vcpu.set_hlt_exiting(true)?;
+        let result = (|| -> AxResult<AxVCpuExitReason> {
+            vcpu.set_hlt_exiting(true)?;
 
-        let exit_reason = loop {
-            let exit_reason = vcpu.run()?;
-            trace!("{exit_reason:#x?}");
-            match exit_reason {
-                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
-                    if self.handle_nested_page_fault(addr, access_flags) {
-                        continue;
+            let exit_reason = loop {
+                let exit_reason = vcpu.run()?;
+                match exit_reason {
+                    AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                        let externally_handled = external_page_fault_handler(addr, access_flags)?;
+                        if externally_handled || self.handle_nested_page_fault(addr, access_flags) {
+                            continue;
+                        }
+                        break vcpu
+                            .decode_nested_page_fault()?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags });
                     }
-                    break AxVCpuExitReason::NestedPageFault { addr, access_flags };
+                    exit_reason => break exit_reason,
                 }
-                exit_reason => break exit_reason,
-            }
-        };
+            };
+            Ok(exit_reason)
+        })();
 
-        vcpu.unbind()?;
-        Ok(exit_reason)
+        let unbind_result = if vcpu.state() == VCpuState::Ready {
+            vcpu.unbind()
+        } else {
+            Ok(())
+        };
+        match result {
+            Ok(exit_reason) => {
+                unbind_result?;
+                Ok(exit_reason)
+            }
+            Err(err) => {
+                let _ = unbind_result;
+                Err(err)
+            }
+        }
     }
 
     /// Run a vCPU and handle AxVisor-owned emulated device exits internally.
@@ -668,6 +696,16 @@ impl AxVM {
         let exit_reason = loop {
             let exit_reason = vcpu.run()?;
             trace!("{exit_reason:#x?}");
+            let exit_reason = match exit_reason {
+                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                    if self.handle_nested_page_fault(addr, access_flags) {
+                        continue;
+                    }
+                    vcpu.decode_nested_page_fault()?
+                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
+                }
+                exit_reason => exit_reason,
+            };
             match exit_reason {
                 AxVCpuExitReason::MmioRead {
                     addr,
@@ -723,12 +761,6 @@ impl AxVM {
                         value as usize,
                     )?;
                     continue;
-                }
-                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
-                    if self.handle_nested_page_fault(addr, access_flags) {
-                        continue;
-                    }
-                    break AxVCpuExitReason::NestedPageFault { addr, access_flags };
                 }
                 exit_reason => break exit_reason,
             }

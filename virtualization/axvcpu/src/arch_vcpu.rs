@@ -88,6 +88,14 @@ pub trait AxArchVCpu: Sized {
     /// hypervisor intervention.
     fn run(&mut self) -> AxResult<AxVCpuExitReason>;
 
+    /// Decodes the current unresolved nested page fault as an MMIO access.
+    ///
+    /// Memory resolvers must be given the first opportunity to satisfy the fault. This method is
+    /// called only after all registered memory backends decline it.
+    fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
+        Ok(None)
+    }
+
     /// Configures whether guest HLT instructions should cause a VM exit.
     fn set_hlt_exiting(&mut self, _enabled: bool) -> AxResult {
         Ok(())

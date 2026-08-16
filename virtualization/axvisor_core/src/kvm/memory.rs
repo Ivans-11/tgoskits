@@ -20,11 +20,11 @@ use axvm::AxVMRef;
 use super::{CONTROL_FILES, ControlFileState};
 use crate::kvm::{
     abi::raw as abi,
-    state::{MemorySlot, UserspaceMemoryRegion, VmFileState},
+    state::{MappedMemoryPage, MemorySlot, UserspaceMemoryRegion, VmFileState},
 };
 
 // UserspaceMemoryRegion is a plain KVM UAPI payload. MemorySlot below adds the
-// host pinning handle and therefore remains local to axvisor_core.
+// host backing state and therefore remains local to axvisor_core.
 
 pub(in crate::kvm) fn read_userspace_memory_region(arg: usize) -> AxResult<UserspaceMemoryRegion> {
     let mut bytes = [0u8; abi::KVM_USERSPACE_MEMORY_REGION_SIZE as usize];
@@ -57,36 +57,196 @@ pub(in crate::kvm) fn set_user_memory_region(
         return Ok(());
     }
 
-    let vm_ref = vm.vm.clone();
-    ensure_no_memory_overlap(vm, region.slot, region.into())?;
-    drop(control_files);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let vm_ref = vm.vm.clone();
+        ensure_no_memory_overlap(vm, region.slot, &region.into())?;
+        drop(control_files);
 
+        let user_address_space = api_control::retain_current_user_address_space()?;
+        let pinned_result = api_control::pin_user_pages(
+            user_address_space,
+            region.userspace_addr as usize,
+            region.memory_size as usize,
+            true,
+        );
+        let release_result = api_control::release_user_address_space(user_address_space);
+        let pinned = match pinned_result {
+            Ok(pinned) => {
+                if let Err(err) = release_result {
+                    let _ = api_control::release_pinned_user_pages(pinned.id);
+                    return Err(err);
+                }
+                pinned
+            }
+            Err(err) => {
+                let _ = release_result;
+                return Err(err);
+            }
+        };
+        let pinned_pages = pinned.id;
+        if let Err(err) = map_pinned_user_memory(&vm_ref, region, &pinned) {
+            let _ = api_control::release_pinned_user_pages(pinned_pages);
+            return Err(err);
+        }
+        let new_slot = MemorySlot {
+            pinned_pages,
+            ..region.into()
+        };
+
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
+            unmap_memory_slot(&vm_ref, new_slot);
+            return ax_err!(NotFound);
+        };
+        if let Err(err) = ensure_no_memory_overlap(vm, region.slot, &new_slot) {
+            unmap_memory_slot(&vm_ref, new_slot);
+            return Err(err);
+        }
+        if let Some(old_slot) = vm.memory_slots.insert(region.slot, new_slot) {
+            unmap_memory_slot(&vm.vm, old_slot);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut new_slot: MemorySlot = region.into();
+        ensure_no_memory_overlap(vm, region.slot, &new_slot)?;
+        drop(control_files);
+
+        new_slot.user_address_space = api_control::retain_current_user_address_space()?;
+
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
+            let _ = api_control::release_user_address_space(new_slot.user_address_space);
+            return ax_err!(NotFound);
+        };
+        if let Err(err) = ensure_no_memory_overlap(vm, region.slot, &new_slot) {
+            let _ = api_control::release_user_address_space(new_slot.user_address_space);
+            return Err(err);
+        }
+        if let Some(old_slot) = vm.memory_slots.remove(&region.slot) {
+            unmap_memory_slot(&vm.vm, old_slot);
+        }
+        vm.memory_slots.insert(region.slot, new_slot);
+        Ok(())
+    }
+}
+
+/// Resolves a KVM userspace-backed guest page after a nested page fault.
+///
+/// KVM memory slots describe an address translation rather than a request to
+/// commit their entire userspace range. In particular, gVisor registers sparse
+/// ranges that are several GiB large. Resolve only the faulting page and retain
+/// its host pin until the slot is removed.
+#[cfg(target_arch = "x86_64")]
+pub(in crate::kvm) fn handle_memory_slot_page_fault(
+    vm_file: api_control::ControlFileId,
+    fault_addr: GuestPhysAddr,
+    access_flags: MappingFlags,
+) -> AxResult<bool> {
+    let fault_gpa = fault_addr.as_usize() as u64;
+    let page_gpa = align_down_to_page(fault_gpa);
+    let snapshot = {
+        let control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get(&vm_file) else {
+            return ax_err!(NotFound);
+        };
+        let Some((&slot_id, slot)) = memory_slot_for_gpa(vm, fault_gpa) else {
+            return Ok(false);
+        };
+        let write_fault = access_flags.contains(MappingFlags::WRITE);
+        if slot
+            .mapped_pages
+            .get(&page_gpa)
+            .is_some_and(|page| !write_fault || page.writable)
+        {
+            return Ok(true);
+        }
+        MemorySlotSnapshot::new(slot_id, slot, page_gpa)?
+    };
+
+    // Match Linux KVM's GUP behavior: a read/execute fault only requires a
+    // readable host page. If the guest later writes it, pin it again with
+    // write access so that the host can perform COW or reject the write.
+    let writable = access_flags.contains(MappingFlags::WRITE);
     let pinned = api_control::pin_user_pages(
-        region.userspace_addr as usize,
-        region.memory_size as usize,
-        true,
+        snapshot.user_address_space,
+        snapshot.page_hva,
+        abi::PAGE_SIZE_USIZE,
+        writable,
     )?;
-    let pinned_pages = pinned.id;
-
-    if let Err(err) = map_pinned_user_memory(&vm_ref, region, &pinned) {
-        let _ = api_control::release_pinned_user_pages(pinned_pages);
-        return Err(err);
+    if pinned.pages.len() != 1 {
+        let _ = api_control::release_pinned_user_pages(pinned.id);
+        return ax_err!(InvalidInput);
     }
-    let new_slot = MemorySlot {
-        pinned_pages,
-        ..region.into()
+    let page_hpa = pinned.pages[0];
+
+    let mut replaced_page = None;
+    let result = {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
+            drop(control_files);
+            let _ = api_control::release_pinned_user_pages(pinned.id);
+            return ax_err!(NotFound);
+        };
+        let Some(slot) = vm.memory_slots.get_mut(&snapshot.slot_id) else {
+            drop(control_files);
+            let _ = api_control::release_pinned_user_pages(pinned.id);
+            return Ok(true);
+        };
+        if !snapshot.matches(slot) {
+            drop(control_files);
+            let _ = api_control::release_pinned_user_pages(pinned.id);
+            return Ok(true);
+        }
+        if slot
+            .mapped_pages
+            .get(&page_gpa)
+            .is_some_and(|page| !writable || page.writable)
+        {
+            drop(control_files);
+            let _ = api_control::release_pinned_user_pages(pinned.id);
+            return Ok(true);
+        }
+
+        if let Some(old_page) = slot.mapped_pages.remove(&page_gpa) {
+            vm.vm
+                .unmap_region(GuestPhysAddr::from(page_gpa as usize), abi::PAGE_SIZE_USIZE)?;
+            replaced_page = Some(old_page);
+        }
+        let mut flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
+        if writable {
+            flags |= MappingFlags::WRITE;
+        }
+        match vm.vm.map_region(
+            GuestPhysAddr::from(page_gpa as usize),
+            HostPhysAddr::from(page_hpa.as_usize()),
+            abi::PAGE_SIZE_USIZE,
+            flags,
+        ) {
+            Ok(()) => {
+                slot.mapped_pages.insert(
+                    page_gpa,
+                    MappedMemoryPage {
+                        pinned_pages: pinned.id,
+                        writable,
+                    },
+                );
+                Ok(true)
+            }
+            Err(err) => Err(err),
+        }
     };
 
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
-        unmap_memory_slot(&vm_ref, new_slot);
-        return ax_err!(NotFound);
-    };
-    ensure_no_memory_overlap(vm, region.slot, new_slot)?;
-    if let Some(old_slot) = vm.memory_slots.insert(region.slot, new_slot) {
-        unmap_memory_slot(&vm.vm, old_slot);
+    if result.is_err() {
+        let _ = api_control::release_pinned_user_pages(pinned.id);
     }
-    Ok(())
+    if let Some(old_page) = replaced_page {
+        let _ = api_control::release_pinned_user_pages(old_page.pinned_pages);
+    }
+    result
 }
 
 fn validate_memory_region(region: UserspaceMemoryRegion) -> AxResult {
@@ -120,11 +280,14 @@ impl From<UserspaceMemoryRegion> for MemorySlot {
             guest_phys_addr: region.guest_phys_addr,
             memory_size: region.memory_size,
             userspace_addr: region.userspace_addr,
+            user_address_space: 0,
             pinned_pages: 0,
+            mapped_pages: Default::default(),
         }
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 fn map_pinned_user_memory(
     vm: &AxVMRef,
     region: UserspaceMemoryRegion,
@@ -158,17 +321,29 @@ fn map_pinned_user_memory(
 }
 
 pub(in crate::kvm) fn unmap_memory_slot(vm: &AxVMRef, slot: MemorySlot) {
-    let page_count = slot.memory_size as usize / abi::PAGE_SIZE_USIZE;
-    for page_index in 0..page_count {
-        let page_gpa = slot.guest_phys_addr as usize + page_index * abi::PAGE_SIZE_USIZE;
-        let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa), abi::PAGE_SIZE_USIZE);
-    }
     if slot.pinned_pages != 0 {
+        let page_count = slot.memory_size as usize / abi::PAGE_SIZE_USIZE;
+        for page_index in 0..page_count {
+            let page_gpa = slot.guest_phys_addr as usize + page_index * abi::PAGE_SIZE_USIZE;
+            let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa), abi::PAGE_SIZE_USIZE);
+        }
         let _ = api_control::release_pinned_user_pages(slot.pinned_pages);
+        if slot.user_address_space != 0 {
+            let _ = api_control::release_user_address_space(slot.user_address_space);
+        }
+        return;
+    }
+
+    for (page_gpa, mapped_page) in slot.mapped_pages {
+        let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa as usize), abi::PAGE_SIZE_USIZE);
+        let _ = api_control::release_pinned_user_pages(mapped_page.pinned_pages);
+    }
+    if slot.user_address_space != 0 {
+        let _ = api_control::release_user_address_space(slot.user_address_space);
     }
 }
 
-fn ensure_no_memory_overlap(vm: &VmFileState, slot_id: u32, new_slot: MemorySlot) -> AxResult {
+fn ensure_no_memory_overlap(vm: &VmFileState, slot_id: u32, new_slot: &MemorySlot) -> AxResult {
     let new_end = new_slot
         .guest_phys_addr
         .checked_add(new_slot.memory_size)
@@ -191,6 +366,63 @@ fn ensure_no_memory_overlap(vm: &VmFileState, slot_id: u32, new_slot: MemorySlot
     Ok(())
 }
 
+#[cfg(target_arch = "x86_64")]
+fn memory_slot_for_gpa(vm: &VmFileState, gpa: u64) -> Option<(&u32, &MemorySlot)> {
+    vm.memory_slots.iter().find(|(_, slot)| {
+        slot.guest_phys_addr <= gpa && gpa < slot.guest_phys_addr + slot.memory_size
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MemorySlotSnapshot {
+    slot_id: u32,
+    page_gpa: u64,
+    flags: u32,
+    guest_phys_addr: u64,
+    memory_size: u64,
+    userspace_addr: u64,
+    user_address_space: api_control::UserAddressSpaceId,
+    page_hva: usize,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl MemorySlotSnapshot {
+    fn new(slot_id: u32, slot: &MemorySlot, page_gpa: u64) -> AxResult<Self> {
+        let page_offset = page_gpa
+            .checked_sub(slot.guest_phys_addr)
+            .ok_or(AxError::InvalidInput)?;
+        let page_hva = slot
+            .userspace_addr
+            .checked_add(page_offset)
+            .and_then(|addr| usize::try_from(addr).ok())
+            .ok_or(AxError::InvalidInput)?;
+        Ok(Self {
+            slot_id,
+            page_gpa,
+            flags: slot.flags,
+            guest_phys_addr: slot.guest_phys_addr,
+            memory_size: slot.memory_size,
+            userspace_addr: slot.userspace_addr,
+            user_address_space: slot.user_address_space,
+            page_hva,
+        })
+    }
+
+    fn matches(self, slot: &MemorySlot) -> bool {
+        self.flags == slot.flags
+            && self.guest_phys_addr == slot.guest_phys_addr
+            && self.memory_size == slot.memory_size
+            && self.userspace_addr == slot.userspace_addr
+            && self.user_address_space == slot.user_address_space
+    }
+}
+
 const fn is_page_aligned(addr: u64) -> bool {
     addr & (abi::PAGE_SIZE - 1) == 0
+}
+
+#[cfg(target_arch = "x86_64")]
+const fn align_down_to_page(addr: u64) -> u64 {
+    addr & !(abi::PAGE_SIZE - 1)
 }

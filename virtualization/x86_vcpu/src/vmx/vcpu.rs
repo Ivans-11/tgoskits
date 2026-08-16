@@ -69,6 +69,7 @@ const X86_COM1_PORT_BASE: u16 = 0x3f8;
 const X86_COM1_PORT_COUNT: u32 = 8;
 const IA32_TSC: u32 = 0x10;
 const IA32_TSC_ADJUST: u32 = 0x3b;
+const IA32_MISC_FEATURES_ENABLES: u32 = 0x140;
 const IA32_APIC_BASE: u32 = 0x1b;
 const IA32_SYSENTER_CS: u32 = 0x174;
 const IA32_SYSENTER_ESP: u32 = 0x175;
@@ -180,6 +181,8 @@ pub struct VmxVcpu {
     tsc_adjust: u64,
     /// Guest-visible IA32_MISC_ENABLE value.
     misc_enable: u64,
+    /// Guest-visible IA32_MISC_FEATURES_ENABLES value.
+    misc_features_enables: u64,
     /// Debug-address registers shared with the host.
     debugregs: crate::debugregs::DebugRegisterState,
     /// Guest and host DR6 values, which are not switched by VMX.
@@ -221,6 +224,7 @@ impl VmxVcpu {
             vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
             tsc_adjust: 0,
             misc_enable: 1,
+            misc_features_enables: 0,
             debugregs: crate::debugregs::DebugRegisterState::new(),
             guest_dr6: 0xffff_0ff0,
             host_dr6: 0,
@@ -574,6 +578,10 @@ impl VmxVcpu {
         self.msr_bitmap.set_write_intercept(IA32_TSC_ADJUST, true);
         self.msr_bitmap.set_read_intercept(IA32_MISC_ENABLE, true);
         self.msr_bitmap.set_write_intercept(IA32_MISC_ENABLE, true);
+        self.msr_bitmap
+            .set_read_intercept(IA32_MISC_FEATURES_ENABLES, true);
+        self.msr_bitmap
+            .set_write_intercept(IA32_MISC_FEATURES_ENABLES, true);
 
         // Intercept IA32_APIC_BASE MSR accesses
         const IA32_APIC_BASE: u32 = 0x1b;
@@ -1099,6 +1107,15 @@ impl VmxVcpu {
                 Some(self.handle_misc_enable_msr_access(msr_rw == VmxExitReason::MSR_WRITE))
             }
             msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE)
+                if self.regs().rcx as u32 == IA32_MISC_FEATURES_ENABLES =>
+            {
+                Some(
+                    self.handle_misc_features_enables_msr_access(
+                        msr_rw == VmxExitReason::MSR_WRITE,
+                    ),
+                )
+            }
+            msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE)
                 if self.regs().rcx as u32 == APIC_BASE_MSR =>
             {
                 Some(self.handle_apic_base_msr_access(msr_rw == VmxExitReason::MSR_WRITE))
@@ -1155,6 +1172,17 @@ impl VmxVcpu {
             self.misc_enable = self.read_edx_eax();
         } else {
             self.write_edx_eax(self.misc_enable);
+        }
+        self.advance_rip(VMEXIT_INSTR_LEN_RDMSR_WRMSR)
+    }
+
+    fn handle_misc_features_enables_msr_access(&mut self, write: bool) -> AxResult {
+        const VMEXIT_INSTR_LEN_RDMSR_WRMSR: u8 = 2;
+
+        if write {
+            self.misc_features_enables = self.read_edx_eax();
+        } else {
+            self.write_edx_eax(self.misc_features_enables);
         }
         self.advance_rip(VMEXIT_INSTR_LEN_RDMSR_WRMSR)
     }
@@ -2039,22 +2067,9 @@ impl AxArchVCpu for VmxVcpu {
                     }
                     VmxExitReason::EPT_VIOLATION => {
                         let info = self.nested_page_fault_info()?;
-                        let write = info.access_flags.contains(MappingFlags::WRITE);
-                        let read = info.access_flags.contains(MappingFlags::READ);
-                        if (read || write)
-                            && let Some(mmio_exit) = self.decode_ept_mmio_access(
-                                &exit_info,
-                                info.fault_guest_paddr,
-                                write,
-                            )
-                        {
-                            self.advance_rip(exit_info.exit_instruction_length as _)?;
-                            mmio_exit
-                        } else {
-                            AxVCpuExitReason::NestedPageFault {
-                                addr: info.fault_guest_paddr,
-                                access_flags: info.access_flags,
-                            }
+                        AxVCpuExitReason::NestedPageFault {
+                            addr: info.fault_guest_paddr,
+                            access_flags: info.access_flags,
                         }
                     }
                     VmxExitReason::MSR_READ => {
@@ -2085,6 +2100,26 @@ impl AxArchVCpu for VmxVcpu {
                 .take_pending_cpu_up_exit()
                 .unwrap_or(AxVCpuExitReason::Nothing)),
         }
+    }
+
+    fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
+        let exit_info = self.exit_info()?;
+        if exit_info.exit_reason != VmxExitReason::EPT_VIOLATION {
+            return Ok(None);
+        }
+        let info = self.nested_page_fault_info()?;
+        let write = info.access_flags.contains(MappingFlags::WRITE);
+        let read = info.access_flags.contains(MappingFlags::READ);
+        if !(read || write) {
+            return Ok(None);
+        }
+        let Some(exit_reason) =
+            self.decode_ept_mmio_access(&exit_info, info.fault_guest_paddr, write)
+        else {
+            return Ok(None);
+        };
+        self.advance_rip(exit_info.exit_instruction_length as _)?;
+        Ok(Some(exit_reason))
     }
 
     fn bind(&mut self) -> AxResult {
@@ -2126,6 +2161,7 @@ impl AxArchVCpu for VmxVcpu {
             IA32_SYSENTER_ESP => Ok(VmcsGuestNW::IA32_SYSENTER_ESP.read()? as u64),
             IA32_SYSENTER_EIP => Ok(VmcsGuestNW::IA32_SYSENTER_EIP.read()? as u64),
             IA32_MISC_ENABLE => Ok(self.misc_enable),
+            IA32_MISC_FEATURES_ENABLES => Ok(self.misc_features_enables),
             IA32_PAT => VmcsGuest64::IA32_PAT.read(),
             IA32_EFER => VmcsGuest64::IA32_EFER.read(),
             IA32_FS_BASE => Ok(VmcsGuestNW::FS_BASE.read()? as u64),
@@ -2151,6 +2187,10 @@ impl AxArchVCpu for VmxVcpu {
             }
             IA32_MISC_ENABLE => {
                 self.misc_enable = value;
+                Ok(())
+            }
+            IA32_MISC_FEATURES_ENABLES => {
+                self.misc_features_enables = value;
                 Ok(())
             }
             IA32_APIC_BASE => self.vlapic.set_apic_base(value),

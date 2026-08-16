@@ -346,6 +346,37 @@ fn enable_cap(arg: usize) -> AxResult<isize> {
 }
 
 fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> AxResult<isize> {
+    // Serialize ioctls that access architectural vCPU state with KVM_RUN so a
+    // vCPU fd can safely be handed between userspace threads. Control-only
+    // operations, especially interrupt injection and MP-state changes, must
+    // remain available while KVM_RUN is blocked in the guest.
+    let _operation_guard = if matches!(
+        cmd,
+        KVM_RUN
+            | KVM_GET_REGS
+            | KVM_SET_REGS
+            | KVM_GET_SREGS
+            | KVM_SET_SREGS
+            | KVM_GET_MSRS
+            | KVM_SET_MSRS
+            | KVM_SET_CPUID2
+            | KVM_GET_ONE_REG
+            | KVM_SET_ONE_REG
+            | KVM_GET_DEBUGREGS
+            | KVM_SET_DEBUGREGS
+    ) {
+        let operation_lock = {
+            let control_files = CONTROL_FILES.lock();
+            let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
+                return ax_err!(NotFound);
+            };
+            vcpu.operation_lock.clone()
+        };
+        Some(operation_lock.lock())
+    } else {
+        None
+    };
+
     match cmd {
         KVM_RUN => run_vcpu_file(control_file),
         KVM_GET_REGS => get_kvm_regs(control_file, arg),

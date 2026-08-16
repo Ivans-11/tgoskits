@@ -224,7 +224,7 @@ mod tests {
         // Invalid transition should fail
         let result = vcpu.transition_state(VCpuState::Running, VCpuState::Free);
         assert!(result.is_err());
-        assert_eq!(vcpu.state(), VCpuState::Invalid);
+        assert_eq!(vcpu.state(), VCpuState::Ready);
     }
 
     #[test]

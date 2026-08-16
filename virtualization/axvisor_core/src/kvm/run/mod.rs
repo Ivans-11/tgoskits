@@ -15,9 +15,6 @@
 use ax_errno::{AxErrorKind, AxResult, ax_err};
 use axvcpu::AxVCpuExitReason;
 use axvisor_api::control as api_control;
-#[cfg(target_arch = "x86_64")]
-use kvm_uapi::x86::KvmRegs;
-
 mod exit;
 #[cfg(target_arch = "riscv64")]
 mod riscv;
@@ -36,6 +33,8 @@ use x86::{
 use x86::{update_vcpu_run_interrupt_state, vcpu_run_irq_window_open};
 
 use super::{CONTROL_FILES, ControlFileState, take_control_vcpu_interrupts};
+#[cfg(target_arch = "x86_64")]
+use crate::kvm::memory::handle_memory_slot_page_fault;
 use crate::{
     kvm::{
         abi::raw as abi,
@@ -48,14 +47,15 @@ use crate::{
 pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) -> AxResult<isize> {
     let (
         vm,
+        vm_file,
         vcpu_id,
         vcpu,
         mp_state,
         pending_mmio_read,
         pending_io_read,
+        signal_mask,
         irqchip_created,
         pit2_created,
-        first_run,
     ) = {
         let mut control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
@@ -67,16 +67,16 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let irqchip_created = vm.irqchip_created;
         let pit2_created = vm.pit2_created;
         let vm = vm.vm.clone();
+        let vm_file = vcpu.vm_file;
         let vcpu_id = vcpu.vcpu_id as usize;
         let mp_state = vcpu.mp_state;
         let pending_mmio_read = vcpu.pending_mmio_read;
         let pending_io_read = vcpu.pending_io_read;
+        let signal_mask = vcpu.signal_mask.clone();
         let Some(ControlFileState::Vcpu(vcpu_file_state)) = control_files.get_mut(&control_file)
         else {
             return ax_err!(NotFound);
         };
-        let first_run = !vcpu_file_state.run_diagnostic_started;
-        vcpu_file_state.run_diagnostic_started = true;
         vcpu_file_state.pending_mmio_read = None;
         vcpu_file_state.pending_io_read = None;
         let Some(vcpu) = vm.vcpu(vcpu_id) else {
@@ -84,32 +84,43 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         };
         (
             vm,
+            vm_file,
             vcpu_id,
             vcpu,
             mp_state,
             pending_mmio_read,
             pending_io_read,
+            signal_mask,
             irqchip_created,
             pit2_created,
-            first_run,
         )
     };
     #[cfg(not(target_arch = "x86_64"))]
-    let _ = (irqchip_created, pit2_created, first_run);
+    let _ = (vm_file, irqchip_created, pit2_created);
 
     let _context_guard = crate::context::bind_current_vcpu_context(vm.id(), vcpu_id);
 
-    #[cfg(target_arch = "x86_64")]
-    if first_run {
-        crate::println!("KVM_RUN enter: vCPU {vcpu_id}, MP state {mp_state}");
-    }
+    // `exit_reason` is only meaningful when KVM_RUN returns successfully. Do
+    // not leave a previous userspace exit visible when this invocation is
+    // interrupted or otherwise returns before entering the guest.
+    write_vcpu_run_u32(
+        control_file,
+        abi::KVM_RUN_EXIT_REASON_OFFSET,
+        abi::KVM_EXIT_UNKNOWN,
+    )?;
 
     if mp_state != abi::KVM_MP_STATE_RUNNABLE {
-        wait_until_vcpu_runnable(control_file)?;
+        wait_until_vcpu_runnable(control_file, &signal_mask)?;
     }
 
     if !vm.running() {
-        vm.boot()?;
+        let boot_result = vm.boot();
+        // Multiple userspace-managed vCPUs may issue their first KVM_RUN
+        // concurrently. Another vCPU completing boot makes this call
+        // successful even if our racing boot attempt observed Running.
+        if !vm.running() {
+            boot_result?;
+        }
     }
 
     if let Some(pending) = pending_mmio_read {
@@ -124,24 +135,33 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         return Err(AxErrorKind::Interrupted.into());
     }
 
-    #[cfg(target_arch = "x86_64")]
-    let mut internal_exit_count = 0u64;
     let exit_reason = loop {
         for interrupt in take_control_vcpu_interrupts(control_file) {
             inject_virtual_interrupt(interrupt, &vcpu)?;
         }
         update_vcpu_run_interrupt_state(control_file, &vcpu)?;
-        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
+        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0
+            || api_control::current_thread_has_pending_signal(&signal_mask)?
+        {
             return Err(AxErrorKind::Interrupted.into());
         }
         if vcpu_run_irq_window_open(control_file)? {
             break abi::KVM_EXIT_IRQ_WINDOW_OPEN;
         }
 
-        let exit_reason = match vm.run_vcpu_raw(vcpu_id) {
+        let exit_reason = match vm.run_vcpu_raw(vcpu_id, |addr, access_flags| {
+            #[cfg(target_arch = "x86_64")]
+            {
+                handle_memory_slot_page_fault(vm_file, addr, access_flags)
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let _ = (addr, access_flags);
+                Ok(false)
+            }
+        }) {
             Ok(exit_reason) => exit_reason,
-            Err(err) => {
-                warn!("KVM_RUN vCPU error: {:?}", err);
+            Err(_) => {
                 write_vcpu_run_u32(
                     control_file,
                     abi::KVM_RUN_INTERNAL_SUBERROR_OFFSET,
@@ -151,14 +171,6 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 break abi::KVM_EXIT_INTERNAL_ERROR;
             }
         };
-
-        #[cfg(target_arch = "x86_64")]
-        if mark_first_exit_logged(control_file)? {
-            crate::println!(
-                "KVM_RUN first exit: vCPU {vcpu_id}, RIP {:#x}, {exit_reason:?}",
-                kvm_vcpu_rip(&vcpu).unwrap_or(u64::MAX)
-            );
-        }
 
         #[cfg(target_arch = "x86_64")]
         if handle_in_kernel_device_exit(&vm, &vcpu, irqchip_created, pit2_created, &exit_reason)? {
@@ -178,17 +190,6 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                     }
                     inject_in_kernel_device_irqs(&vm, &vcpu, irqchip_created, pit2_created);
                 }
-                #[cfg(target_arch = "x86_64")]
-                {
-                    internal_exit_count += 1;
-                    if matches!(internal_exit_count, 1024 | 65_536) {
-                        crate::println!(
-                            "KVM_RUN internal exits: vCPU {vcpu_id}, count {internal_exit_count}, \
-                             RIP {:#x}, {exit_reason:?}",
-                            kvm_vcpu_rip(&vcpu).unwrap_or(u64::MAX)
-                        );
-                    }
-                }
                 axvisor_api::task::yield_now();
             }
             #[cfg(target_arch = "x86_64")]
@@ -198,6 +199,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 &vcpu,
                 irqchip_created,
                 pit2_created,
+                &signal_mask,
             )?,
             AxVCpuExitReason::MmioWrite { addr, width, data }
                 if signal_matching_ioeventfd(
@@ -285,27 +287,14 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
     Ok(0)
 }
 
-#[cfg(target_arch = "x86_64")]
-fn kvm_vcpu_rip(vcpu: &axvm::AxVCpuRef) -> Option<u64> {
-    let mut bytes = [0u8; abi::KVM_X86_REGS_SIZE as usize];
-    vcpu.get_kvm_regs(&mut bytes).ok()?;
-    KvmRegs::decode(&bytes).ok().map(|regs| regs.rip)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn mark_first_exit_logged(control_file: api_control::ControlFileId) -> AxResult<bool> {
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    let first_exit = !vcpu.exit_diagnostic_logged;
-    vcpu.exit_diagnostic_logged = true;
-    Ok(first_exit)
-}
-
-fn wait_until_vcpu_runnable(control_file: api_control::ControlFileId) -> AxResult {
+fn wait_until_vcpu_runnable(
+    control_file: api_control::ControlFileId,
+    signal_mask: &[u8],
+) -> AxResult {
     loop {
-        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
+        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0
+            || api_control::current_thread_has_pending_signal(signal_mask)?
+        {
             return Err(AxErrorKind::Interrupted.into());
         }
         if current_vcpu_mp_state(control_file)? == abi::KVM_MP_STATE_RUNNABLE {
@@ -322,10 +311,13 @@ fn wait_for_halted_vcpu_wakeup(
     vcpu: &axvm::AxVCpuRef,
     irqchip_created: bool,
     pit2_created: bool,
+    signal_mask: &[u8],
 ) -> AxResult {
     set_current_vcpu_halted(control_file, true)?;
     loop {
-        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
+        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0
+            || api_control::current_thread_has_pending_signal(signal_mask)?
+        {
             set_current_vcpu_halted(control_file, false)?;
             return Err(AxErrorKind::Interrupted.into());
         }

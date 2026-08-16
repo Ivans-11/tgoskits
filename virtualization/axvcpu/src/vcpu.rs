@@ -199,7 +199,9 @@ impl<A: AxArchVCpu> AxVCpu<A> {
 
     /// Execute a block with the state of the VCpu transitioned from `from` to `to`. If the current state is not `from`, return an error.
     ///
-    /// The state will be set to [`VCpuState::Invalid`] if an error occurs (including the case that the current state is not `from`).
+    /// A transition body that fails leaves the vCPU in [`VCpuState::Invalid`].
+    /// A caller that merely observes a different state gets `BadState` without
+    /// corrupting the state owned by the active operation.
     ///
     /// The state will be set to `to` if the block is executed successfully.
     pub fn with_state_transition<F, T>(&self, from: VCpuState, to: VCpuState, f: F) -> AxResult<T>
@@ -207,13 +209,15 @@ impl<A: AxArchVCpu> AxVCpu<A> {
         F: FnOnce() -> AxResult<T>,
     {
         {
-            let mut inner_mut = self.inner_mut.lock();
+            let inner_mut = self.inner_mut.lock();
             if inner_mut.state != from {
                 let current_state = inner_mut.state;
-                inner_mut.state = VCpuState::Invalid;
                 return ax_err!(
                     BadState,
-                    format!("VCpu state is not {from:?}, but {current_state:?}")
+                    format!(
+                        "vCPU {} state is not {from:?}, but {current_state:?}",
+                        self.id()
+                    )
                 );
             }
         }
@@ -275,6 +279,11 @@ impl<A: AxArchVCpu> AxVCpu<A> {
         self.manipulate_arch_vcpu(VCpuState::Running, VCpuState::Ready, |arch_vcpu| {
             arch_vcpu.run()
         })
+    }
+
+    /// Decodes an unresolved nested page fault while this vCPU remains bound.
+    pub fn decode_nested_page_fault(&self) -> AxResult<Option<AxVCpuExitReason>> {
+        self.with_current_cpu_set(|| self.get_arch_vcpu().decode_nested_page_fault())
     }
 
     /// Configures whether guest HLT instructions should cause a VM exit.
