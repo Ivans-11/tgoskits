@@ -37,6 +37,16 @@ impl Cru {
     /// pixel clock (otherwise the mux selects a dead parent). The 148.5 MHz rate
     /// itself is set in the PHY, not here.
     pub fn vop_hdmi0_clocks_setup(&mut self) {
+        use super::consts::clk_sel110;
+
+        // CPLL (1.5 GHz) / 2 = 750 MHz, matching Linux's aclk_vop rate.
+        self.clrsetreg(
+            clksel_con(110),
+            clk_sel110::ACLK_VOP_ROOT_SEL_MASK | clk_sel110::ACLK_VOP_ROOT_DIV_MASK,
+            (clk_sel110::ACLK_VOP_ROOT_SEL_CPLL << clk_sel110::ACLK_VOP_ROOT_SEL_SHIFT)
+                | (1 << clk_sel110::ACLK_VOP_ROOT_DIV_SHIFT),
+        );
+
         // Route DCLK_VOP0 to clk_hdmiphy_pixel0.
         self.clrsetreg(
             clksel_con(112),
