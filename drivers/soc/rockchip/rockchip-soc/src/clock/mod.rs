@@ -137,7 +137,7 @@ impl Cru {
     pub fn vop_hdmi0_clocks_setup(&mut self) {
         match self {
             Self::Rk3588(cru) => cru.vop_hdmi0_clocks_setup(),
-            Self::Rk3568(_) => {}
+            Self::Rk3568(_) | Self::Rk3576(_) => {}
         }
     }
 }
