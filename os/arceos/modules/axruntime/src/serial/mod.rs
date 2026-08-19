@@ -10,7 +10,10 @@ mod state;
 mod worker;
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use ax_driver::serial::SerialDevice;
 pub use ax_driver::serial::SerialDeviceInfo;
@@ -245,6 +248,16 @@ impl SerialTxSender {
         self.shared.started().then_some(()).ok_or(AxError::BadState)
     }
 
+    pub fn wait_writable_timeout(&self, timeout: Duration) -> AxResult {
+        self.shared.ensure_started()?;
+        if self.shared.tx_progress.wait_timeout_until(timeout, || {
+            self.shared.ingress.write_room() > 0 || !self.shared.started()
+        }) {
+            return Err(AxError::TimedOut);
+        }
+        self.shared.started().then_some(()).ok_or(AxError::BadState)
+    }
+
     /// Writes every raw byte, sleeping only when the bounded runtime queue is full.
     pub fn write_all(&self, bytes: &[u8]) -> AxResult<usize> {
         self.write_all_with(bytes, |shared, remaining| {
@@ -284,6 +297,20 @@ impl SerialTxSender {
         self.shared
             .tx_progress
             .wait_until(|| self.shared.ingress.is_idle() || !self.shared.started());
+        if self.shared.ingress.is_idle() {
+            Ok(())
+        } else {
+            Err(AxError::BadState)
+        }
+    }
+
+    pub fn wait_idle_timeout(&self, timeout: Duration) -> AxResult {
+        self.shared.ensure_started()?;
+        if self.shared.tx_progress.wait_timeout_until(timeout, || {
+            self.shared.ingress.is_idle() || !self.shared.started()
+        }) {
+            return Err(AxError::TimedOut);
+        }
         if self.shared.ingress.is_idle() {
             Ok(())
         } else {

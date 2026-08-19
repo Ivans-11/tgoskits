@@ -1,5 +1,8 @@
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use ax_errno::{AxError, AxResult};
 use ax_lazyinit::LazyLock;
@@ -28,6 +31,7 @@ pub type SerialTtyDriver = Tty<SerialReader, SerialWriter>;
 const SERIAL_RX_DRAIN_CHUNK: usize = 256;
 const SERIAL_SYNC_ECHO_LIMIT: usize = 256;
 const SERIAL_DEFAULT_BAUDRATE: u32 = 115_200;
+const SERIAL_TX_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct SerialTtyEntry {
     number: usize,
@@ -290,7 +294,11 @@ impl SerialBackend {
     fn drain_tx(&self) -> AxResult<()> {
         self.ensure_started()?;
         let _guard = self.output_lock.lock();
-        self.tx.wait_idle()
+        let result = self.tx.wait_idle_timeout(SERIAL_TX_WAIT_TIMEOUT);
+        if matches!(result, Err(AxError::TimedOut)) {
+            warn!("{} UART TX drain timed out", self.tty_name);
+        }
+        result
     }
 
     fn drain_rx(&self, out: &mut [RxItem]) -> usize {
@@ -379,12 +387,29 @@ impl TtyWrite for SerialWriter {
             return;
         }
         let _guard = self.backend.output_lock.lock();
+        let deadline =
+            ax_runtime::hal::time::monotonic_time().saturating_add(SERIAL_TX_WAIT_TIMEOUT);
         let mut written = 0;
         while written < buf.len() {
             match self.backend.tx.try_write(&buf[written..]) {
                 Ok(count) => written += count,
                 Err(AxError::WouldBlock) => {
-                    if self.backend.tx.wait_writable().is_err() {
+                    let remaining =
+                        deadline.saturating_sub(ax_runtime::hal::time::monotonic_time());
+                    if remaining.is_zero() {
+                        warn!(
+                            "{} UART TX queue did not make progress",
+                            self.backend.tty_name
+                        );
+                        return;
+                    }
+                    if let Err(err) = self.backend.tx.wait_writable_timeout(remaining) {
+                        if matches!(err, AxError::TimedOut) {
+                            warn!(
+                                "{} UART TX queue did not make progress",
+                                self.backend.tty_name
+                            );
+                        }
                         return;
                     }
                 }
