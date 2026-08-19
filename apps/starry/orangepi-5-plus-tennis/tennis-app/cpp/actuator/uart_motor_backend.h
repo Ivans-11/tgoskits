@@ -25,13 +25,17 @@ public:
 private:
     bool send_command(uint8_t command, const uint8_t *payload, uint8_t size,
                       bool expect_ack = true);
+    bool send_command_locked(uint8_t command, const uint8_t *payload,
+                             uint8_t size, bool expect_ack);
     bool receive_ack(int timeout_ms);
     bool receive_frame(uint8_t &command, uint8_t *payload, uint8_t &size,
                        int timeout_ms);
     bool stop();
 
     SerialDevice serial_;
-    std::mutex write_mutex_;
+    // RPM reads and drive commands share one request/response stream, so the
+    // complete transaction must be serialized rather than only the write.
+    std::mutex transaction_mutex_;
     bool ready_ = false;
 };
 

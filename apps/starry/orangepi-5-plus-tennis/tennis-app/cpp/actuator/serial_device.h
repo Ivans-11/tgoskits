@@ -17,9 +17,9 @@ public:
 
     bool open(const std::string &path, int baudrate = 115200,
               bool nonblocking = true);
-    bool write_all(const void *data, size_t size);
+    bool write_all(const void *data, size_t size, int timeout_ms = 1000);
     bool read_byte(uint8_t &byte, int timeout_ms);
-    bool drain();
+    bool drain(int timeout_ms = 1000);
     void flush();
     void flush_input();
     bool is_open() const { return fd_ >= 0; }

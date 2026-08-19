@@ -102,7 +102,9 @@ bool JpuDecoder::init() {
     // Block on input-queue space; block (bounded) on output so decode_get_frame
     // returns the instant the frame is ready (no busy-wait). 50ms ceiling bounds
     // a truncated/garbage JPEG that yields no frame (-> MPP_ERR_TIMEOUT, dropped).
-    RK_S64 in_to = -1;
+    // Keep malformed packets or lost worker wakeups from blocking the live
+    // watchdog forever while waiting for input-queue space.
+    RK_S64 in_to = 50; // ms
     RK_S64 out_to = 50; // ms
     mpi->control(ctx, MPP_SET_INPUT_TIMEOUT, &in_to);
     mpi->control(ctx, MPP_SET_OUTPUT_TIMEOUT, &out_to);

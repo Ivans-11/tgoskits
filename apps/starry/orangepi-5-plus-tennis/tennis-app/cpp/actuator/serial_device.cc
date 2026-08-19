@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "serial_device.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -71,9 +73,11 @@ bool SerialDevice::open(const std::string &path, int baudrate,
     return true;
 }
 
-bool SerialDevice::write_all(const void *data, size_t size) {
+bool SerialDevice::write_all(const void *data, size_t size, int timeout_ms) {
     const auto *bytes = static_cast<const uint8_t *>(data);
     size_t offset = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms);
     while (offset < size) {
         const ssize_t written = ::write(fd_, bytes + offset, size - offset);
         if (written > 0) {
@@ -82,12 +86,32 @@ bool SerialDevice::write_all(const void *data, size_t size) {
         }
         if (written < 0 && errno == EINTR) continue;
         if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                errno = ETIMEDOUT;
+                std::fprintf(stderr, "TENNIS_ERROR serial write failed: %s\n",
+                             std::strerror(errno));
+                return false;
+            }
             fd_set writefds;
             FD_ZERO(&writefds);
             FD_SET(fd_, &writefds);
-            timeval timeout{0, 500000};
-            if (select(fd_ + 1, nullptr, &writefds, nullptr, &timeout) > 0)
+            const auto wait_ms = std::min<int64_t>(remaining.count(), 100);
+            timeval timeout{static_cast<long>(wait_ms / 1000),
+                            static_cast<long>((wait_ms % 1000) * 1000)};
+            const int ready =
+                select(fd_ + 1, nullptr, &writefds, nullptr, &timeout);
+            if (ready > 0)
                 continue;
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0) {
+                std::fprintf(stderr, "TENNIS_ERROR serial write failed: %s\n",
+                             std::strerror(errno));
+                return false;
+            }
+            continue;
         }
         std::fprintf(stderr, "TENNIS_ERROR serial write failed: %s\n",
                      std::strerror(errno));
@@ -108,8 +132,12 @@ bool SerialDevice::read_byte(uint8_t &byte, int timeout_ms) {
     }
 }
 
-bool SerialDevice::drain() {
-    return tcdrain(fd_) == 0;
+bool SerialDevice::drain(int timeout_ms) {
+    // Writes enter the UART TX queue in order. tcdrain() is not cancellable on
+    // StarryOS, so a lost TX interrupt could otherwise park the control thread
+    // forever. write_all() already bounds enqueue time.
+    (void)timeout_ms;
+    return fd_ >= 0;
 }
 
 void SerialDevice::flush() {

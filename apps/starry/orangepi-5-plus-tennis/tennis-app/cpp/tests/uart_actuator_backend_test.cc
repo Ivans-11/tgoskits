@@ -186,7 +186,7 @@ bool motor_rpm_protocol_matches_esp32_controller() {
                   "RPM query must use command 0x20 with both motors");
 }
 
-bool motor_drive_can_preempt_an_rpm_wait() {
+bool motor_transactions_are_not_interleaved() {
     PtyPair pty;
     if (!expect(pty.master >= 0, "open concurrent motor PTY")) return false;
 
@@ -224,16 +224,6 @@ bool motor_drive_can_preempt_an_rpm_wait() {
         }
         stage_changed.notify_one();
 
-        // Hold the telemetry response until the control path has sent a new
-        // drive frame. The RPM worker must not own the UART write path while it
-        // waits for these responses.
-        std::vector<uint8_t> drive_command;
-        if (!read_frame(pty.master, drive_command)) {
-            emulator_error = "drive command was blocked behind RPM response";
-            return;
-        }
-        received.push_back(drive_command);
-
         const auto left = frame(0x90, {0, 0, 36});
         const auto right = frame(0x90, {1, 0, 35});
         if (write(pty.master, left.data(), left.size()) !=
@@ -243,6 +233,15 @@ bool motor_drive_can_preempt_an_rpm_wait() {
             emulator_error = "failed to write concurrent RPM data";
             return;
         }
+
+        // A drive frame may use the shared protocol stream only after both RPM
+        // responses complete the telemetry transaction.
+        std::vector<uint8_t> drive_command;
+        if (!read_frame(pty.master, drive_command)) {
+            emulator_error = "timed out reading serialized drive command";
+            return;
+        }
+        received.push_back(drive_command);
 
         std::vector<uint8_t> stop_command;
         if (!read_frame(pty.master, stop_command)) {
@@ -264,8 +263,12 @@ bool motor_drive_can_preempt_an_rpm_wait() {
         std::thread rpm_reader([&] { rpm_result = motor.read_wheel_rpm(rpm); });
         {
             std::unique_lock<std::mutex> lock(stage_mutex);
-            (void)stage_changed.wait_for(lock, std::chrono::seconds(2),
-                                         [&] { return rpm_request_seen; });
+            if (!stage_changed.wait_for(lock, std::chrono::seconds(2),
+                                        [&] { return rpm_request_seen; })) {
+                std::fprintf(stderr, "FAIL: RPM request was not sent\n");
+                rpm_reader.join();
+                return false;
+            }
         }
         drive_succeeded = motor.drive(30, -30);
         rpm_reader.join();
@@ -273,7 +276,8 @@ bool motor_drive_can_preempt_an_rpm_wait() {
     emulator.join();
 
     if (!expect(emulator_error.empty(), emulator_error.c_str())) return false;
-    if (!expect(drive_succeeded, "drive succeeds during RPM wait")) return false;
+    if (!expect(drive_succeeded, "drive succeeds after RPM transaction"))
+        return false;
     if (!expect(rpm_result == tennis::TelemetryResult::Sample,
                 "RPM query completes after concurrent drive"))
         return false;
@@ -293,12 +297,12 @@ bool arm_protocol_matches_calibrated_sequence() {
     if (!expect(pty.master >= 0, "open arm PTY")) return false;
 
     const std::string expected =
-        "#000P1648T0500!#001P1351T0500!#002P1981T0500!"
+        "#000P1648T0500!#001P1374T0500!#002P1981T0500!"
         "#002P1981T0300!"
         "#000P2203T0300!#001P1166T0300!#002P1981T0300!"
         "#002P1403T0300!"
         "#002PRAD!"
-        "#000P1648T0300!#001P1351T0300!#002P1403T0300!"
+        "#000P1648T0300!#001P1374T0300!#002P1403T0300!"
         "#002PRAD!"
         "#002P1981T0500!";
     const std::string query = "#002PRAD!";
@@ -327,7 +331,7 @@ bool arm_protocol_matches_calibrated_sequence() {
     tennis::GrabResult grab_result = tennis::GrabResult::Error;
     bool calls_succeeded = true;
     {
-        tennis::UartArmBackend arm(pty.device, 300);
+        tennis::UartArmBackend arm(pty.device, 300, 118);
         calls_succeeded = arm.is_ready() && arm.ready();
         grab_result = arm.grab();
         calls_succeeded = calls_succeeded && arm.release();
@@ -404,7 +408,7 @@ bool arm_ball_lost_after_lift_is_reported() {
 int main() {
     if (!motor_protocol_matches_esp32_controller()) return 1;
     if (!motor_rpm_protocol_matches_esp32_controller()) return 1;
-    if (!motor_drive_can_preempt_an_rpm_wait()) return 1;
+    if (!motor_transactions_are_not_interleaved()) return 1;
     if (!arm_protocol_matches_calibrated_sequence()) return 1;
     if (!arm_ball_lost_after_lift_is_reported()) return 1;
     return 0;
