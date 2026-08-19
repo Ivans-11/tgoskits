@@ -186,6 +186,7 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--arm-backend <virtual\|uart>` | `virtual` | Arm backend |
 | `--arm-device <path>` | `/dev/ttyS3` | ZP10S UART path |
 | `--grab-motion-ms <n>` | `300` | Servo movement time for each grab step |
+| `--arm-ready-servo1 <n>` | `115` | Servo1 angle for the ready and lifted-ball pose |
 | `--motor-min-speed <n>` | `20` | Minimum common translation speed before steering bias |
 | `--area-far <f>` | `0.20` | Ball area ratio below which far approach speed is used |
 | `--area-stop <f>` | `0.28` | Ball area ratio that stops the approach |

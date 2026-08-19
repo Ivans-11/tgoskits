@@ -161,6 +161,7 @@ struct Config {
     int brake_hold_ms = 200;
     int grab_settle_ms = 100;
     int grab_motion_ms = 300;
+    int arm_ready_servo1 = 115;
     int release_settle_ms = 500;
     int deposit_reverse_speed = 30;
     int deposit_reverse_ms = 500;

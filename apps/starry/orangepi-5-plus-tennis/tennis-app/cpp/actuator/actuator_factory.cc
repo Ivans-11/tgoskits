@@ -89,7 +89,7 @@ bool make_actuators(const Options &options, Actuators &actuators) {
         const std::string device =
             options.arm_device.empty() ? "/dev/ttyS3" : options.arm_device;
         auto backend = std::make_unique<UartArmBackend>(
-            device, options.cfg.grab_motion_ms);
+            device, options.cfg.grab_motion_ms, options.cfg.arm_ready_servo1);
         if (!backend->is_ready()) return false;
         actuators.arm = std::move(backend);
     } else {

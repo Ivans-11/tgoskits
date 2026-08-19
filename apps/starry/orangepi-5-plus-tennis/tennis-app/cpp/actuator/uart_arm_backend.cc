@@ -23,8 +23,10 @@ void wait_for_step() {
 
 } // namespace
 
-UartArmBackend::UartArmBackend(const std::string &device, int grab_motion_ms)
-    : grab_motion_ms_(std::clamp(grab_motion_ms, 1, 9999)) {
+UartArmBackend::UartArmBackend(const std::string &device, int grab_motion_ms,
+                               int ready_servo1)
+    : grab_motion_ms_(std::clamp(grab_motion_ms, 1, 9999)),
+      ready_servo1_(std::clamp(ready_servo1, 0, 270)) {
     ready_ = serial_.open(device, 115200, false);
 }
 
@@ -109,7 +111,7 @@ GrabResult UartArmBackend::grab() {
 
     // Lift directly to the bucket pose. The second sample verifies that a ball
     // detected at ground level remains held after lifting.
-    if (!set_pose(155.0f, 115.0f, kClosed, grab_motion_ms_))
+    if (!set_pose(155.0f, ready_servo1_, kClosed, grab_motion_ms_))
         return GrabResult::Error;
     wait_for_step();
     int lifted_pulse = 0;
@@ -138,7 +140,7 @@ bool UartArmBackend::release() {
 }
 
 bool UartArmBackend::ready() {
-    if (!set_pose(155.0f, 115.0f, kOpen)) return false;
+    if (!set_pose(155.0f, ready_servo1_, kOpen)) return false;
     wait_for_step();
     return true;
 }

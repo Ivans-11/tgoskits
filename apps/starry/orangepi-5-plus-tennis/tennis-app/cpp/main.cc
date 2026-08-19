@@ -246,6 +246,7 @@ static void usage(const char *prog) {
         "  --arm-backend <kind>     virtual|uart (default virtual)\n"
         "  --arm-device <path>      arm UART device (default /dev/ttyS3)\n"
         "  --grab-motion-ms <n>     servo movement time during grab (default 300)\n"
+        "  --arm-ready-servo1 <n>   servo1 angle for ready/lift pose (default 115)\n"
         "  --motor-min-speed <n>    translation floor before steering bias (default 20)\n"
         "  --area-far <f>           ball area ratio below which far speed is used\n"
         "  --area-stop <f>          ball area ratio that stops the approach\n"
@@ -341,6 +342,8 @@ static bool apply_config_value(Options &o, std::string key,
     else if (key == "arm-device") o.arm_device = value;
     else if (key == "grab-motion-ms")
         o.cfg.grab_motion_ms = std::atoi(value.c_str());
+    else if (key == "arm-ready-servo1")
+        o.cfg.arm_ready_servo1 = std::atoi(value.c_str());
     else if (key == "profile-csv") o.profile_csv = value;
     else if (key == "infer-affinity") o.infer_affinity = value;
     else if (key == "validate-list") o.validate_list = value;
@@ -529,6 +532,10 @@ static int parse_options(int argc, char **argv, Options &o) {
             o.cfg.grab_motion_ms = std::atoi(v.c_str());
             continue;
         }
+        if (arg_val(argc, argv, i, "--arm-ready-servo1", v)) {
+            o.cfg.arm_ready_servo1 = std::atoi(v.c_str());
+            continue;
+        }
         if (arg_val(argc, argv, i, "--profile-csv", o.profile_csv)) continue;
         if (arg_val(argc, argv, i, "--infer-affinity", o.infer_affinity)) continue;
         if (arg_val(argc, argv, i, "--validate-list", o.validate_list)) continue;
@@ -610,6 +617,11 @@ static int parse_options(int argc, char **argv, Options &o) {
     if (o.cfg.grab_motion_ms < 1 || o.cfg.grab_motion_ms > 9999) {
         std::fprintf(stderr,
                      "TENNIS_ERROR --grab-motion-ms must be in [1,9999]\n");
+        return 2;
+    }
+    if (o.cfg.arm_ready_servo1 < 0 || o.cfg.arm_ready_servo1 > 270) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR --arm-ready-servo1 must be in [0,270]\n");
         return 2;
     }
     if (o.cfg.area_far <= 0.0f || o.cfg.area_far >= o.cfg.area_stop ||

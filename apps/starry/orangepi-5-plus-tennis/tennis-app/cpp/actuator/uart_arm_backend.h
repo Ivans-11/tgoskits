@@ -10,7 +10,8 @@ namespace tennis {
 
 class UartArmBackend final : public ArmBackend {
 public:
-    UartArmBackend(const std::string &device, int grab_motion_ms = 300);
+    UartArmBackend(const std::string &device, int grab_motion_ms = 300,
+                   int ready_servo1 = 115);
 
     bool is_ready() const { return ready_; }
     GrabResult grab() override;
@@ -26,6 +27,7 @@ private:
 
     SerialDevice serial_;
     int grab_motion_ms_;
+    int ready_servo1_;
     bool ready_ = false;
 };
 
