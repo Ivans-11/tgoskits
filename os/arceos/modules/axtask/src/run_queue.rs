@@ -66,6 +66,15 @@ static mut RUN_QUEUES: [MaybeUninit<NonNull<AxRunQueue>>; crate::build_info::CPU
 #[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
 const ARRAY_REPEAT_VALUE: MaybeUninit<NonNull<AxRunQueue>> = MaybeUninit::uninit();
 
+/// Bitmask of CPUs whose run queues have completed initialization.
+///
+/// New-task placement must not select a CPU before its run queue pointer has
+/// been published in `RUN_QUEUES`; otherwise an early-boot spawn could access
+/// an uninitialized slot. Each CPU sets its bit after initializing its queue.
+#[cfg(feature = "smp")]
+static RUN_QUEUE_ONLINE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// Per-CPU count of scheduler ticks during which a non-idle task was running, for
 /// the ondemand cpufreq governor's load metric. Bumped once per timer tick in
 /// [`AxRunQueue::scheduler_timer_tick`] when the current task is not the idle task
@@ -126,14 +135,22 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
 
     assert!(!cpumask.is_empty(), "No available CPU for task execution");
 
-    // Round-robin selection of the run queue index.
-    loop {
+    // Round-robin over CPUs allowed by the task affinity and whose run queues
+    // have already been initialized. The online check is needed during early
+    // SMP boot, when secondary CPUs may not have published their queue yet.
+    let online = RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire);
+    for _ in 0..crate::build_info::CPU_CAPACITY {
         let index =
             RUN_QUEUE_INDEX.fetch_add(1, Ordering::SeqCst) % crate::build_info::CPU_CAPACITY;
-        if cpumask.get(index) {
+        if cpumask.get(index) && (online & (1 << index)) != 0 {
             return index;
         }
     }
+
+    // If no allowed queue is online yet, the current CPU's queue is known to
+    // be initialized. The normal affinity migration path will correct the
+    // placement later if the current CPU is not in the task's mask.
+    this_cpu_id()
 }
 
 /// Retrieves the permanent pointer to a run queue by logical CPU index.
@@ -553,14 +570,9 @@ pub(crate) fn select_run_queue<G: GuardState>(task: &AxTaskRef) -> AxRunQueueRef
     }
     #[cfg(feature = "smp")]
     {
-        // When SMP is enabled, prefer the current CPU to keep the task's
-        // cache warm. Fall back to round-robin only when affinity forbids it.
-        let current_cpu = this_cpu_id();
-        let index = if task.cpumask().get(current_cpu) {
-            current_cpu
-        } else {
-            select_run_queue_index(task.cpumask())
-        };
+        // Select an initialized run queue in round-robin order from the CPUs
+        // allowed by the task's affinity mask.
+        let index = select_run_queue_index(task.cpumask());
         AxRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -1452,6 +1464,8 @@ pub(crate) fn init() {
     unsafe {
         RUN_QUEUES[cpu_id].write(run_queue);
     }
+    #[cfg(feature = "smp")]
+    RUN_QUEUE_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
 }
 
 pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
@@ -1496,6 +1510,8 @@ pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
     unsafe {
         RUN_QUEUES[cpu_id].write(run_queue);
     }
+    #[cfg(feature = "smp")]
+    RUN_QUEUE_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
 }
 
 #[cfg(axtest)]

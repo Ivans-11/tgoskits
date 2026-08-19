@@ -11,6 +11,7 @@ features = [
   "ax-driver/rockchip-sdhci",
   "ax-driver/rockchip-dwmmc",
   "ax-driver/rk3588-cpufreq",
+  "fat",
   "jpeg",
   "rknpu",
   "rga",
