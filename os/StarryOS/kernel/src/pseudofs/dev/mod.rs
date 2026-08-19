@@ -16,6 +16,8 @@ pub mod ion;
 mod kmsg;
 #[cfg(feature = "k230-kpu")]
 mod kpu;
+#[cfg(feature = "rk3588-leds")]
+pub(super) mod led;
 #[cfg(feature = "dev-log")]
 mod log;
 mod r#loop;

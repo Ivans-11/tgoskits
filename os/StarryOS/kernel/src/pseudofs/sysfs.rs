@@ -199,11 +199,12 @@ struct ClassDir {
 
 impl SimpleDirOps for ClassDir {
     fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+        let mut names = Vec::from(["drm", "graphics", "input"]);
+        #[cfg(feature = "rk3588-leds")]
+        names.push("leds");
         #[cfg(any(feature = "sg2002", feature = "rk3588-pwm"))]
-        let names: &'static [&'static str] = &["drm", "graphics", "input", "pwm"];
-        #[cfg(not(any(feature = "sg2002", feature = "rk3588-pwm")))]
-        let names: &'static [&'static str] = &["drm", "graphics", "input"];
-        Box::new(names.iter().copied().map(Cow::Borrowed))
+        names.push("pwm");
+        Box::new(names.into_iter().map(Cow::Borrowed))
     }
 
     fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
@@ -218,6 +219,8 @@ impl SimpleDirOps for ClassDir {
                 Arc::new(ClassSubsystemDir::new(fs, "graphics", &["fb0"])),
             ),
             "input" => SimpleDir::new_maker(fs.clone(), Arc::new(InputClassDir { fs })),
+            #[cfg(feature = "rk3588-leds")]
+            "leds" => crate::pseudofs::dev::led::led_class_dir_maker(fs),
             #[cfg(any(feature = "sg2002", feature = "rk3588-pwm"))]
             "pwm" => crate::pseudofs::dev::pwm::pwm_class_dir_maker(fs),
             _ => return Err(VfsError::NotFound),
