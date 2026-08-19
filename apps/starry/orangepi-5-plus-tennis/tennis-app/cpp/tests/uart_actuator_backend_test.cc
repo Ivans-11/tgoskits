@@ -294,11 +294,11 @@ bool arm_protocol_matches_calibrated_sequence() {
 
     const std::string expected =
         "#000P1648T0500!#001P1351T0500!#002P1981T0500!"
-        "#002P1981T0500!"
-        "#000P2203T0500!#001P1166T0500!#002P1981T0500!"
-        "#002P1403T0500!"
+        "#002P1981T0300!"
+        "#000P2203T0300!#001P1166T0300!#002P1981T0300!"
+        "#002P1403T0300!"
         "#002PRAD!"
-        "#000P1648T0500!#001P1351T0500!#002P1403T0500!"
+        "#000P1648T0300!#001P1351T0300!#002P1403T0300!"
         "#002PRAD!"
         "#002P1981T0500!";
     const std::string query = "#002PRAD!";
@@ -327,7 +327,7 @@ bool arm_protocol_matches_calibrated_sequence() {
     tennis::GrabResult grab_result = tennis::GrabResult::Error;
     bool calls_succeeded = true;
     {
-        tennis::UartArmBackend arm(pty.device);
+        tennis::UartArmBackend arm(pty.device, 300);
         calls_succeeded = arm.is_ready() && arm.ready();
         grab_result = arm.grab();
         calls_succeeded = calls_succeeded && arm.release();
@@ -349,13 +349,13 @@ bool arm_ball_lost_after_lift_is_reported() {
     if (!expect(pty.master >= 0, "open lost-ball arm PTY")) return false;
 
     const std::string expected =
-        "#002P1981T0500!"
-        "#000P2203T0500!#001P1166T0500!#002P1981T0500!"
-        "#002P1403T0500!"
+        "#002P1981T0300!"
+        "#000P2203T0300!#001P1166T0300!#002P1981T0300!"
+        "#002P1403T0300!"
         "#002PRAD!"
-        "#000P1648T0500!#001P1351T0500!#002P1403T0500!"
+        "#000P1648T0300!#001P1351T0300!#002P1403T0300!"
         "#002PRAD!"
-        "#002P1981T0500!";
+        "#002P1981T0300!";
     const std::string query = "#002PRAD!";
     const std::string held_position = "#002P1647!";
     const std::string empty_position = "#002P1416!";

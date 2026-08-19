@@ -23,7 +23,8 @@ void wait_for_step() {
 
 } // namespace
 
-UartArmBackend::UartArmBackend(const std::string &device) {
+UartArmBackend::UartArmBackend(const std::string &device, int grab_motion_ms)
+    : grab_motion_ms_(std::clamp(grab_motion_ms, 1, 9999)) {
     ready_ = serial_.open(device, 115200, false);
 }
 
@@ -95,11 +96,12 @@ bool UartArmBackend::set_pose(float servo0, float servo1, float servo2,
 }
 
 GrabResult UartArmBackend::grab() {
-    if (!set_angle(2, kOpen)) return GrabResult::Error;
+    if (!set_angle(2, kOpen, grab_motion_ms_)) return GrabResult::Error;
     wait_for_step();
-    if (!set_pose(230.0f, 90.0f, kOpen)) return GrabResult::Error;
+    if (!set_pose(230.0f, 90.0f, kOpen, grab_motion_ms_))
+        return GrabResult::Error;
     wait_for_step();
-    if (!set_angle(2, kClosed)) return GrabResult::Error;
+    if (!set_angle(2, kClosed, grab_motion_ms_)) return GrabResult::Error;
     wait_for_step();
 
     int down_pulse = 0;
@@ -107,7 +109,8 @@ GrabResult UartArmBackend::grab() {
 
     // Lift directly to the bucket pose. The second sample verifies that a ball
     // detected at ground level remains held after lifting.
-    if (!set_pose(155.0f, 115.0f, kClosed)) return GrabResult::Error;
+    if (!set_pose(155.0f, 115.0f, kClosed, grab_motion_ms_))
+        return GrabResult::Error;
     wait_for_step();
     int lifted_pulse = 0;
     const bool lifted_valid = read_position(2, lifted_pulse);
@@ -123,7 +126,7 @@ GrabResult UartArmBackend::grab() {
     }
     if (!position_valid) return GrabResult::Error;
     if (captured) return GrabResult::Captured;
-    if (!set_angle(2, kOpen)) return GrabResult::Error;
+    if (!set_angle(2, kOpen, grab_motion_ms_)) return GrabResult::Error;
     wait_for_step();
     return GrabResult::Empty;
 }

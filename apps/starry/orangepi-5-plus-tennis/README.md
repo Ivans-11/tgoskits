@@ -185,6 +185,7 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--motor-device <spec>` | UART: `/dev/ttyS6` | Four PWM chip paths or motor UART path |
 | `--arm-backend <virtual\|uart>` | `virtual` | Arm backend |
 | `--arm-device <path>` | `/dev/ttyS3` | ZP10S UART path |
+| `--grab-motion-ms <n>` | `300` | Servo movement time for each grab step |
 | `--motor-min-speed <n>` | `20` | Minimum common translation speed before steering bias |
 | `--area-far <f>` | `0.20` | Ball area ratio below which far approach speed is used |
 | `--area-stop <f>` | `0.28` | Ball area ratio that stops the approach |

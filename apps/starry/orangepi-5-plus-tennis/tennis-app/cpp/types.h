@@ -160,6 +160,7 @@ struct Config {
     // state machine keeps issuing the latched command until its deadline.
     int brake_hold_ms = 200;
     int grab_settle_ms = 100;
+    int grab_motion_ms = 300;
     int release_settle_ms = 500;
     int deposit_reverse_speed = 30;
     int deposit_reverse_ms = 500;
