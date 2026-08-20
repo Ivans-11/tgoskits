@@ -89,11 +89,17 @@ pub(in crate::kvm) fn create_vcpu_file(
         }
 
         let vcpu_file = next_control_file_id()?;
-        // Without an in-kernel irqchip, userspace is responsible for starting
-        // and interrupting every vCPU, so KVM exposes them as runnable from
-        // creation. With an irqchip, secondary vCPUs wait for the emulated
-        // architectural startup sequence.
+        // On x86, userspace is responsible for starting every vCPU when no
+        // in-kernel irqchip is present. RISC-V secondary harts must remain
+        // stopped until the boot hart starts them through SBI HSM.
+        #[cfg(target_arch = "x86_64")]
         let mp_state = if vcpu_id == 0 || !vm.irqchip_created {
+            abi::KVM_MP_STATE_RUNNABLE
+        } else {
+            abi::KVM_MP_STATE_STOPPED
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let mp_state = if vcpu_id == 0 {
             abi::KVM_MP_STATE_RUNNABLE
         } else {
             abi::KVM_MP_STATE_STOPPED

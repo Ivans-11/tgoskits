@@ -140,9 +140,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             inject_virtual_interrupt(interrupt, &vcpu)?;
         }
         update_vcpu_run_interrupt_state(control_file, &vcpu)?;
-        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0
-            || api_control::current_thread_has_pending_signal(&signal_mask)?
-        {
+        if vcpu_run_interrupted(control_file, &signal_mask)? {
             return Err(AxErrorKind::Interrupted.into());
         }
         if vcpu_run_irq_window_open(control_file)? {
@@ -292,9 +290,7 @@ fn wait_until_vcpu_runnable(
     signal_mask: &[u8],
 ) -> AxResult {
     loop {
-        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0
-            || api_control::current_thread_has_pending_signal(signal_mask)?
-        {
+        if vcpu_run_interrupted(control_file, signal_mask)? {
             return Err(AxErrorKind::Interrupted.into());
         }
         if current_vcpu_mp_state(control_file)? == abi::KVM_MP_STATE_RUNNABLE {
@@ -315,9 +311,7 @@ fn wait_for_halted_vcpu_wakeup(
 ) -> AxResult {
     set_current_vcpu_halted(control_file, true)?;
     loop {
-        if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0
-            || api_control::current_thread_has_pending_signal(signal_mask)?
-        {
+        if vcpu_run_interrupted(control_file, signal_mask)? {
             set_current_vcpu_halted(control_file, false)?;
             return Err(AxErrorKind::Interrupted.into());
         }
@@ -334,6 +328,24 @@ fn wait_for_halted_vcpu_wakeup(
             return Ok(());
         }
         axvisor_api::task::yield_now();
+    }
+}
+
+fn vcpu_run_interrupted(
+    control_file: api_control::ControlFileId,
+    signal_mask: &[u8],
+) -> AxResult<bool> {
+    if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
+        return Ok(true);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        api_control::current_thread_has_pending_signal(signal_mask)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = signal_mask;
+        Ok(false)
     }
 }
 

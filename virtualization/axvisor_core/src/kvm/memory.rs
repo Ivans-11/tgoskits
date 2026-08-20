@@ -18,9 +18,11 @@ use axvisor_api::control as api_control;
 use axvm::AxVMRef;
 
 use super::{CONTROL_FILES, ControlFileState};
+#[cfg(target_arch = "x86_64")]
+use crate::kvm::state::MappedMemoryPage;
 use crate::kvm::{
     abi::raw as abi,
-    state::{MappedMemoryPage, MemorySlot, UserspaceMemoryRegion, VmFileState},
+    state::{MemorySlot, UserspaceMemoryRegion, VmFileState},
 };
 
 // UserspaceMemoryRegion is a plain KVM UAPI payload. MemorySlot below adds the
