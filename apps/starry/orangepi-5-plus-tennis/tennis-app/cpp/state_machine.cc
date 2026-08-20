@@ -60,6 +60,7 @@ void StateMachine::enter(GameState s) {
     last_chase_valid_ = false;
     state_action_started_ = false;
     state_deadline_ns_ = 0;
+    empty_grab_recheck_pending_ = false;
     bucket_confirm_ = 0;
     bucket_lost_ = 0;
     if (s == GameState::CHASE_BALL) {
@@ -99,7 +100,7 @@ int StateMachine::search_rotation_direction(int initial_direction, int speed,
 }
 
 void StateMachine::on_grab_empty() {
-    if (state_ == GameState::GRAB) enter(GameState::CHASE_BALL);
+    if (state_ == GameState::GRAB) empty_grab_recheck_pending_ = true;
 }
 
 void StateMachine::start_timed_phase(TimedPhase phase, int64_t now_ns,
@@ -130,6 +131,17 @@ bool StateMachine::run_timed_phase(int64_t now_ns, ControlOutput &out) {
         timed_phase_ = Normal;
         enter(GameState::DEPOSIT);
         out = deposit(now_ns);
+        return true;
+    case ReverseAfterEmptyGrab:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Drive;
+            out.left = -cfg_.reverse_speed;
+            out.right = -cfg_.reverse_speed;
+            return true;
+        }
+        timed_phase_ = Normal;
+        enter(GameState::CHASE_BALL);
+        out.motor_op = MotorOp::Standby;
         return true;
     case ReverseAfterDeposit:
         if (now_ns < timed_deadline_ns_) {
@@ -172,7 +184,32 @@ ControlOutput StateMachine::step(const Detection &det, int64_t now_ns) {
         }
         return out;
     }
-    case GameState::GRAB: return grab(now_ns);
+    case GameState::GRAB: {
+        if (empty_grab_recheck_pending_) {
+            // This is the first detection processed after the blocking arm
+            // action has reported an empty grasp. Reuse the normal grab gate,
+            // but require only this one fresh frame: confirmation already
+            // happened before the attempted grasp.
+            const int stop_off = static_cast<int>(det.ball.cx) - half_w_ -
+                                 cfg_.stop_center_offset;
+            const bool still_in_grab_range =
+                det.ball.found && det.ball.area_ratio >= cfg_.area_stop &&
+                det.ball.area_ratio < cfg_.area_reverse &&
+                std::abs(stop_off) <= cfg_.stop_center_zone;
+            if (still_in_grab_range && cfg_.empty_grab_reverse_ms > 0) {
+                start_timed_phase(ReverseAfterEmptyGrab, now_ns,
+                                  cfg_.empty_grab_reverse_ms);
+                ControlOutput out;
+                out.motor_op = MotorOp::Drive;
+                out.left = -cfg_.reverse_speed;
+                out.right = -cfg_.reverse_speed;
+                return out;
+            }
+            enter(GameState::CHASE_BALL);
+            return {};
+        }
+        return grab(now_ns);
+    }
     case GameState::RETURN_TO_BUCKET:
         return return_to_bucket(det.bucket, now_ns);
     case GameState::FIND_BUCKET: return find_bucket(det.bucket, now_ns);
@@ -186,7 +223,12 @@ ControlOutput StateMachine::step(const Detection &det, int64_t now_ns) {
 std::optional<ControlOutput> StateMachine::tick(int64_t now_ns) {
     ControlOutput out;
     if (run_timed_phase(now_ns, out)) return out;
-    if (state_ == GameState::GRAB) return grab(now_ns);
+    if (state_ == GameState::GRAB) {
+        // Do not let the elapsed grab-settle deadline advance to bucket search
+        // while waiting for the first post-grab camera frame.
+        if (empty_grab_recheck_pending_) return ControlOutput{};
+        return grab(now_ns);
+    }
     if (state_ == GameState::DEPOSIT) return deposit(now_ns);
     return std::nullopt;
 }

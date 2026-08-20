@@ -47,8 +47,9 @@ public:
 
     GameState state() const { return state_; }
 
-    // A verified empty grasp resumes ball search instead of advancing to the
-    // bucket flow. Transport failures are handled by Controller separately.
+    // A verified empty grasp waits for one fresh ball observation before
+    // deciding whether to back away and resume pursuit. Transport failures are
+    // handled by Controller separately.
     void on_grab_empty();
 
 private:
@@ -56,6 +57,7 @@ private:
         Normal,
         BrakeForGrab,
         BrakeForDeposit,
+        ReverseAfterEmptyGrab,
         ReverseAfterDeposit,
     };
 
@@ -106,6 +108,7 @@ private:
     // deadline rather than a frame count that changes with camera load.
     bool state_action_started_ = false;
     int64_t state_deadline_ns_ = 0;
+    bool empty_grab_recheck_pending_ = false;
 
     OdometryEstimate odometry_;
     int64_t return_start_ns_ = 0;

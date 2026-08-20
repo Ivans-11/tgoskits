@@ -88,10 +88,12 @@ bool grab_brake_uses_elapsed_time() {
                   "grab must finish at its elapsed-time deadline");
 }
 
-bool empty_grab_resumes_ball_search() {
+bool empty_grab_rechecks_and_backs_away() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
     config.brake_hold_ms = 0;
+    config.empty_grab_reverse_ms = 500;
+    config.reverse_speed = 28;
     tennis::StateMachine machine(config);
     const auto detection = ball_detection(
         config.area_stop + 0.01f,
@@ -104,10 +106,40 @@ bool empty_grab_resumes_ball_search() {
                 "test setup must enter the grab state"))
         return false;
     machine.on_grab_empty();
-    return expect(machine.state() == tennis::GameState::CHASE_BALL,
-                  "an empty grasp must resume ball search") &&
-           expect(machine.perception_mode() == tennis::PerceptionMode::BALL,
-                  "an empty grasp must restore ball perception");
+    if (!expect(machine.state() == tennis::GameState::GRAB &&
+                    machine.perception_mode() == tennis::PerceptionMode::BALL,
+                "an empty grasp must wait for a fresh ball frame"))
+        return false;
+    const auto waiting = machine.tick(ms(1000));
+    if (!expect(waiting && waiting->motor_op == tennis::MotorOp::Standby &&
+                    machine.state() == tennis::GameState::GRAB,
+                "timer ticks must not bypass the post-grab recheck"))
+        return false;
+    auto reverse = machine.step(detection, ms(1000));
+    if (!expect(reverse.motor_op == tennis::MotorOp::Drive &&
+                    reverse.left == -config.reverse_speed &&
+                    reverse.right == -config.reverse_speed,
+                "a ball still in grab range must trigger a reverse"))
+        return false;
+    reverse = *machine.tick(ms(1499));
+    if (!expect(reverse.motor_op == tennis::MotorOp::Drive &&
+                    machine.state() == tennis::GameState::GRAB,
+                "the empty-grab reverse must last until its deadline"))
+        return false;
+    const auto done = *machine.tick(ms(1500));
+    if (!expect(done.motor_op == tennis::MotorOp::Standby &&
+                    machine.state() == tennis::GameState::CHASE_BALL,
+                "the empty-grab reverse must finish in ball pursuit"))
+        return false;
+
+    tennis::StateMachine missing_ball(config);
+    missing_ball.step(detection, ms(0));
+    missing_ball.tick(ms(0));
+    missing_ball.on_grab_empty();
+    const auto no_reverse = missing_ball.step(tennis::Detection{}, ms(1));
+    return expect(no_reverse.motor_op == tennis::MotorOp::Standby &&
+                      missing_ball.state() == tennis::GameState::CHASE_BALL,
+                  "a missing ball must resume pursuit without reversing");
 }
 
 bool ball_search_reverses_after_estimated_two_turns() {
@@ -323,24 +355,25 @@ bool fresh_search_episodes_alternate_initial_direction() {
     machine.step(ball_detection(config.area_stop + 0.01f, target), ms(1));
     machine.tick(ms(1));
     machine.on_grab_empty();
-    output = machine.step(tennis::Detection{}, ms(2));
+    machine.step(tennis::Detection{}, ms(2)); // post-grab recheck: no ball
+    output = machine.step(tennis::Detection{}, ms(3));
     if (!expect(output.left == -config.search_pivot_spd &&
                     output.right == config.search_pivot_spd,
                 "the next ball-search episode must start to the left"))
         return false;
 
-    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(3));
-    machine.tick(ms(3));
-    machine.tick(ms(3));
-    output = machine.step(tennis::Detection{}, ms(4));
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(4));
+    machine.tick(ms(4));
+    machine.tick(ms(4));
+    output = machine.step(tennis::Detection{}, ms(5));
     if (!expect(output.left == config.bucket_search_spd &&
                     output.right == -config.bucket_search_spd,
                 "the first bucket-search episode must start to the right"))
         return false;
 
-    machine.step(bucket_detection(0.1f), ms(5));
-    machine.step(tennis::Detection{}, ms(6));
-    output = machine.step(tennis::Detection{}, ms(7));
+    machine.step(bucket_detection(0.1f), ms(6));
+    machine.step(tennis::Detection{}, ms(7));
+    output = machine.step(tennis::Detection{}, ms(8));
     return expect(output.left == -config.bucket_search_spd &&
                       output.right == config.bucket_search_spd,
                   "the next bucket-search episode must start to the left");
@@ -519,7 +552,7 @@ bool fresh_chase_never_coasts_stale() {
 int main() {
     if (!reverse_takes_priority_over_grab()) return 1;
     if (!grab_brake_uses_elapsed_time()) return 1;
-    if (!empty_grab_resumes_ball_search()) return 1;
+    if (!empty_grab_rechecks_and_backs_away()) return 1;
     if (!ball_search_reverses_after_estimated_two_turns()) return 1;
     if (!chase_uses_proportional_executable_steering()) return 1;
     if (!motor_dead_zone_maps_each_wheel_independently()) return 1;
