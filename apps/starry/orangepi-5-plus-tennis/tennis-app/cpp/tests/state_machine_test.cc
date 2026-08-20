@@ -303,6 +303,49 @@ bool bucket_search_reverses_after_estimated_two_turns() {
                   "bucket search must reverse after two estimated turns");
 }
 
+bool fresh_search_episodes_alternate_initial_direction() {
+    tennis::Config config;
+    config.stop_confirm_cnt = 1;
+    config.bucket_confirm_cnt = 1;
+    config.bucket_lost_frames = 0;
+    config.brake_hold_ms = 0;
+    config.grab_settle_ms = 0;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+
+    auto output = machine.step(tennis::Detection{}, ms(0));
+    if (!expect(output.left == config.search_pivot_spd &&
+                    output.right == -config.search_pivot_spd,
+                "the first ball-search episode must start to the right"))
+        return false;
+
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(1));
+    machine.tick(ms(1));
+    machine.on_grab_empty();
+    output = machine.step(tennis::Detection{}, ms(2));
+    if (!expect(output.left == -config.search_pivot_spd &&
+                    output.right == config.search_pivot_spd,
+                "the next ball-search episode must start to the left"))
+        return false;
+
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(3));
+    machine.tick(ms(3));
+    machine.tick(ms(3));
+    output = machine.step(tennis::Detection{}, ms(4));
+    if (!expect(output.left == config.bucket_search_spd &&
+                    output.right == -config.bucket_search_spd,
+                "the first bucket-search episode must start to the right"))
+        return false;
+
+    machine.step(bucket_detection(0.1f), ms(5));
+    machine.step(tennis::Detection{}, ms(6));
+    output = machine.step(tennis::Detection{}, ms(7));
+    return expect(output.left == -config.bucket_search_spd &&
+                      output.right == config.bucket_search_spd,
+                  "the next bucket-search episode must start to the left");
+}
+
 bool captured_ball_uses_odom_return_and_visual_takeover() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
@@ -483,6 +526,7 @@ int main() {
     if (!bucket_approach_uses_configured_speed_bands()) return 1;
     if (!bucket_search_uses_configured_in_place_speed()) return 1;
     if (!bucket_search_reverses_after_estimated_two_turns()) return 1;
+    if (!fresh_search_episodes_alternate_initial_direction()) return 1;
     if (!captured_ball_uses_odom_return_and_visual_takeover()) return 1;
     if (!deposit_waits_for_brake_release_and_reverse()) return 1;
     if (!single_dropout_coasts_not_spin()) return 1;

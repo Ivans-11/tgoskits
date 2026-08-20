@@ -271,6 +271,8 @@ static void usage(const char *prog) {
         "  --bucket-min-area <n>    minimum connected red pixels for a bucket\n"
         "  --bucket-area-brake <f>  bucket area ratio that selects near speed\n"
         "  --bucket-area-deposit <f> bucket area ratio that triggers deposit\n"
+        "  --bucket-k-turn <f>      proportional bucket steering gain\n"
+        "  --bucket-max-bias <n>    maximum bucket steering wheel bias\n"
         "  --bucket-approach-speed <n> far-distance bucket approach speed\n"
         "  --bucket-brake-speed <n> near-distance bucket approach speed\n"
         "  --bucket-search-speed <n> fixed in-place bucket search speed\n"
@@ -426,6 +428,10 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.bucket_area_brake = std::atof(value.c_str());
     else if (key == "bucket-area-deposit")
         o.cfg.bucket_area_deposit = std::atof(value.c_str());
+    else if (key == "bucket-k-turn")
+        o.cfg.bucket_k_turn = std::atof(value.c_str());
+    else if (key == "bucket-max-bias")
+        o.cfg.bucket_max_bias = std::atoi(value.c_str());
     else if (key == "bucket-approach-speed")
         o.cfg.bucket_approach_spd = std::atoi(value.c_str());
     else if (key == "bucket-brake-speed")
@@ -581,6 +587,8 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--bucket-min-area", v)) { o.cfg.bucket_min_area = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-area-brake", v)) { o.cfg.bucket_area_brake = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-area-deposit", v)) { o.cfg.bucket_area_deposit = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-k-turn", v)) { o.cfg.bucket_k_turn = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-max-bias", v)) { o.cfg.bucket_max_bias = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-approach-speed", v)) { o.cfg.bucket_approach_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-brake-speed", v)) { o.cfg.bucket_brake_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-search-speed", v)) { o.cfg.bucket_search_spd = std::atoi(v.c_str()); continue; }
@@ -673,6 +681,8 @@ static int parse_options(int argc, char **argv, Options &o) {
         o.cfg.bucket_area_brake <= 0.0f ||
         o.cfg.bucket_area_brake >= o.cfg.bucket_area_deposit ||
         o.cfg.bucket_area_deposit > 1.0f ||
+        !std::isfinite(o.cfg.bucket_k_turn) || o.cfg.bucket_k_turn <= 0.0f ||
+        o.cfg.bucket_max_bias < 1 || o.cfg.bucket_max_bias > 50 ||
         o.cfg.bucket_approach_spd < o.cfg.bucket_brake_spd ||
         o.cfg.bucket_approach_spd > 100 ||
         o.cfg.bucket_brake_spd < o.cfg.motor_min_speed ||

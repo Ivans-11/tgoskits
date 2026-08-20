@@ -84,6 +84,14 @@ private:
     bool search_rotation_active_ = false;
     int search_rotation_direction_ = 1;
     int64_t search_rotation_deadline_ns_ = 0;
+    // Alternate the initial scan direction between fresh search episodes.
+    // Ball and bucket searches keep independent alternation state.
+    int next_ball_search_direction_ = 1;
+    int ball_search_initial_direction_ = 1;
+    bool ball_search_initial_direction_selected_ = false;
+    int next_bucket_search_direction_ = 1;
+    int bucket_search_initial_direction_ = 1;
+    bool bucket_search_initial_direction_selected_ = false;
     // Lost-frame coast: hold the last pursuit command across brief detection
     // dropouts (up to cfg_.chase_lost_coast_frames) instead of immediately
     // scanning, so a single missed frame does not flip pursuit into a spin.

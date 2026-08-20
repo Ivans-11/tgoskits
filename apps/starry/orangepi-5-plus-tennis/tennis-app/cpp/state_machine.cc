@@ -62,6 +62,11 @@ void StateMachine::enter(GameState s) {
     state_deadline_ns_ = 0;
     bucket_confirm_ = 0;
     bucket_lost_ = 0;
+    if (s == GameState::CHASE_BALL) {
+        ball_search_initial_direction_selected_ = false;
+    } else if (s == GameState::FIND_BUCKET) {
+        bucket_search_initial_direction_selected_ = false;
+    }
     reset_search_rotation();
 }
 
@@ -192,8 +197,17 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball, int64_t now_ns) {
     if (!ball.found) {
         stop_confirm_ = 0;
         out.motor_op = MotorOp::Drive;
+        if (!last_chase_valid_ &&
+            !ball_search_initial_direction_selected_) {
+            ball_search_initial_direction_ = next_ball_search_direction_;
+            next_ball_search_direction_ = -next_ball_search_direction_;
+            ball_search_initial_direction_selected_ = true;
+        }
+        const int initial_direction = last_chase_valid_
+                                          ? (last_offset_ >= 0 ? 1 : -1)
+                                          : ball_search_initial_direction_;
         const int dir = search_rotation_direction(
-            last_offset_ >= 0 ? 1 : -1, cfg_.search_pivot_spd, now_ns);
+            initial_direction, cfg_.search_pivot_spd, now_ns);
         out.left = dir * cfg_.search_pivot_spd;
         out.right = -dir * cfg_.search_pivot_spd;
         return out;
@@ -333,8 +347,13 @@ ControlOutput StateMachine::find_bucket(const BucketObs &bucket,
     } else {
         bucket_confirm_ = 0;
         out.motor_op = MotorOp::Drive; // rotate-in-place search
+        if (!bucket_search_initial_direction_selected_) {
+            bucket_search_initial_direction_ = next_bucket_search_direction_;
+            next_bucket_search_direction_ = -next_bucket_search_direction_;
+            bucket_search_initial_direction_selected_ = true;
+        }
         const int dir = search_rotation_direction(
-            1, cfg_.bucket_search_spd, now_ns);
+            bucket_search_initial_direction_, cfg_.bucket_search_spd, now_ns);
         out.left = dir * cfg_.bucket_search_spd;
         out.right = -dir * cfg_.bucket_search_spd;
     }
