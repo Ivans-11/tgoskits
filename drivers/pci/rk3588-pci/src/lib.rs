@@ -61,9 +61,13 @@ const PCIE_ATU_TYPE_CFG0: u32 = 0x4;
 const PCIE_ATU_TYPE_CFG1: u32 = 0x5;
 
 const PCIE_LINK_WAIT_US: u64 = 10_000;
-const PCIE_LINK_WAIT_RETRIES: usize = 80;
+// A present endpoint completes LTSSM training within this 100 ms window. Links
+// already trained by firmware take the early return above and do not wait here.
+const PCIE_LINK_WAIT_RETRIES: usize = 10;
 const PCIE_LINK_STABLE_WAIT_MS: u64 = 50;
-const RK3588_PCIE_PERST_INACTIVE_MS: u64 = 200;
+// PCIe CEM Tpvperl requires at least 100 ms from stable power to PERST# release,
+// matching the delay used by mainline Linux's Rockchip DesignWare host driver.
+pub const RK3588_PCIE_PERST_INACTIVE_MS: u64 = 100;
 const CFG_ATU_REGION: u8 = 0;
 
 pub const MEM_ATU_FIRST_REGION: u8 = 1;

@@ -22,7 +22,9 @@ use rdrive::{
     },
     register::{FdtInfo, ProbeFdt},
 };
-use rk3588_pci::{Delay, HostConfig, IatuMode, ResetControl, Rk3588PcieHost};
+use rk3588_pci::{
+    Delay, HostConfig, IatuMode, RK3588_PCIE_PERST_INACTIVE_MS, ResetControl, Rk3588PcieHost,
+};
 
 use super::{
     clocks_reset_gpio::{
@@ -49,7 +51,6 @@ const RK3588_GPIO_SWPORT_DR_L: usize = 0x00;
 const RK3588_GPIO_SWPORT_DR_H: usize = 0x04;
 const RK3588_GPIO_SWPORT_DDR_L: usize = 0x08;
 const RK3588_GPIO_SWPORT_DDR_H: usize = 0x0c;
-const RK3588_PCIE_PERST_INACTIVE_MS: u64 = 200;
 pub(super) const DEFAULT_CFG_SIZE: u64 = 0x10_0000;
 pub(super) const PHY_TYPE_PCIE: u32 = 2;
 pub(super) const RK3588_PCIE3PHY_DEFAULT_MODE: u32 = 4;
@@ -366,7 +367,7 @@ fn enable_vpcie3v3_supply(supply: Option<Phandle>) -> Result<(), OnProbeError> {
         .map_err(|err| OnProbeError::other(format!("failed to lock PinctrlDevice: {err}")))?;
     FdtPinctrl::apply_fixed_regulator(
         &mut *pinctrl,
-        &fdt,
+        fdt,
         regulator.as_node(),
         &RockchipFdtPinctrlParser,
         "rk3588-pcie-regulator",
