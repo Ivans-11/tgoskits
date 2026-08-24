@@ -620,6 +620,7 @@ impl AxVM {
         &self.inner_const().devices
     }
 
+    #[cfg(not(feature = "svm"))]
     fn with_bound_vcpu<T>(vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
         let _guard = ax_kernel_guard::IrqSave::new();
         vcpu.bind()?;
@@ -651,6 +652,48 @@ impl AxVM {
     pub fn run_vcpu_raw<F>(
         &self,
         vcpu_id: usize,
+        external_page_fault_handler: F,
+    ) -> AxResult<AxVCpuExitReason>
+    where
+        F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
+    {
+        #[cfg(feature = "svm")]
+        return self.run_vcpu_raw_svm(vcpu_id, external_page_fault_handler);
+
+        #[cfg(not(feature = "svm"))]
+        {
+            let mut external_page_fault_handler = external_page_fault_handler;
+            let vcpu = self
+                .vcpu(vcpu_id)
+                .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
+
+            loop {
+                let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                    vcpu.set_hlt_exiting(true)?;
+                    vcpu.run()
+                })?;
+                match exit_reason {
+                    AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                        if external_page_fault_handler(addr, access_flags)?
+                            || self.handle_nested_page_fault(addr, access_flags)
+                        {
+                            continue;
+                        }
+                        return Ok(Self::with_bound_vcpu(&vcpu, || {
+                            vcpu.decode_nested_page_fault()
+                        })?
+                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
+                    }
+                    exit_reason => return Ok(exit_reason),
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "svm")]
+    fn run_vcpu_raw_svm<F>(
+        &self,
+        vcpu_id: usize,
         mut external_page_fault_handler: F,
     ) -> AxResult<AxVCpuExitReason>
     where
@@ -660,24 +703,39 @@ impl AxVM {
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
-        loop {
-            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
-                vcpu.set_hlt_exiting(true)?;
-                vcpu.run()
-            })?;
-            match exit_reason {
-                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
-                    if external_page_fault_handler(addr, access_flags)?
-                        || self.handle_nested_page_fault(addr, access_flags)
-                    {
-                        continue;
+        vcpu.bind()?;
+        let result = (|| -> AxResult<AxVCpuExitReason> {
+            vcpu.set_hlt_exiting(true)?;
+            loop {
+                match vcpu.run()? {
+                    AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                        if external_page_fault_handler(addr, access_flags)?
+                            || self.handle_nested_page_fault(addr, access_flags)
+                        {
+                            continue;
+                        }
+                        return Ok(vcpu
+                            .decode_nested_page_fault()?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
                     }
-                    return Ok(
-                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
-                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }),
-                    );
+                    exit_reason => return Ok(exit_reason),
                 }
-                exit_reason => return Ok(exit_reason),
+            }
+        })();
+
+        let unbind_result = if vcpu.state() == VCpuState::Ready {
+            vcpu.unbind()
+        } else {
+            Ok(())
+        };
+        match result {
+            Ok(exit_reason) => {
+                unbind_result?;
+                Ok(exit_reason)
+            }
+            Err(err) => {
+                let _ = unbind_result;
+                Err(err)
             }
         }
     }
@@ -690,87 +748,187 @@ impl AxVM {
     /// ## Returns
     /// * `AxVCpuExitReason` - the exit reason of the vCPU, wrapped in an `AxResult`.
     pub fn run_vcpu(&self, vcpu_id: usize) -> AxResult<AxVCpuExitReason> {
+        #[cfg(feature = "svm")]
+        return self.run_vcpu_svm(vcpu_id);
+
+        #[cfg(not(feature = "svm"))]
+        {
+            let vcpu = self
+                .vcpu(vcpu_id)
+                .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
+
+            let exit_reason = loop {
+                let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                    vcpu.set_hlt_exiting(false)?;
+                    vcpu.run()
+                })?;
+                trace!("{exit_reason:#x?}");
+                let exit_reason = match exit_reason {
+                    AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                        if self.handle_nested_page_fault(addr, access_flags) {
+                            continue;
+                        }
+                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
+                    }
+                    exit_reason => exit_reason,
+                };
+                match exit_reason {
+                    AxVCpuExitReason::MmioRead {
+                        addr,
+                        width,
+                        reg,
+                        reg_width,
+                        signed_ext,
+                    } => {
+                        let raw = self.get_devices().handle_mmio_read(addr, width)?;
+                        let masked = raw & width_mask(width);
+                        let val = if signed_ext {
+                            sign_extend_value(masked, width)
+                        } else {
+                            masked & width_mask(reg_width)
+                        };
+                        vcpu.set_gpr(reg, val);
+                        continue;
+                    }
+                    AxVCpuExitReason::MmioWrite { addr, width, data } => {
+                        self.get_devices()
+                            .handle_mmio_write(addr, width, data as usize)?;
+                        continue;
+                    }
+                    AxVCpuExitReason::IoRead { port, width } => {
+                        let val = self.get_devices().handle_port_read(port, width)?;
+                        #[cfg(not(target_arch = "riscv64"))]
+                        vcpu.set_gpr(0, val); // The target is always eax/ax/al, todo: handle access_width correctly
+
+                        #[cfg(target_arch = "riscv64")]
+                        vcpu.set_gpr(riscv_vcpu::GprIndex::A0 as usize, val);
+
+                        continue;
+                    }
+                    AxVCpuExitReason::IoWrite { port, width, data } => {
+                        self.get_devices()
+                            .handle_port_write(port, width, data as usize)?;
+                        continue;
+                    }
+                    AxVCpuExitReason::SysRegRead { addr, reg } => {
+                        let val = self.get_devices().handle_sys_reg_read(
+                            addr,
+                            // Generally speaking, the width of system register is fixed and needless to be specified.
+                            // AccessWidth::Qword here is just a placeholder, may be changed in the future.
+                            AccessWidth::Qword,
+                        )?;
+                        vcpu.set_gpr(reg, val);
+                        continue;
+                    }
+                    AxVCpuExitReason::SysRegWrite { addr, value } => {
+                        self.get_devices().handle_sys_reg_write(
+                            addr,
+                            AccessWidth::Qword,
+                            value as usize,
+                        )?;
+                        continue;
+                    }
+                    exit_reason => break exit_reason,
+                }
+            };
+
+            Ok(exit_reason)
+        }
+    }
+
+    #[cfg(feature = "svm")]
+    fn run_vcpu_svm(&self, vcpu_id: usize) -> AxResult<AxVCpuExitReason> {
         let vcpu = self
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
-        let exit_reason = loop {
-            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
-                vcpu.set_hlt_exiting(false)?;
-                vcpu.run()
-            })?;
-            trace!("{exit_reason:#x?}");
-            let exit_reason = match exit_reason {
-                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
-                    if self.handle_nested_page_fault(addr, access_flags) {
+        vcpu.bind()?;
+        let result = (|| -> AxResult<AxVCpuExitReason> {
+            vcpu.set_hlt_exiting(false)?;
+            let exit_reason = loop {
+                let exit_reason = vcpu.run()?;
+                trace!("{exit_reason:#x?}");
+                let exit_reason = match exit_reason {
+                    AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                        if self.handle_nested_page_fault(addr, access_flags) {
+                            continue;
+                        }
+                        vcpu.decode_nested_page_fault()?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
+                    }
+                    exit_reason => exit_reason,
+                };
+                match exit_reason {
+                    AxVCpuExitReason::MmioRead {
+                        addr,
+                        width,
+                        reg,
+                        reg_width,
+                        signed_ext,
+                    } => {
+                        let raw = self.get_devices().handle_mmio_read(addr, width)?;
+                        let masked = raw & width_mask(width);
+                        let val = if signed_ext {
+                            sign_extend_value(masked, width)
+                        } else {
+                            masked & width_mask(reg_width)
+                        };
+                        vcpu.set_gpr(reg, val);
                         continue;
                     }
-                    Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
-                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
+                    AxVCpuExitReason::MmioWrite { addr, width, data } => {
+                        self.get_devices()
+                            .handle_mmio_write(addr, width, data as usize)?;
+                        continue;
+                    }
+                    AxVCpuExitReason::IoRead { port, width } => {
+                        let val = self.get_devices().handle_port_read(port, width)?;
+                        vcpu.set_gpr(0, val);
+                        continue;
+                    }
+                    AxVCpuExitReason::IoWrite { port, width, data } => {
+                        self.get_devices()
+                            .handle_port_write(port, width, data as usize)?;
+                        continue;
+                    }
+                    AxVCpuExitReason::SysRegRead { addr, reg } => {
+                        let val = self
+                            .get_devices()
+                            .handle_sys_reg_read(addr, AccessWidth::Qword)?;
+                        vcpu.set_gpr(reg, val);
+                        continue;
+                    }
+                    AxVCpuExitReason::SysRegWrite { addr, value } => {
+                        self.get_devices().handle_sys_reg_write(
+                            addr,
+                            AccessWidth::Qword,
+                            value as usize,
+                        )?;
+                        continue;
+                    }
+                    exit_reason => break exit_reason,
                 }
-                exit_reason => exit_reason,
             };
-            match exit_reason {
-                AxVCpuExitReason::MmioRead {
-                    addr,
-                    width,
-                    reg,
-                    reg_width,
-                    signed_ext,
-                } => {
-                    let raw = self.get_devices().handle_mmio_read(addr, width)?;
-                    let masked = raw & width_mask(width);
-                    let val = if signed_ext {
-                        sign_extend_value(masked, width)
-                    } else {
-                        masked & width_mask(reg_width)
-                    };
-                    vcpu.set_gpr(reg, val);
-                    continue;
-                }
-                AxVCpuExitReason::MmioWrite { addr, width, data } => {
-                    self.get_devices()
-                        .handle_mmio_write(addr, width, data as usize)?;
-                    continue;
-                }
-                AxVCpuExitReason::IoRead { port, width } => {
-                    let val = self.get_devices().handle_port_read(port, width)?;
-                    #[cfg(not(target_arch = "riscv64"))]
-                    vcpu.set_gpr(0, val); // The target is always eax/ax/al, todo: handle access_width correctly
 
-                    #[cfg(target_arch = "riscv64")]
-                    vcpu.set_gpr(riscv_vcpu::GprIndex::A0 as usize, val);
+            Ok(exit_reason)
+        })();
 
-                    continue;
-                }
-                AxVCpuExitReason::IoWrite { port, width, data } => {
-                    self.get_devices()
-                        .handle_port_write(port, width, data as usize)?;
-                    continue;
-                }
-                AxVCpuExitReason::SysRegRead { addr, reg } => {
-                    let val = self.get_devices().handle_sys_reg_read(
-                        addr,
-                        // Generally speaking, the width of system register is fixed and needless to be specified.
-                        // AccessWidth::Qword here is just a placeholder, may be changed in the future.
-                        AccessWidth::Qword,
-                    )?;
-                    vcpu.set_gpr(reg, val);
-                    continue;
-                }
-                AxVCpuExitReason::SysRegWrite { addr, value } => {
-                    self.get_devices().handle_sys_reg_write(
-                        addr,
-                        AccessWidth::Qword,
-                        value as usize,
-                    )?;
-                    continue;
-                }
-                exit_reason => break exit_reason,
-            }
+        let unbind_result = if vcpu.state() == VCpuState::Ready {
+            vcpu.unbind()
+        } else {
+            Ok(())
         };
-
-        Ok(exit_reason)
+        match result {
+            Ok(exit_reason) => {
+                unbind_result?;
+                Ok(exit_reason)
+            }
+            Err(err) => {
+                let _ = unbind_result;
+                Err(err)
+            }
+        }
     }
 
     fn handle_nested_page_fault(&self, addr: GuestPhysAddr, access_flags: MappingFlags) -> bool {

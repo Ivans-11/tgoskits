@@ -297,14 +297,14 @@ fn wait_until_vcpu_runnable(
         if vcpu_run_interrupted(control_file, signal_mask)? {
             return Err(AxErrorKind::Interrupted.into());
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
         {
             if let Some(entry_point) = take_current_vcpu_startup(control_file)? {
                 vcpu.set_entry(entry_point)?;
                 set_current_vcpu_mp_state(control_file, abi::KVM_MP_STATE_RUNNABLE)?;
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", feature = "vmx")))]
         let _ = vcpu;
         if current_vcpu_mp_state(control_file)? == abi::KVM_MP_STATE_RUNNABLE {
             return Ok(());
@@ -313,7 +313,7 @@ fn wait_until_vcpu_runnable(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 fn take_current_vcpu_startup(
     control_file: api_control::ControlFileId,
 ) -> AxResult<Option<axaddrspace::GuestPhysAddr>> {
@@ -324,7 +324,7 @@ fn take_current_vcpu_startup(
     Ok(vcpu.pending_startup_entry.take())
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 fn set_current_vcpu_mp_state(control_file: api_control::ControlFileId, mp_state: u32) -> AxResult {
     let mut control_files = CONTROL_FILES.lock();
     let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {

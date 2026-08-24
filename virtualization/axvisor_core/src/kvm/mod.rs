@@ -31,7 +31,7 @@ pub use abi::public::*;
 use abi::*;
 use ax_errno::{AxError, AxResult, ax_err};
 use ax_kspin::SpinNoIrq as Mutex;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 use axaddrspace::GuestPhysAddr;
 use axvisor_api::control::{self as api_control, ControlOps};
 use cpuid::{get_cpuid2, get_supported_cpuid, set_cpuid2};
@@ -198,7 +198,7 @@ pub(in crate::kvm) fn vcpu_file_by_id(
         .ok_or(AxError::InvalidInput)
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", all(target_arch = "x86_64", feature = "svm")))]
 pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
@@ -216,7 +216,7 @@ pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     Ok(())
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 pub(in crate::kvm) fn queue_vcpu_startup_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,

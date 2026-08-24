@@ -116,7 +116,7 @@ pub(in crate::kvm) fn create_vcpu_file(
                 pending_interrupts: VecDeque::new(),
                 pending_mmio_read: None,
                 pending_io_read: None,
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
                 pending_startup_entry: None,
                 cpuid: Vec::new(),
                 emulated_msrs: BTreeMap::new(),
