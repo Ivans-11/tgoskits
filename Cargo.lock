@@ -2011,6 +2011,7 @@ dependencies = [
  "arm_vgic",
  "ax-cpumask",
  "ax-errno 0.6.0",
+ "ax-kernel-guard",
  "ax-kspin",
  "ax-memory-addr",
  "ax-page-table-entry",

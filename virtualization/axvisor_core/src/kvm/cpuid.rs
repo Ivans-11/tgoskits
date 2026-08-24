@@ -184,8 +184,19 @@ fn supported_cpuid_entries_x86_64() -> Vec<KvmCpuidEntry2> {
             );
         }
     }
+    // Keep the architectural PMU leaf present for VMMs (Firecracker requires
+    // the entry to exist), but advertise a zero-version PMU. The VMX backend
+    // returns the same zeroed value to guests, so no host PMU MSRs are used.
     if max_basic >= 0xa {
-        push_host_cpuid(&mut entries, 0xa, 0, 0);
+        entries.push(KvmCpuidEntry2 {
+            function: 0xa,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+        });
     }
     if max_basic >= 0xb {
         for index in 0..=8 {

@@ -25,6 +25,8 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(target_arch = "x86_64")]
+use axaddrspace::GuestPhysAddr;
 use axaddrspace::device::AccessWidth;
 use axvisor_api::{control as api_control, sync::WaitQueue, task::TaskHandle};
 use axvm::AxVMRef;
@@ -79,6 +81,8 @@ pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) pending_interrupts: VecDeque<VirtualInterrupt>,
     pub(in crate::kvm) pending_mmio_read: Option<PendingMmioRead>,
     pub(in crate::kvm) pending_io_read: Option<PendingIoRead>,
+    #[cfg(target_arch = "x86_64")]
+    pub(in crate::kvm) pending_startup_entry: Option<GuestPhysAddr>,
     pub(in crate::kvm) cpuid: Vec<KvmCpuidEntry2>,
     pub(in crate::kvm) emulated_msrs: BTreeMap<u32, u64>,
     pub(in crate::kvm) fpu: Vec<u8>,

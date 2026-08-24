@@ -229,7 +229,6 @@ impl VirtualApicRegs {
         if vector == 0 {
             return None;
         }
-
         let (idx, bitpos) = extract_index_and_bitpos_u32(vector);
 
         // Upon receiving an EOI, the APIC clears the highest priority bit in the ISR
@@ -569,7 +568,6 @@ impl VirtualApicRegs {
                 vec
             );
             let dmask = self.calculate_dest(shorthand, is_broadcast, dest, is_phys, false)?;
-
             for i in 0..u64::BITS {
                 if dmask & (1 << i) != 0 {
                     match mode {

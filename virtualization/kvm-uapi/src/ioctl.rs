@@ -289,6 +289,7 @@ pub const KVM_RUN_IF_FLAG_OFFSET: usize = 13;
 pub const KVM_RUN_FLAGS_OFFSET: usize = 14;
 pub const KVM_RUN_INTERNAL_SUBERROR_OFFSET: usize = 32;
 pub const KVM_RUN_INTERNAL_NDATA_OFFSET: usize = 36;
+pub const KVM_RUN_FAIL_ENTRY_HARDWARE_REASON_OFFSET: usize = 32;
 pub const KVM_RUN_IO_DIRECTION_OFFSET: usize = 32;
 pub const KVM_RUN_IO_SIZE_OFFSET: usize = 33;
 pub const KVM_RUN_IO_PORT_OFFSET: usize = 34;

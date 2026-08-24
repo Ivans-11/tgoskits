@@ -51,6 +51,13 @@ pub fn x86_apic_access_page_addr() -> HostPhysAddr {
 }
 
 pub fn supports_apicv() -> bool {
+    if raw_cpuid::CpuId::new()
+        .get_feature_info()
+        .is_some_and(|feature| feature.has_hypervisor())
+    {
+        return false;
+    }
+
     let primary_allowed1 = (Msr::IA32_VMX_TRUE_PROCBASED_CTLS.read() >> 32) as u32;
     let secondary_allowed1 = (Msr::IA32_VMX_PROCBASED_CTLS2.read() >> 32) as u32;
 

@@ -31,6 +31,8 @@ pub use abi::public::*;
 use abi::*;
 use ax_errno::{AxError, AxResult, ax_err};
 use ax_kspin::SpinNoIrq as Mutex;
+#[cfg(target_arch = "x86_64")]
+use axaddrspace::GuestPhysAddr;
 use axvisor_api::control::{self as api_control, ControlOps};
 use cpuid::{get_cpuid2, get_supported_cpuid, set_cpuid2};
 use eventfd::{
@@ -173,6 +175,7 @@ fn control_vcpu_file_by_vm_id(
     .ok_or(AxError::NotFound)
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 pub(in crate::kvm) fn vcpu_file_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
@@ -195,6 +198,7 @@ pub(in crate::kvm) fn vcpu_file_by_id(
         .ok_or(AxError::InvalidInput)
 }
 
+#[cfg(target_arch = "riscv64")]
 pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
@@ -209,6 +213,23 @@ pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     if mp_state == KVM_MP_STATE_RUNNABLE {
         vcpu.halted = false;
     }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(in crate::kvm) fn queue_vcpu_startup_by_id(
+    control_file: api_control::ControlFileId,
+    vcpu_id: usize,
+    entry_point: GuestPhysAddr,
+) -> AxResult {
+    let target_file = vcpu_file_by_id(control_file, vcpu_id)?;
+    let mut control_files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&target_file) else {
+        return ax_err!(NotFound);
+    };
+    vcpu.pending_startup_entry = Some(entry_point);
+    vcpu.mp_state = KVM_MP_STATE_SIPI_RECEIVED;
+    vcpu.halted = false;
     Ok(())
 }
 

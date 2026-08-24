@@ -620,6 +620,27 @@ impl AxVM {
         &self.inner_const().devices
     }
 
+    fn with_bound_vcpu<T>(vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
+        let _guard = ax_kernel_guard::IrqSave::new();
+        vcpu.bind()?;
+        let result = f();
+        let unbind_result = if vcpu.state() == VCpuState::Ready {
+            vcpu.unbind()
+        } else {
+            Ok(())
+        };
+        match result {
+            Ok(value) => {
+                unbind_result?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = unbind_result;
+                Err(err)
+            }
+        }
+    }
+
     /// Run a vCPU according to the given vcpu_id.
     ///
     /// ## Arguments
@@ -639,41 +660,24 @@ impl AxVM {
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
-        vcpu.bind()?;
-        let result = (|| -> AxResult<AxVCpuExitReason> {
-            vcpu.set_hlt_exiting(true)?;
-
-            let exit_reason = loop {
-                let exit_reason = vcpu.run()?;
-                match exit_reason {
-                    AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
-                        let externally_handled = external_page_fault_handler(addr, access_flags)?;
-                        if externally_handled || self.handle_nested_page_fault(addr, access_flags) {
-                            continue;
-                        }
-                        break vcpu
-                            .decode_nested_page_fault()?
-                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags });
+        loop {
+            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                vcpu.set_hlt_exiting(true)?;
+                vcpu.run()
+            })?;
+            match exit_reason {
+                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                    if external_page_fault_handler(addr, access_flags)?
+                        || self.handle_nested_page_fault(addr, access_flags)
+                    {
+                        continue;
                     }
-                    exit_reason => break exit_reason,
+                    return Ok(
+                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }),
+                    );
                 }
-            };
-            Ok(exit_reason)
-        })();
-
-        let unbind_result = if vcpu.state() == VCpuState::Ready {
-            vcpu.unbind()
-        } else {
-            Ok(())
-        };
-        match result {
-            Ok(exit_reason) => {
-                unbind_result?;
-                Ok(exit_reason)
-            }
-            Err(err) => {
-                let _ = unbind_result;
-                Err(err)
+                exit_reason => return Ok(exit_reason),
             }
         }
     }
@@ -690,18 +694,18 @@ impl AxVM {
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
-        vcpu.bind()?;
-        vcpu.set_hlt_exiting(false)?;
-
         let exit_reason = loop {
-            let exit_reason = vcpu.run()?;
+            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                vcpu.set_hlt_exiting(false)?;
+                vcpu.run()
+            })?;
             trace!("{exit_reason:#x?}");
             let exit_reason = match exit_reason {
                 AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
                     if self.handle_nested_page_fault(addr, access_flags) {
                         continue;
                     }
-                    vcpu.decode_nested_page_fault()?
+                    Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
                         .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
                 }
                 exit_reason => exit_reason,
@@ -766,7 +770,6 @@ impl AxVM {
             }
         };
 
-        vcpu.unbind()?;
         Ok(exit_reason)
     }
 
@@ -787,103 +790,59 @@ impl AxVM {
         let root = inner.address_space.page_table_root();
         match inner.address_space.page_table().query(addr) {
             Ok((hpa, flags, size)) => {
-                if handled {
-                    debug!(
-                        "VM[{}] stage2 query hit: gpa={:#x} -> hpa={:#x}, access={:?}, \
-                         pte_flags={:?}, page_size={:?}, root={:#x}",
-                        vm_id,
-                        addr.as_usize(),
-                        hpa.as_usize(),
-                        access_flags,
-                        flags,
-                        size,
-                        root.as_usize()
-                    );
-                } else {
-                    warn!(
-                        "VM[{}] stage2 query hit: gpa={:#x} -> hpa={:#x}, access={:?}, \
-                         pte_flags={:?}, page_size={:?}, root={:#x}",
-                        vm_id,
-                        addr.as_usize(),
-                        hpa.as_usize(),
-                        access_flags,
-                        flags,
-                        size,
-                        root.as_usize()
-                    );
-                }
+                debug!(
+                    "VM[{}] stage2 query hit: gpa={:#x} -> hpa={:#x}, access={:?}, \
+                     pte_flags={:?}, page_size={:?}, root={:#x}, handled={}",
+                    vm_id,
+                    addr.as_usize(),
+                    hpa.as_usize(),
+                    access_flags,
+                    flags,
+                    size,
+                    root.as_usize(),
+                    handled
+                );
             }
             Err(err) => {
-                if handled {
-                    debug!(
-                        "VM[{}] stage2 query miss: gpa={:#x}, access={:?}, err={:?}, root={:#x}",
-                        vm_id,
-                        addr.as_usize(),
-                        access_flags,
-                        err,
-                        root.as_usize()
-                    );
-                } else {
-                    warn!(
-                        "VM[{}] stage2 query miss: gpa={:#x}, access={:?}, err={:?}, root={:#x}",
-                        vm_id,
-                        addr.as_usize(),
-                        access_flags,
-                        err,
-                        root.as_usize()
-                    );
-                }
+                debug!(
+                    "VM[{}] stage2 query miss: gpa={:#x}, access={:?}, err={:?}, root={:#x}, \
+                     handled={}",
+                    vm_id,
+                    addr.as_usize(),
+                    access_flags,
+                    err,
+                    root.as_usize(),
+                    handled
+                );
             }
         }
 
         let translate = inner.address_space.translate(addr);
-        if handled {
-            debug!(
-                "VM[{}] stage2 translate: gpa={:#x} -> {:?}",
-                vm_id,
-                addr.as_usize(),
-                translate
-            );
-        } else {
-            warn!(
-                "VM[{}] stage2 translate: gpa={:#x} -> {:?}",
-                vm_id,
-                addr.as_usize(),
-                translate
-            );
-        }
+        debug!(
+            "VM[{}] stage2 translate: gpa={:#x} -> {:?}, handled={}",
+            vm_id,
+            addr.as_usize(),
+            translate,
+            handled
+        );
 
         for (idx, region) in inner.memory_regions.iter().enumerate() {
             let start = region.gpa.as_usize();
             let end = start + region.size();
             if (start..end).contains(&addr.as_usize()) {
-                if handled {
-                    debug!(
-                        "VM[{}] stage2 region hit[{}]: gpa=[{:#x},{:#x}) hva={:#x} hpa={:#x} \
-                         size={:#x} identical={}",
-                        vm_id,
-                        idx,
-                        start,
-                        end,
-                        region.hva.as_usize(),
-                        region.host_paddr().as_usize(),
-                        region.size(),
-                        region.is_identical()
-                    );
-                } else {
-                    warn!(
-                        "VM[{}] stage2 region hit[{}]: gpa=[{:#x},{:#x}) hva={:#x} hpa={:#x} \
-                         size={:#x} identical={}",
-                        vm_id,
-                        idx,
-                        start,
-                        end,
-                        region.hva.as_usize(),
-                        region.host_paddr().as_usize(),
-                        region.size(),
-                        region.is_identical()
-                    );
-                }
+                debug!(
+                    "VM[{}] stage2 region hit[{}]: gpa=[{:#x},{:#x}) hva={:#x} hpa={:#x} \
+                     size={:#x} identical={} handled={}",
+                    vm_id,
+                    idx,
+                    start,
+                    end,
+                    region.hva.as_usize(),
+                    region.host_paddr().as_usize(),
+                    region.size(),
+                    region.is_identical(),
+                    handled
+                );
             }
         }
     }

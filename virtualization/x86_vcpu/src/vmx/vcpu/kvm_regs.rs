@@ -230,12 +230,19 @@ impl VmxVcpu {
             VmcsGuest32::TR_ACCESS_RIGHTS,
             sregs.tr,
         )?;
+        let mut ldt = sregs.ldt;
+        // Linux KVM accepts an all-zero LDT in KVM_SET_SREGS as an absent
+        // segment. VMX requires the corresponding unusable bit to be set;
+        // otherwise VM entry fails because type and present are both zero.
+        if ldt == KvmSegment::default() {
+            ldt.unusable = 1;
+        }
         write_segment(
             VmcsGuest16::LDTR_SELECTOR,
             VmcsGuestNW::LDTR_BASE,
             VmcsGuest32::LDTR_LIMIT,
             VmcsGuest32::LDTR_ACCESS_RIGHTS,
-            sregs.ldt,
+            ldt,
         )?;
         VmcsGuestNW::GDTR_BASE.write(sregs.gdt.base as usize)?;
         VmcsGuest32::GDTR_LIMIT.write(sregs.gdt.limit as u32)?;

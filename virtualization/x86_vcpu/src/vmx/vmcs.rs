@@ -503,6 +503,8 @@ define_vmcs_fields_ro!(VmcsReadOnlyNW, usize);
 /// VM-Exit Informations. (SDM Vol. 3C, Section 24.9.1)
 #[derive(Debug)]
 pub struct VmxExitInfo {
+    /// Raw VM-exit reason, including the VM-entry-failure flag.
+    pub full_exit_reason: u32,
     /// VM-entry failure. (0 = true VM exit; 1 = VM-entry failure)
     pub entry_failure: bool,
     /// Basic exit reason.
@@ -708,6 +710,7 @@ pub fn instruction_error() -> VmxInstructionError {
 pub fn exit_info() -> AxResult<VmxExitInfo> {
     let full_reason = VmcsReadOnly32::EXIT_REASON.read()?;
     Ok(VmxExitInfo {
+        full_exit_reason: full_reason,
         exit_reason: full_reason
             .get_bits(0..16)
             .try_into()

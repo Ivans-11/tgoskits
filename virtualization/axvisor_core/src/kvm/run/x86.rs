@@ -30,7 +30,7 @@ use crate::kvm::abi::raw as abi;
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::{
     cpuid::default_tsc_khz,
-    set_vcpu_file_mp_state_by_id,
+    queue_vcpu_startup_by_id,
     state::{PvClockVcpuTimeInfo, PvClockWallClock},
     util::{
         access_width_mask, read_vcpu_run_u8, sign_extend_value, write_vcpu_run_u8,
@@ -83,9 +83,7 @@ pub(super) fn handle_cpu_up(
     entry_point: GuestPhysAddr,
 ) -> AxResult {
     let target_vcpu_id = guest_cpu_id_to_vcpu_id(vm, target_cpu).ok_or(AxError::InvalidInput)?;
-    let target_vcpu = vm.vcpu(target_vcpu_id).ok_or(AxError::InvalidInput)?;
-    target_vcpu.set_entry(entry_point)?;
-    set_vcpu_file_mp_state_by_id(control_file, target_vcpu_id, abi::KVM_MP_STATE_RUNNABLE)
+    queue_vcpu_startup_by_id(control_file, target_vcpu_id, entry_point)
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -195,6 +195,15 @@ pub(super) fn prepare_userspace_exit(
                 &data.to_ne_bytes()[..access_width_bytes(*width) as usize],
             )?;
         }
+        AxVCpuExitReason::FailEntry {
+            hardware_entry_failure_reason,
+        } => {
+            write_vcpu_run_u64(
+                control_file,
+                abi::KVM_RUN_FAIL_ENTRY_HARDWARE_REASON_OFFSET,
+                *hardware_entry_failure_reason,
+            )?;
+        }
         _ => {}
     }
     Ok(())
