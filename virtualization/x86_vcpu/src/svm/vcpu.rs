@@ -1338,6 +1338,20 @@ impl SvmVcpu {
         }
 
         match (write, opcode, extended_opcode) {
+            (false, 0x8a, None) if (modrm >> 3) & 0x7 < 4 || rex != 0 => {
+                let reg = (((modrm >> 3) & 0x7) | ((rex & 0x4) << 1)) as usize;
+                let end = self.skip_modrm_memory_operand(rip, modrm, rex)?;
+                Ok(Some((
+                    AxVCpuExitReason::MmioRead {
+                        addr,
+                        width: AccessWidth::Byte,
+                        reg,
+                        reg_width: AccessWidth::Byte,
+                        signed_ext: false,
+                    },
+                    (end.as_usize() - start.as_usize()) as u8,
+                )))
+            }
             (true, 0x89, None) => {
                 let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
                 let end = self.skip_modrm_memory_operand(rip, modrm, rex)?;

@@ -224,7 +224,71 @@ pub(super) fn complete_mmio_read(
     } else {
         masked & access_width_mask(pending.reg_width)
     };
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut regs_bytes = [0; abi::KVM_X86_REGS_SIZE as usize];
+        vcpu.get_kvm_regs(&mut regs_bytes)?;
+        let mut regs = KvmRegs::decode(&regs_bytes).map_err(|_| ax_errno::AxError::InvalidData)?;
+        let old = kvm_gpr(&regs, pending.reg)?;
+        let mask = access_width_mask(pending.reg_width) as u64;
+        let value = match pending.reg_width {
+            AccessWidth::Byte | AccessWidth::Word => (old & !mask) | (val as u64 & mask),
+            AccessWidth::Dword | AccessWidth::Qword => val as u64 & mask,
+        };
+        set_kvm_gpr(&mut regs, pending.reg, value)?;
+        regs.encode(&mut regs_bytes)
+            .map_err(|_| ax_errno::AxError::InvalidData)?;
+        vcpu.set_kvm_regs(&regs_bytes)?;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
     vcpu.set_gpr(pending.reg, val);
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn kvm_gpr(regs: &KvmRegs, index: usize) -> AxResult<u64> {
+    Ok(match index {
+        0 => regs.rax,
+        1 => regs.rcx,
+        2 => regs.rdx,
+        3 => regs.rbx,
+        4 => regs.rsp,
+        5 => regs.rbp,
+        6 => regs.rsi,
+        7 => regs.rdi,
+        8 => regs.r8,
+        9 => regs.r9,
+        10 => regs.r10,
+        11 => regs.r11,
+        12 => regs.r12,
+        13 => regs.r13,
+        14 => regs.r14,
+        15 => regs.r15,
+        _ => return ax_err!(InvalidInput),
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn set_kvm_gpr(regs: &mut KvmRegs, index: usize, value: u64) -> AxResult {
+    match index {
+        0 => regs.rax = value,
+        1 => regs.rcx = value,
+        2 => regs.rdx = value,
+        3 => regs.rbx = value,
+        4 => regs.rsp = value,
+        5 => regs.rbp = value,
+        6 => regs.rsi = value,
+        7 => regs.rdi = value,
+        8 => regs.r8 = value,
+        9 => regs.r9 = value,
+        10 => regs.r10 = value,
+        11 => regs.r11 = value,
+        12 => regs.r12 = value,
+        13 => regs.r13 = value,
+        14 => regs.r14 = value,
+        15 => regs.r15 = value,
+        _ => return ax_err!(InvalidInput),
+    }
     Ok(())
 }
 

@@ -1524,6 +1524,16 @@ impl VmxVcpu {
         }
 
         match (write, opcode, extended_opcode) {
+            (false, 0x8a, None) if (modrm >> 3) & 0x7 < 4 || rex != 0 => {
+                let reg = (((modrm >> 3) & 0x7) | ((rex & 0x4) << 1)) as usize;
+                Some(AxVCpuExitReason::MmioRead {
+                    addr,
+                    width: AccessWidth::Byte,
+                    reg,
+                    reg_width: AccessWidth::Byte,
+                    signed_ext: false,
+                })
+            }
             (true, 0x89, None) => {
                 let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
                 Some(AxVCpuExitReason::MmioWrite {
