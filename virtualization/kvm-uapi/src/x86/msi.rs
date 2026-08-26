@@ -25,7 +25,8 @@ const MSI_ADDRESS_RESERVED_MASK: u32 = 0x0000_0ff3;
 const MSI_DATA_VECTOR_MASK: u32 = 0xff;
 const MSI_DATA_DELIVERY_MODE_SHIFT: u32 = 8;
 const MSI_DATA_DELIVERY_MODE_MASK: u32 = 0x7;
-const MSI_DATA_ALLOWED_MASK: u32 = 0x7ff;
+const MSI_DATA_TRIGGER_LEVEL: u32 = 1 << 15;
+const MSI_DATA_ALLOWED_MASK: u32 = 0xc7ff;
 const MSI_DELIVERY_FIXED: u32 = 0;
 const MSI_DELIVERY_LOWEST_PRIORITY: u32 = 1;
 
@@ -36,9 +37,18 @@ pub struct X86MsiRoute {
     pub vector: u8,
     /// VM-local vCPU mask selected by the MSI address and delivery mode.
     pub target_mask: u64,
+    /// Whether the message uses level-triggered delivery.
+    pub level_triggered: bool,
 }
 
 /// Decode an xAPIC MSI using the flat logical-destination model.
+///
+/// The address may be either the architectural `0xfee0_0000` address or the
+/// offset within QEMU's APIC MMIO region. Linux KVM accepts both forms when
+/// handling `KVM_SIGNAL_MSI`.
+///
+/// Linux KVM treats every `KVM_SIGNAL_MSI` request as an asserted interrupt.
+/// Bit 15 selects the trigger mode; bit 14 is accepted but does not deassert it.
 ///
 /// The current AxVisor x86 topology maps physical APIC IDs directly to VM-local
 /// vCPU IDs. Logical destinations are interpreted as a flat vCPU bit mask,
@@ -46,9 +56,10 @@ pub struct X86MsiRoute {
 /// device-ID-qualified MSI injection, and non-maskable delivery modes are not
 /// advertised by this helper.
 pub fn decode_msi_route(msi: KvmMsi, active_vcpu_mask: u64) -> Result<X86MsiRoute> {
-    if msi.flags != 0
+    let address_base = msi.address_lo & MSI_ADDRESS_BASE_MASK;
+    if (address_base != 0 && address_base != MSI_ADDRESS_BASE)
+        || msi.flags != 0
         || msi.address_hi != 0
-        || msi.address_lo & MSI_ADDRESS_BASE_MASK != MSI_ADDRESS_BASE
         || msi.address_lo & MSI_ADDRESS_RESERVED_MASK != 0
         || msi.data & !MSI_DATA_ALLOWED_MASK != 0
     {
@@ -86,6 +97,7 @@ pub fn decode_msi_route(msi: KvmMsi, active_vcpu_mask: u64) -> Result<X86MsiRout
     Ok(X86MsiRoute {
         vector,
         target_mask,
+        level_triggered: msi.data & MSI_DATA_TRIGGER_LEVEL != 0,
     })
 }
 
@@ -110,6 +122,7 @@ mod tests {
             Ok(X86MsiRoute {
                 vector: 0x41,
                 target_mask: 0b0100,
+                level_triggered: false,
             })
         );
         assert_eq!(
@@ -117,6 +130,7 @@ mod tests {
             Ok(X86MsiRoute {
                 vector: 0x42,
                 target_mask: 0b1011,
+                level_triggered: false,
             })
         );
     }
@@ -129,6 +143,7 @@ mod tests {
             Ok(X86MsiRoute {
                 vector: 0x51,
                 target_mask: 0b1010,
+                level_triggered: false,
             })
         );
         assert_eq!(
@@ -139,6 +154,30 @@ mod tests {
             Ok(X86MsiRoute {
                 vector: 0x52,
                 target_mask: 0b0010,
+                level_triggered: false,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_apic_offsets_and_level_messages() {
+        assert_eq!(
+            decode_msi_route(msi(1 << 12, 0x21 | MSI_DATA_TRIGGER_LEVEL), 0b11),
+            Ok(X86MsiRoute {
+                vector: 0x21,
+                target_mask: 0b10,
+                level_triggered: true,
+            })
+        );
+        assert_eq!(
+            decode_msi_route(
+                msi(1 << 12, 0x21 | MSI_DATA_TRIGGER_LEVEL | (1 << 14)),
+                0b11
+            ),
+            Ok(X86MsiRoute {
+                vector: 0x21,
+                target_mask: 0b10,
+                level_triggered: true,
             })
         );
     }

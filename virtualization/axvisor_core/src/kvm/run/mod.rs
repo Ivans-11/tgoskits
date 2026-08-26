@@ -34,6 +34,8 @@ use x86::{update_vcpu_run_interrupt_state, vcpu_run_irq_window_open};
 
 use super::{CONTROL_FILES, ControlFileState, take_control_vcpu_interrupts};
 #[cfg(target_arch = "x86_64")]
+use crate::kvm::eventfd::is_userspace_eoi_vector;
+#[cfg(target_arch = "x86_64")]
 use crate::kvm::memory::handle_memory_slot_page_fault;
 use crate::{
     kvm::{
@@ -188,6 +190,16 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 {
                     if let AxVCpuExitReason::InterruptEnd { vector } = exit_reason {
                         handle_control_ioapic_eoi(&vm, &vcpu, irqchip_created, vector);
+                        if let Some(vector) = vector
+                            && is_userspace_eoi_vector(vm_file, vector)
+                        {
+                            crate::kvm::util::write_vcpu_run_u8(
+                                control_file,
+                                abi::KVM_RUN_IOAPIC_EOI_VECTOR_OFFSET,
+                                vector,
+                            )?;
+                            break abi::KVM_EXIT_IOAPIC_EOI;
+                        }
                     }
                     inject_in_kernel_device_irqs(&vm, &vcpu, irqchip_created, pit2_created);
                 }

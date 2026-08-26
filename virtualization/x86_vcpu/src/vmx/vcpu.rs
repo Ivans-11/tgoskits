@@ -1158,6 +1158,7 @@ impl VmxVcpu {
             {
                 Some(self.handle_apic_base_msr_access(msr_rw == VmxExitReason::MSR_WRITE))
             }
+            VmxExitReason::MSR_WRITE if self.regs().rcx as u32 == 0x80b => None,
             msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE)
                 if {
                     let msr = self.regs().rcx as u32;
@@ -1194,6 +1195,14 @@ impl VmxVcpu {
             // guests such as Linux AP startup code to re-execute RDMSR forever.
             msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE) => {
                 Some(self.handle_ignored_msr_access(msr_rw == VmxExitReason::MSR_WRITE))
+            }
+            VmxExitReason::APIC_ACCESS
+                if self.apic_access_exit_info().is_ok_and(|info| {
+                    info.offset == 0xb0
+                        && matches!(info.access_type, ApicAccessExitType::LinearDataWrite)
+                }) =>
+            {
+                None
             }
             VmxExitReason::APIC_ACCESS => Some(self.handle_apic_access(exit_info)),
             _ => None,
@@ -2323,6 +2332,12 @@ impl AxArchVCpu for VmxVcpu {
                             AxVCpuExitReason::Nothing
                         }
                     }
+                    VmxExitReason::APIC_ACCESS => {
+                        self.advance_rip(exit_info.exit_instruction_length as _)?;
+                        AxVCpuExitReason::InterruptEnd {
+                            vector: self.vlapic.handle_eoi(),
+                        }
+                    }
                     VmxExitReason::EPT_VIOLATION => {
                         let info = self.nested_page_fault_info()?;
                         AxVCpuExitReason::NestedPageFault {
@@ -2336,6 +2351,12 @@ impl AxArchVCpu for VmxVcpu {
                         AxVCpuExitReason::SysRegRead {
                             addr: SysRegAddr::new(self.regs().rcx as _),
                             reg: 0,
+                        }
+                    }
+                    VmxExitReason::MSR_WRITE if self.regs().rcx as u32 == 0x80b => {
+                        self.advance_rip(exit_info.exit_instruction_length as _)?;
+                        AxVCpuExitReason::InterruptEnd {
+                            vector: self.vlapic.handle_eoi(),
                         }
                     }
                     VmxExitReason::MSR_WRITE => {

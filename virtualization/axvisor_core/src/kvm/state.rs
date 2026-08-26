@@ -18,6 +18,8 @@
 //! AxVisor and host-control resources, so they intentionally remain in
 //! axvisor_core.
 
+#[cfg(target_arch = "x86_64")]
+use alloc::collections::BTreeSet;
 use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -65,6 +67,8 @@ pub(in crate::kvm) struct VmFileState {
     pub(in crate::kvm) irqchip_created: bool,
     pub(in crate::kvm) pit2_created: bool,
     pub(in crate::kvm) gsi_routing_count: u32,
+    #[cfg(target_arch = "x86_64")]
+    pub(in crate::kvm) userspace_eoi_vectors: BTreeSet<u8>,
 }
 
 /// Host-side state associated with one KVM vCPU fd.

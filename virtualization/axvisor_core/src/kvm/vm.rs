@@ -64,6 +64,8 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
             irqchip_created: false,
             pit2_created: false,
             gsi_routing_count: 0,
+            #[cfg(target_arch = "x86_64")]
+            userspace_eoi_vectors: Default::default(),
         }),
     );
     Ok(control_file)

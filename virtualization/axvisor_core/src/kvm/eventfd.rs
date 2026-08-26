@@ -237,8 +237,8 @@ pub(in crate::kvm) fn signal_msi(
     }
     let msi = read_msi(arg)?;
     let (vm_id, active_vcpu_mask) = {
-        let control_files = CONTROL_FILES.lock();
-        let Some(ControlFileState::Vm(vm)) = control_files.get(&control_file) else {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
             return ax_err!(NotFound);
         };
         let active_vcpu_mask = vm
@@ -246,10 +246,30 @@ pub(in crate::kvm) fn signal_msi(
             .keys()
             .filter(|vcpu_id| **vcpu_id < u64::BITS)
             .fold(0u64, |mask, vcpu_id| mask | (1u64 << vcpu_id));
+        #[cfg(target_arch = "x86_64")]
+        {
+            let route =
+                decode_msi_route(msi, active_vcpu_mask).map_err(|_| AxError::Unsupported)?;
+            if route.level_triggered {
+                vm.userspace_eoi_vectors.insert(route.vector);
+            }
+        }
         (vm.vm.id(), active_vcpu_mask)
     };
     deliver_msi(vm_id, active_vcpu_mask, msi)?;
     Ok(0)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(in crate::kvm) fn is_userspace_eoi_vector(
+    control_file: api_control::ControlFileId,
+    vector: u8,
+) -> bool {
+    let control_files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vm(vm)) = control_files.get(&control_file) else {
+        return false;
+    };
+    vm.userspace_eoi_vectors.contains(&vector)
 }
 
 fn read_msi(arg: usize) -> AxResult<KvmMsi> {
@@ -432,13 +452,19 @@ fn inject_irqfd_gsi(control_file: api_control::ControlFileId, gsi: u32) -> AxRes
 
 fn deliver_msi(vm_id: usize, active_vcpu_mask: u64, msi: KvmMsi) -> AxResult {
     let route = decode_msi_route(msi, active_vcpu_mask).map_err(|_| AxError::Unsupported)?;
+    #[cfg(target_arch = "x86_64")]
+    let trigger = if route.level_triggered {
+        InterruptTriggerMode::LevelTriggered
+    } else {
+        InterruptTriggerMode::EdgeTriggered
+    };
+    #[cfg(target_arch = "x86_64")]
+    let interrupt = VirtualInterrupt::with_trigger(route.vector as usize, trigger);
+    #[cfg(not(target_arch = "x86_64"))]
+    let interrupt = VirtualInterrupt::edge(route.vector as usize);
     for vcpu_id in 0..u64::BITS as usize {
         if route.target_mask & (1u64 << vcpu_id) != 0 {
-            deliver_interrupt(InterruptRoute::new(
-                vm_id,
-                vcpu_id,
-                VirtualInterrupt::edge(route.vector as usize),
-            ));
+            deliver_interrupt(InterruptRoute::new(vm_id, vcpu_id, interrupt));
         }
     }
     Ok(())
