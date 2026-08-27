@@ -136,10 +136,10 @@ fn push_isa_interrupt_entries(entries: &mut Vec<Vec<u8>>) {
 }
 
 fn push_pci_interrupt_entries(entries: &mut Vec<Vec<u8>>) {
-    // QEMU q35 exposes the host rootfs virtio-blk as 00:03.0 in the current
-    // smoke setup. Add enough INTx routing for Linux to build the PCI IRQ
-    // table before a fuller virtual PCI IRQ router exists.
-    for dev in 0u8..4 {
+    // QEMU q35 exposes the host rootfs virtio-blk as 00:03.0 and the static
+    // guest network device as 00:04.0. Add enough INTx routing for Linux to
+    // build the PCI IRQ table before a fuller virtual PCI IRQ router exists.
+    for dev in 0u8..5 {
         for pin in 0u8..4 {
             let source_irq = (dev << 2) | pin;
             let intin = pci_intx_gsi(dev, pin);
@@ -152,10 +152,10 @@ const fn pci_intx_gsi(dev: u8, pin: u8) -> u8 {
     // Keep the guest MP table aligned with the q35 PCI interrupt line exposed
     // for the current rootfs device. This is intentionally narrow; a later PCI
     // IRQ router should derive it from platform/device topology instead.
-    if dev == 3 && pin == 0 {
-        11
-    } else {
-        16 + ((dev + pin) & 3)
+    match (dev, pin) {
+        (3, 0) => 11,
+        (4, 0) => 10,
+        _ => 16 + ((dev + pin) & 3),
     }
 }
 
@@ -203,5 +203,11 @@ mod tests {
             u32::from_le_bytes([fp[4], fp[5], fp[6], fp[7]]) as usize,
             MP_CONFIG_GPA
         );
+    }
+
+    #[test]
+    fn routes_static_virtio_devices_to_q35_intx_lines() {
+        assert_eq!(pci_intx_gsi(3, 0), 11);
+        assert_eq!(pci_intx_gsi(4, 0), 10);
     }
 }
