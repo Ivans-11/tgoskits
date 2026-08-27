@@ -1126,6 +1126,21 @@ impl VmxVcpu {
         // - cr access: just panic;
         match exit_info.exit_reason {
             VmxExitReason::INTERRUPT_WINDOW => Some(self.handle_interrupt_window()),
+            // Linux guests (including Firecracker's default guest) may use
+            // MONITOR/MWAIT while idle.  These instructions are intercepted
+            // by VMX but do not require emulation for our VMM; advance RIP and
+            // resume execution, matching the SVM backend's treatment.
+            VmxExitReason::MONITOR_INSTRUCTION | VmxExitReason::MWAIT_INSTRUCTION => {
+                // VM_EXIT_INSTRUCTION_LEN is architecturally reported for
+                // these exits, but older VMCS implementations can return 0;
+                // both instructions are three bytes in their legacy encoding.
+                let len = if exit_info.exit_instruction_length == 0 {
+                    3
+                } else {
+                    exit_info.exit_instruction_length
+                };
+                Some(self.advance_rip(len as _))
+            }
             VmxExitReason::XSETBV => Some(self.handle_xsetbv()),
             VmxExitReason::CR_ACCESS => Some(self.handle_cr()),
             VmxExitReason::CPUID => Some(self.handle_cpuid()),
@@ -1551,6 +1566,14 @@ impl VmxVcpu {
                     data: self.guest_regs.get_reg_of_index(reg) as u32 as u64,
                 })
             }
+            (true, 0x88, None) => {
+                let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
+                Some(AxVCpuExitReason::MmioWrite {
+                    addr,
+                    width: AccessWidth::Byte,
+                    data: self.guest_regs.get_reg_of_index(reg) as u8 as u64,
+                })
+            }
             (true, 0xc7, None) if (modrm >> 3) & 0x7 == 0 => {
                 let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
                 let mut data = 0u32;
@@ -1560,6 +1583,19 @@ impl VmxVcpu {
                 Some(AxVCpuExitReason::MmioWrite {
                     addr,
                     width: AccessWidth::Dword,
+                    data: data as u64,
+                })
+            }
+            // Firecracker's boot-timer guest init writes its magic byte with
+            // `movb imm8, [absolute-mmio]` (opcode C6 /0).  Decode this form
+            // so the access is returned to userspace as KVM_EXIT_MMIO rather
+            // than being reported as an opaque nested-page fault.
+            (true, 0xc6, None) if (modrm >> 3) & 0x7 == 0 => {
+                let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
+                let data = self.read_guest_u8(imm_addr).ok()?;
+                Some(AxVCpuExitReason::MmioWrite {
+                    addr,
+                    width: AccessWidth::Byte,
                     data: data as u64,
                 })
             }
