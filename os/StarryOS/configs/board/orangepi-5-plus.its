@@ -1,0 +1,52 @@
+/dts-v1/;
+
+/*
+ * FIT description for the Orange Pi 5 Plus StarryOS image.
+ *
+ * This is the companion ITS for orangepi-5-plus.toml. `cargo xtask starry
+ * build --config os/StarryOS/configs/board/orangepi-5-plus.toml` renders the
+ * ${kernel_bin} placeholder and automatically invokes mkimage. The DTB path
+ * is relative to the temporary ITS directory under target/.../release.
+ */
+/ {
+    description = "StarryOS for Orange Pi 5 Plus";
+    #address-cells = <1>;
+
+    images {
+        kernel {
+            description = "StarryOS kernel";
+            data = /incbin/("${kernel_bin}");
+            type = "kernel";
+            arch = "arm64";
+            os = "linux";
+            compression = "none";
+            load = <0x00400000>;
+            entry = <0x00400000>;
+            hash-1 {
+                algo = "sha256";
+            };
+        };
+
+        fdt {
+            description = "rk3588-orangepi-5-plus";
+            data = /incbin/("../../../os/StarryOS/configs/board/orangepi-5-plus.dtb");
+            type = "flat_dt";
+            arch = "arm64";
+            compression = "none";
+            load = <0x0a100000>;
+            hash-1 {
+                algo = "sha256";
+            };
+        };
+    };
+
+    configurations {
+        default = "conf-1";
+
+        conf-1 {
+            description = "StarryOS for Orange Pi 5 Plus";
+            kernel = "kernel";
+            fdt = "fdt";
+        };
+    };
+};
