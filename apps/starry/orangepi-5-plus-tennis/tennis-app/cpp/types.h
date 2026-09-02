@@ -137,6 +137,10 @@ struct Config {
     // Bucket approach.
     float bucket_area_deposit = 0.90f;
     float bucket_area_brake = 0.70f;
+    float bucket_area_hold = 0.70f;
+    int bucket_area_hold_ms = 3000;
+    int bucket_area_hold_reverse_speed = 28;
+    int bucket_area_hold_reverse_ms = 500;
     int bucket_approach_spd = 45;
     int bucket_brake_spd = 35;
     float bucket_k_turn = 20.0f;

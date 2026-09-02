@@ -291,6 +291,65 @@ bool bucket_approach_uses_configured_speed_bands() {
                   "bucket bias above half a step must round away from zero");
 }
 
+bool bucket_area_hold_reverses_once_and_rearms() {
+    tennis::Config config;
+    config.stop_confirm_cnt = 1;
+    config.bucket_confirm_cnt = 1;
+    config.brake_hold_ms = 0;
+    config.grab_settle_ms = 0;
+    config.bucket_area_hold = 0.70f;
+    config.bucket_area_deposit = 0.82f;
+    config.bucket_area_hold_ms = 3000;
+    config.bucket_area_hold_reverse_speed = 28;
+    config.bucket_area_hold_reverse_ms = 500;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(0));
+    machine.tick(ms(0));
+    machine.tick(ms(0));
+    machine.step(bucket_detection(0.1f), ms(10));
+
+    auto output = machine.step(bucket_detection(0.70f), ms(100));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive,
+                "bucket hold must begin without an immediate reverse"))
+        return false;
+    output = machine.step(bucket_detection(0.70f), ms(3099));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive,
+                "bucket hold must wait for the configured duration"))
+        return false;
+    output = machine.step(bucket_detection(0.70f), ms(3100));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == -28 && output.right == -28,
+                "bucket hold must reverse once after the deadline"))
+        return false;
+    output = *machine.tick(ms(3599));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == -28 && output.right == -28,
+                "bucket hold reverse must last for its configured duration"))
+        return false;
+    output = *machine.tick(ms(3600));
+    if (!expect(output.motor_op == tennis::MotorOp::Standby,
+                "bucket hold reverse must finish with a stop"))
+        return false;
+    output = machine.step(bucket_detection(0.70f), ms(3700));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left != -28,
+                "bucket hold must not repeat while area stays in range"))
+        return false;
+
+    machine.step(bucket_detection(0.69f), ms(3800));
+    output = machine.step(bucket_detection(0.70f), ms(3900));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive,
+                "bucket hold must rearm after leaving the range"))
+        return false;
+    output = machine.step(bucket_detection(0.70f), ms(6900));
+    return expect(output.motor_op == tennis::MotorOp::Drive &&
+                      output.left == -28 && output.right == -28,
+                  "rearmed bucket hold must reverse again after the deadline");
+}
+
 bool bucket_search_uses_configured_in_place_speed() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
@@ -557,6 +616,7 @@ int main() {
     if (!chase_uses_proportional_executable_steering()) return 1;
     if (!motor_dead_zone_maps_each_wheel_independently()) return 1;
     if (!bucket_approach_uses_configured_speed_bands()) return 1;
+    if (!bucket_area_hold_reverses_once_and_rearms()) return 1;
     if (!bucket_search_uses_configured_in_place_speed()) return 1;
     if (!bucket_search_reverses_after_estimated_two_turns()) return 1;
     if (!fresh_search_episodes_alternate_initial_direction()) return 1;

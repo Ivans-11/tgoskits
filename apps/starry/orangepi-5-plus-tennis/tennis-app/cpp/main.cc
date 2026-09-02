@@ -272,6 +272,10 @@ static void usage(const char *prog) {
         "  --bucket-min-area <n>    minimum connected red pixels for a bucket\n"
         "  --bucket-area-brake <f>  bucket area ratio that selects near speed\n"
         "  --bucket-area-deposit <f> bucket area ratio that triggers deposit\n"
+        "  --bucket-area-hold <f>   bucket area ratio that starts hold timer\n"
+        "  --bucket-area-hold-ms <n> hold time before one reverse\n"
+        "  --bucket-area-hold-reverse-speed <n> reverse speed after hold\n"
+        "  --bucket-area-hold-reverse-ms <n> reverse duration after hold\n"
         "  --bucket-k-turn <f>      proportional bucket steering gain\n"
         "  --bucket-max-bias <n>    maximum bucket steering wheel bias\n"
         "  --bucket-approach-speed <n> far-distance bucket approach speed\n"
@@ -431,6 +435,14 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.bucket_area_brake = std::atof(value.c_str());
     else if (key == "bucket-area-deposit")
         o.cfg.bucket_area_deposit = std::atof(value.c_str());
+    else if (key == "bucket-area-hold")
+        o.cfg.bucket_area_hold = std::atof(value.c_str());
+    else if (key == "bucket-area-hold-ms")
+        o.cfg.bucket_area_hold_ms = std::atoi(value.c_str());
+    else if (key == "bucket-area-hold-reverse-speed")
+        o.cfg.bucket_area_hold_reverse_speed = std::atoi(value.c_str());
+    else if (key == "bucket-area-hold-reverse-ms")
+        o.cfg.bucket_area_hold_reverse_ms = std::atoi(value.c_str());
     else if (key == "bucket-k-turn")
         o.cfg.bucket_k_turn = std::atof(value.c_str());
     else if (key == "bucket-max-bias")
@@ -591,6 +603,10 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--bucket-min-area", v)) { o.cfg.bucket_min_area = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-area-brake", v)) { o.cfg.bucket_area_brake = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-area-deposit", v)) { o.cfg.bucket_area_deposit = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-area-hold", v)) { o.cfg.bucket_area_hold = std::atof(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-area-hold-ms", v)) { o.cfg.bucket_area_hold_ms = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-area-hold-reverse-speed", v)) { o.cfg.bucket_area_hold_reverse_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--bucket-area-hold-reverse-ms", v)) { o.cfg.bucket_area_hold_reverse_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-k-turn", v)) { o.cfg.bucket_k_turn = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-max-bias", v)) { o.cfg.bucket_max_bias = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--bucket-approach-speed", v)) { o.cfg.bucket_approach_spd = std::atoi(v.c_str()); continue; }
@@ -685,6 +701,12 @@ static int parse_options(int argc, char **argv, Options &o) {
         !std::isfinite(o.cfg.bucket_area_deposit) ||
         o.cfg.bucket_area_brake <= 0.0f ||
         o.cfg.bucket_area_brake >= o.cfg.bucket_area_deposit ||
+        o.cfg.bucket_area_hold <= 0.0f ||
+        o.cfg.bucket_area_hold >= o.cfg.bucket_area_deposit ||
+        o.cfg.bucket_area_hold_ms < 0 ||
+        o.cfg.bucket_area_hold_reverse_speed < o.cfg.motor_min_speed ||
+        o.cfg.bucket_area_hold_reverse_speed > 100 ||
+        o.cfg.bucket_area_hold_reverse_ms < 0 ||
         o.cfg.bucket_area_deposit > 1.0f ||
         !std::isfinite(o.cfg.bucket_k_turn) || o.cfg.bucket_k_turn <= 0.0f ||
         o.cfg.bucket_max_bias < 1 || o.cfg.bucket_max_bias > 50 ||

@@ -61,6 +61,8 @@ void StateMachine::enter(GameState s) {
     state_action_started_ = false;
     state_deadline_ns_ = 0;
     empty_grab_recheck_pending_ = false;
+    bucket_area_hold_started_ns_ = 0;
+    bucket_area_hold_reverse_done_ = false;
     bucket_confirm_ = 0;
     bucket_lost_ = 0;
     if (s == GameState::CHASE_BALL) {
@@ -141,6 +143,16 @@ bool StateMachine::run_timed_phase(int64_t now_ns, ControlOutput &out) {
         }
         timed_phase_ = Normal;
         enter(GameState::CHASE_BALL);
+        out.motor_op = MotorOp::Standby;
+        return true;
+    case ReverseAfterBucketHold:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Drive;
+            out.left = -cfg_.bucket_area_hold_reverse_speed;
+            out.right = -cfg_.bucket_area_hold_reverse_speed;
+            return true;
+        }
+        timed_phase_ = Normal;
         out.motor_op = MotorOp::Standby;
         return true;
     case ReverseAfterDeposit:
@@ -416,9 +428,33 @@ ControlOutput StateMachine::approach_bucket(const BucketObs &bucket,
 
     const float area = bucket.area_ratio;
     if (area >= cfg_.bucket_area_deposit) {
+        bucket_area_hold_started_ns_ = 0;
         start_timed_phase(BrakeForDeposit, now_ns, cfg_.brake_hold_ms);
         out.motor_op = MotorOp::Brake;
         return out;
+    }
+
+    if (area < cfg_.bucket_area_hold) {
+        bucket_area_hold_started_ns_ = 0;
+        bucket_area_hold_reverse_done_ = false;
+    } else if (!bucket_area_hold_reverse_done_) {
+        if (bucket_area_hold_started_ns_ == 0)
+            bucket_area_hold_started_ns_ = now_ns;
+        const int64_t hold_ns =
+            static_cast<int64_t>(std::max(cfg_.bucket_area_hold_ms, 0)) *
+            kNsPerMs;
+        if (now_ns - bucket_area_hold_started_ns_ >= hold_ns) {
+            bucket_area_hold_reverse_done_ = true;
+            bucket_area_hold_started_ns_ = 0;
+            if (cfg_.bucket_area_hold_reverse_ms > 0) {
+                start_timed_phase(ReverseAfterBucketHold, now_ns,
+                                  cfg_.bucket_area_hold_reverse_ms);
+                out.motor_op = MotorOp::Drive;
+                out.left = -cfg_.bucket_area_hold_reverse_speed;
+                out.right = -cfg_.bucket_area_hold_reverse_speed;
+                return out;
+            }
+        }
     }
 
     int bk_off = static_cast<int>(bucket.cx) - half_w_;

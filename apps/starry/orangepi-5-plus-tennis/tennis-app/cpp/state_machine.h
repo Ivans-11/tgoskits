@@ -58,6 +58,7 @@ private:
         BrakeForGrab,
         BrakeForDeposit,
         ReverseAfterEmptyGrab,
+        ReverseAfterBucketHold,
         ReverseAfterDeposit,
     };
 
@@ -109,6 +110,8 @@ private:
     bool state_action_started_ = false;
     int64_t state_deadline_ns_ = 0;
     bool empty_grab_recheck_pending_ = false;
+    int64_t bucket_area_hold_started_ns_ = 0;
+    bool bucket_area_hold_reverse_done_ = false;
 
     OdometryEstimate odometry_;
     int64_t return_start_ns_ = 0;
