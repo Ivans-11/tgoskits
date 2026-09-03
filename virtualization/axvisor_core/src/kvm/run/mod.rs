@@ -138,6 +138,12 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
     }
 
     let exit_reason = loop {
+        // VM shutdown may be initiated by closing the VM fd while a vCPU fd
+        // is still open.  Stop KVM_RUN promptly so the last AxVM reference is
+        // released before a subsequent VM is created.
+        if vm.stopping() || vm.stopped() {
+            return Err(AxErrorKind::Interrupted.into());
+        }
         if current_vcpu_mp_state(control_file)? != abi::KVM_MP_STATE_RUNNABLE {
             wait_until_vcpu_runnable(control_file, &vcpu, &signal_mask)?;
         }

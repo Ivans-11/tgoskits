@@ -79,6 +79,7 @@ const IA32_SYSENTER_EIP: u32 = 0x176;
 const IA32_MISC_ENABLE: u32 = 0x1a0;
 const IA32_PAT: u32 = 0x277;
 const IA32_EFER: u32 = 0xc000_0080;
+const IA32_BNDCFGS: u32 = 0x0000_0d90;
 const IA32_STAR: u32 = 0xc000_0081;
 const IA32_LSTAR: u32 = 0xc000_0082;
 const IA32_CSTAR: u32 = 0xc000_0083;
@@ -189,6 +190,9 @@ pub struct VmxVcpu {
     misc_enable: u64,
     /// Guest-visible IA32_MISC_FEATURES_ENABLES value.
     misc_features_enables: u64,
+    /// Guest-visible MPX bounds configuration MSR.  Firecracker saves this
+    /// MSR during snapshots when the host CPUID advertises MPX.
+    bndcfgs: u64,
     /// Debug-address registers shared with the host.
     debugregs: crate::debugregs::DebugRegisterState,
     /// Guest and host DR6 values, which are not switched by VMX.
@@ -231,6 +235,7 @@ impl VmxVcpu {
             tsc_adjust: 0,
             misc_enable: 1,
             misc_features_enables: 0,
+            bndcfgs: 0,
             debugregs: crate::debugregs::DebugRegisterState::new(),
             guest_dr6: 0xffff_0ff0,
             host_dr6: 0,
@@ -1422,10 +1427,13 @@ impl VmxVcpu {
 
         let mut rip = self.gla2gva(GuestVirtAddr::from(exit_info.guest_rip));
         let mut rex = 0u8;
-        if let Err(err) = Self::skip_simple_prefixes(self, &mut rip, &mut rex) {
-            debug!("failed to decode EPT MMIO prefixes: {err:?}");
-            return None;
-        }
+        let operand_override = match Self::skip_simple_prefixes(self, &mut rip, &mut rex) {
+            Ok(value) => value,
+            Err(err) => {
+                debug!("failed to decode EPT MMIO prefixes: {err:?}");
+                return None;
+            }
+        };
 
         let opcode = self.read_guest_u8(rip).ok()?;
         rip += 1;
@@ -1560,10 +1568,23 @@ impl VmxVcpu {
             }
             (true, 0x89, None) => {
                 let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
+                let width = if rex & 0x8 != 0 {
+                    AccessWidth::Qword
+                } else if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
+                let mask = match width {
+                    AccessWidth::Byte => u8::MAX as u64,
+                    AccessWidth::Word => u16::MAX as u64,
+                    AccessWidth::Dword => u32::MAX as u64,
+                    AccessWidth::Qword => u64::MAX,
+                };
                 Some(AxVCpuExitReason::MmioWrite {
                     addr,
-                    width: AccessWidth::Dword,
-                    data: self.guest_regs.get_reg_of_index(reg) as u32 as u64,
+                    width,
+                    data: self.guest_regs.get_reg_of_index(reg) & mask,
                 })
             }
             (true, 0x88, None) => {
@@ -1576,14 +1597,19 @@ impl VmxVcpu {
             }
             (true, 0xc7, None) if (modrm >> 3) & 0x7 == 0 => {
                 let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
-                let mut data = 0u32;
-                for i in 0..size_of::<u32>() {
-                    data |= (self.read_guest_u8(imm_addr + i).ok()? as u32) << (i * 8);
+                let width = if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
+                let mut data = 0u64;
+                for i in 0..width.size() {
+                    data |= (self.read_guest_u8(imm_addr + i).ok()? as u64) << (i * 8);
                 }
                 Some(AxVCpuExitReason::MmioWrite {
                     addr,
-                    width: AccessWidth::Dword,
-                    data: data as u64,
+                    width,
+                    data,
                 })
             }
             // Firecracker's boot-timer guest init writes its magic byte with
@@ -1601,11 +1627,18 @@ impl VmxVcpu {
             }
             (false, 0x8b, None) => {
                 let reg = (((modrm >> 3) & 0x7) | ((rex & 0x4) << 1)) as usize;
+                let width = if rex & 0x8 != 0 {
+                    AccessWidth::Qword
+                } else if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
                 Some(AxVCpuExitReason::MmioRead {
                     addr,
-                    width: AccessWidth::Dword,
+                    width,
                     reg,
-                    reg_width: AccessWidth::Dword,
+                    reg_width: width,
                     signed_ext: false,
                 })
             }
@@ -1633,16 +1666,18 @@ impl VmxVcpu {
         }
     }
 
-    fn skip_simple_prefixes(&self, rip: &mut GuestVirtAddr, rex: &mut u8) -> AxResult {
+    fn skip_simple_prefixes(&self, rip: &mut GuestVirtAddr, rex: &mut u8) -> AxResult<bool> {
+        let mut operand_override = false;
         loop {
             let byte = self.read_guest_u8(*rip)?;
             if byte == 0x66 {
+                operand_override = true;
                 *rip += 1;
             } else if (0x40..=0x4f).contains(&byte) {
                 *rex = byte;
                 *rip += 1;
             } else {
-                return Ok(());
+                return Ok(operand_override);
             }
         }
     }
@@ -1965,6 +2000,14 @@ impl VmxVcpu {
                 LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
                     let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
                     if regs_clone.rcx == 0 {
+                        // AMX tile state is not represented by the x86 crate's
+                        // Xcr0 bitflags and cannot be switched safely here.
+                        // Hide AMX consistently so guests do not issue XSETBV
+                        // with the unsupported bits 17/18.
+                        const FEATURE_AMX_BF16: u32 = 1 << 22;
+                        const FEATURE_AMX_TILE: u32 = 1 << 24;
+                        const FEATURE_AMX_INT8: u32 = 1 << 25;
+                        res.edx &= !(FEATURE_AMX_BF16 | FEATURE_AMX_TILE | FEATURE_AMX_INT8);
                         // Bit 05: WAITPKG.
                         res.ecx.set_bit(5, false); // clear waitpkg
                         // Bit 16: LA57. Supports 57-bit linear addresses and five-level paging if 1.
@@ -1975,7 +2018,12 @@ impl VmxVcpu {
                 }
                 LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => {
                     self.load_guest_xstate();
-                    let res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    if regs_clone.rcx == 0 {
+                        // XCR0 bits 17/18 (XTILECFG/XTILEDATA) are not
+                        // supported by the x86 crate's Xcr0 representation.
+                        res.eax &= !((1 << 17) | (1 << 18));
+                    }
                     self.load_host_xstate();
 
                     res
@@ -2477,6 +2525,7 @@ impl AxArchVCpu for VmxVcpu {
             IA32_SYSENTER_EIP => Ok(VmcsGuestNW::IA32_SYSENTER_EIP.read()? as u64),
             IA32_MISC_ENABLE => Ok(self.misc_enable),
             IA32_MISC_FEATURES_ENABLES => Ok(self.misc_features_enables),
+            IA32_BNDCFGS => Ok(self.bndcfgs),
             IA32_PAT => VmcsGuest64::IA32_PAT.read(),
             IA32_EFER => VmcsGuest64::IA32_EFER.read(),
             IA32_FS_BASE => Ok(VmcsGuestNW::FS_BASE.read()? as u64),
@@ -2506,6 +2555,10 @@ impl AxArchVCpu for VmxVcpu {
             }
             IA32_MISC_FEATURES_ENABLES => {
                 self.misc_features_enables = value;
+                Ok(())
+            }
+            IA32_BNDCFGS => {
+                self.bndcfgs = value;
                 Ok(())
             }
             IA32_APIC_BASE => self.vlapic.set_apic_base(value),

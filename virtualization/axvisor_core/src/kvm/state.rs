@@ -52,6 +52,10 @@ pub(in crate::kvm) enum ControlFileState {
 #[derive(Clone)]
 pub(in crate::kvm) struct VmFileState {
     pub(in crate::kvm) vm: AxVMRef,
+    /// Set once the VM file descriptor is closed.  The VM state must remain
+    /// reachable while vCPU file descriptors are still open, matching Linux
+    /// KVM's reference-counted VM lifetime.
+    pub(in crate::kvm) vm_fd_closed: bool,
     pub(in crate::kvm) memory_slots: BTreeMap<u32, MemorySlot>,
     pub(in crate::kvm) ioeventfds: BTreeMap<IoEventFdKey, IoEventFd>,
     pub(in crate::kvm) irqfds: BTreeMap<IrqFdKey, IrqFd>,

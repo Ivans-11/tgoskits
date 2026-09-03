@@ -306,9 +306,9 @@ fn read_gsi_routes(arg: usize) -> AxResult<BTreeMap<u32, GsiRoute>> {
                 GsiRoute::IrqChip { pin }
             }
             abi::KVM_IRQ_ROUTING_MSI => {
-                let address_lo = read_u32_user(checked_add(offset, 20)?)?;
-                let address_hi = read_u32_user(checked_add(offset, 24)?)?;
-                let data = read_u32_user(checked_add(offset, 28)?)?;
+                let address_lo = read_u32_user(checked_add(offset, 16)?)?;
+                let address_hi = read_u32_user(checked_add(offset, 20)?)?;
+                let data = read_u32_user(checked_add(offset, 24)?)?;
                 GsiRoute::Msi {
                     address_lo,
                     address_hi,
@@ -345,6 +345,13 @@ fn start_irqfd_listener(
 pub(in crate::kvm) fn stop_irqfd(irqfd: IrqFd) {
     irqfd.cancel.store(true, Ordering::Release);
     let _ = api_control::write_user_fd_ref(irqfd.user_fd_ref, &1u64.to_ne_bytes());
+    // The listener owns a host task (and its kernel stack).  Wait for it to
+    // observe the cancellation and exit before dropping the VM state, so
+    // repeated VM create/destroy cycles do not leak tasks until spawn fails.
+    api_task::join_task(irqfd._task);
+    // Release the eventfd reference only after the listener has stopped.  It
+    // may still be reading the reference while cancellation is being
+    // observed, so releasing it before join races with the listener.
     let _ = api_control::release_user_fd_ref(irqfd.user_fd_ref);
 }
 

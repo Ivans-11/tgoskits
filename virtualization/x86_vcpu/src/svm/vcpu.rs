@@ -51,6 +51,7 @@ const IA32_SYSENTER_EIP: u32 = 0x176;
 const IA32_MISC_ENABLE: u32 = 0x1a0;
 const IA32_PAT: u32 = 0x277;
 const IA32_EFER: u32 = 0xc000_0080;
+const IA32_BNDCFGS: u32 = 0x0000_0d90;
 const IA32_STAR: u32 = 0xc000_0081;
 const IA32_LSTAR: u32 = 0xc000_0082;
 const IA32_CSTAR: u32 = 0xc000_0083;
@@ -236,6 +237,9 @@ pub struct SvmVcpu {
     misc_enable: u64,
     /// Guest-visible IA32_MISC_FEATURES_ENABLES value.
     misc_features_enables: u64,
+    /// Guest-visible MPX bounds configuration MSR used by Firecracker
+    /// snapshot save/restore when MPX is exposed by CPUID.
+    bndcfgs: u64,
     /// Debug-address registers shared with the host.
     debugregs: crate::debugregs::DebugRegisterState,
     /// Whether HLT exits should be returned to the VMM instead of used as poll points.
@@ -266,6 +270,7 @@ impl SvmVcpu {
             tsc_adjust: 0,
             misc_enable: 1,
             misc_features_enables: 0,
+            bndcfgs: 0,
             debugregs: crate::debugregs::DebugRegisterState::new(),
             hlt_exiting: false,
             xstate: XState::new(),
@@ -952,6 +957,12 @@ impl SvmVcpu {
                 LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
                     let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
                     if regs_clone.rcx == 0 {
+                        // AMX tile state is not represented by the x86 crate's
+                        // Xcr0 bitflags and cannot be switched safely here.
+                        const FEATURE_AMX_BF16: u32 = 1 << 22;
+                        const FEATURE_AMX_TILE: u32 = 1 << 24;
+                        const FEATURE_AMX_INT8: u32 = 1 << 25;
+                        res.edx &= !(FEATURE_AMX_BF16 | FEATURE_AMX_TILE | FEATURE_AMX_INT8);
                         // EBX feature flags.
                         const FEATURE_FSGSBASE: u32 = 1 << 0;
                         const FEATURE_SMEP: u32 = 1 << 7;
@@ -981,7 +992,12 @@ impl SvmVcpu {
                 }
                 LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => {
                     self.load_guest_xstate();
-                    let res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
+                    if regs_clone.rcx == 0 {
+                        // XCR0 bits 17/18 (XTILECFG/XTILEDATA) are not
+                        // supported by the x86 crate's Xcr0 representation.
+                        res.eax &= !((1 << 17) | (1 << 18));
+                    }
                     self.load_host_xstate();
                     res
                 }
@@ -1286,10 +1302,13 @@ impl SvmVcpu {
         let mut rip = start;
         let mut rex = 0u8;
         let mut address_override = false;
-        if let Err(err) = self.skip_simple_prefixes(&mut rip, &mut rex, &mut address_override) {
-            debug!("failed to decode SVM NPF MMIO prefixes: {err:?}");
-            return Ok(None);
-        }
+        let operand_override = match self.skip_simple_prefixes(&mut rip, &mut rex, &mut address_override) {
+            Ok(value) => value,
+            Err(err) => {
+                debug!("failed to decode SVM NPF MMIO prefixes: {err:?}");
+                return Ok(None);
+            }
+        };
 
         let opcode = self.read_guest_u8(rip)?;
         rip += 1;
@@ -1299,7 +1318,7 @@ impl SvmVcpu {
             let exit = if write {
                 self.handle_decoded_npt_mmio_write(
                     addr,
-                    self.guest_regs.rax as u32 as u64,
+                    if operand_override { self.guest_regs.rax as u16 as u64 } else { self.guest_regs.rax as u32 as u64 },
                     local_apic,
                 )?
             } else if local_apic {
@@ -1314,7 +1333,7 @@ impl SvmVcpu {
             } else {
                 AxVCpuExitReason::MmioRead {
                     addr,
-                    width: AccessWidth::Dword,
+                    width: if operand_override { AccessWidth::Word } else { AccessWidth::Dword },
                     reg: 0,
                     reg_width: AccessWidth::Dword,
                     signed_ext: false,
@@ -1355,41 +1374,62 @@ impl SvmVcpu {
             (true, 0x89, None) => {
                 let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
                 let end = self.skip_modrm_memory_operand(rip, modrm, rex)?;
-                let data = self.guest_regs.get_reg_of_index(reg) as u32 as u64;
+                let width = if rex & 0x8 != 0 {
+                    AccessWidth::Qword
+                } else if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
+                let mask = match width {
+                    AccessWidth::Byte => u8::MAX as u64,
+                    AccessWidth::Word => u16::MAX as u64,
+                    AccessWidth::Dword => u32::MAX as u64,
+                    AccessWidth::Qword => u64::MAX,
+                };
+                let data = self.guest_regs.get_reg_of_index(reg) & mask;
                 let exit = self.handle_decoded_npt_mmio_write(addr, data, local_apic)?;
                 Ok(Some((exit, (end.as_usize() - start.as_usize()) as u8)))
             }
             (true, 0xc7, None) if (modrm >> 3) & 0x7 == 0 => {
                 let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex)?;
-                let mut data = 0u32;
-                for i in 0..size_of::<u32>() {
-                    data |= (self.read_guest_u8(imm_addr + i)? as u32) << (i * 8);
+                let width = if operand_override { AccessWidth::Word } else { AccessWidth::Dword };
+                let mut data = 0u64;
+                for i in 0..width.size() {
+                    data |= (self.read_guest_u8(imm_addr + i)? as u64) << (i * 8);
                 }
                 let exit = self.handle_decoded_npt_mmio_write(addr, data as u64, local_apic)?;
                 Ok(Some((
                     exit,
-                    (imm_addr.as_usize() + size_of::<u32>() - start.as_usize()) as u8,
+                    (imm_addr.as_usize() + width.size() - start.as_usize()) as u8,
                 )))
             }
             (false, 0x8b, None) => {
                 let reg = (((modrm >> 3) & 0x7) | ((rex & 0x4) << 1)) as usize;
                 let end = self.skip_modrm_memory_operand(rip, modrm, rex)?;
+                let width = if rex & 0x8 != 0 {
+                    AccessWidth::Qword
+                } else if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
                 let exit = if local_apic {
                     let val =
                         <EmulatedLocalApic as BaseDeviceOps<AddrRange<GuestPhysAddr>>>::handle_read(
                             &self.vlapic,
                             addr,
-                            AccessWidth::Dword,
+                            width,
                         )?;
                     self.regs_mut()
-                        .set_reg_of_index(reg as u8, val as u32 as u64);
+                        .set_reg_of_index(reg as u8, val as u64);
                     AxVCpuExitReason::Nothing
                 } else {
                     AxVCpuExitReason::MmioRead {
                         addr,
-                        width: AccessWidth::Dword,
+                        width,
                         reg,
-                        reg_width: AccessWidth::Dword,
+                        reg_width: width,
                         signed_ext: false,
                     }
                 };
@@ -1461,10 +1501,12 @@ impl SvmVcpu {
         rip: &mut GuestVirtAddr,
         rex: &mut u8,
         address_override: &mut bool,
-    ) -> AxResult {
+    ) -> AxResult<bool> {
+        let mut operand_override = false;
         loop {
             let byte = self.read_guest_u8(*rip)?;
             if byte == 0x66 {
+                operand_override = true;
                 *rip += 1;
             } else if byte == 0x67 {
                 *address_override = true;
@@ -1473,7 +1515,7 @@ impl SvmVcpu {
                 *rex = byte;
                 *rip += 1;
             } else {
-                return Ok(());
+                return Ok(operand_override);
             }
         }
     }
@@ -1993,6 +2035,7 @@ impl AxArchVCpu for SvmVcpu {
             IA32_SYSENTER_EIP => Ok(vmcb.state.sysenter_eip.get()),
             IA32_MISC_ENABLE => Ok(self.misc_enable),
             IA32_MISC_FEATURES_ENABLES => Ok(self.misc_features_enables),
+            IA32_BNDCFGS => Ok(self.bndcfgs),
             IA32_PAT => Ok(vmcb.state.g_pat.get()),
             IA32_EFER => Ok(self.guest_visible_efer()),
             IA32_STAR => Ok(vmcb.state.star.get()),
@@ -2031,6 +2074,10 @@ impl AxArchVCpu for SvmVcpu {
             }
             IA32_MISC_FEATURES_ENABLES => {
                 self.misc_features_enables = value;
+                Ok(())
+            }
+            IA32_BNDCFGS => {
+                self.bndcfgs = value;
                 Ok(())
             }
             APIC_BASE_MSR => self.vlapic.set_apic_base(value),

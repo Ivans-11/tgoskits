@@ -83,27 +83,115 @@ fn open() -> AxResult<api_control::ControlFileId> {
 }
 
 fn close(control_file: api_control::ControlFileId) -> AxResult {
-    let removed = {
+    enum CloseAction {
+        Vcpu(VcpuFileState),
+        Vm {
+            control_file: api_control::ControlFileId,
+            irqfds: Vec<IrqFd>,
+        },
+        None,
+    }
+
+    let action = {
         let mut control_files = CONTROL_FILES.lock();
-        let Some(removed) = control_files.remove(&control_file) else {
+        let Some(state) = control_files.get(&control_file) else {
             return ax_err!(NotFound);
         };
-        if let ControlFileState::Vcpu(vcpu) = &removed
-            && let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file)
-        {
-            vm.vcpu_files.remove(&vcpu.vcpu_id);
+        match state {
+            ControlFileState::Vm(_) => {
+                // Keep the VM state alive until all vCPU fds have closed. The
+                // VM fd can be dropped before vCPU fds during process exit.
+                let has_vcpus = match control_files.get_mut(&control_file) {
+                    Some(ControlFileState::Vm(vm)) => {
+                        if !vm.vcpu_files.is_empty() {
+                            vm.vm_fd_closed = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                if has_vcpus {
+                    CloseAction::None
+                } else {
+                    let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file)
+                    else {
+                        unreachable!()
+                    };
+                    let irqfds = core::mem::take(&mut vm.irqfds).into_values().collect();
+                    // Keep the VM entry in CONTROL_FILES while irqfd listeners
+                    // are stopped.  Listeners may still perform one final
+                    // lookup after cancellation and must not observe NotFound
+                    // merely because teardown began.
+                    CloseAction::Vm {
+                        control_file,
+                        irqfds,
+                    }
+                }
+            }
+            ControlFileState::Vcpu(_) => {
+                let Some(ControlFileState::Vcpu(vcpu)) = control_files.remove(&control_file) else {
+                    unreachable!()
+                };
+                let cleanup_vm =
+                    if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file) {
+                        vm.vcpu_files.remove(&vcpu.vcpu_id);
+                        vm.vm_fd_closed && vm.vcpu_files.is_empty()
+                    } else {
+                        false
+                    };
+                if cleanup_vm {
+                    // The closing vCPU has already been removed from
+                    // `vm.vcpu_files`, so the VM cleanup loop below cannot
+                    // release its mmap area. Release this last vCPU mapping
+                    // explicitly before destroying the VM state.
+                    let _ = api_control::release_mmap_area(vcpu.mmap_area);
+                    let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file)
+                    else {
+                        unreachable!()
+                    };
+                    let irqfds = core::mem::take(&mut vm.irqfds).into_values().collect();
+                    CloseAction::Vm {
+                        control_file: vcpu.vm_file,
+                        irqfds,
+                    }
+                } else {
+                    CloseAction::Vcpu(vcpu)
+                }
+            }
+            ControlFileState::System => {
+                control_files.remove(&control_file);
+                CloseAction::None
+            }
         }
-        removed
     };
 
-    match removed {
-        ControlFileState::Vm(vm) => {
+    match action {
+        CloseAction::Vm {
+            control_file,
+            irqfds,
+        } => {
+            // Stop irqfd listeners before tearing down the VM and its vCPU
+            // resources.  A listener may be woken by a final device interrupt
+            // while the VM control-file entry is being removed; stopping and
+            // joining it first prevents delivery attempts against a deleted
+            // VM (and the resulting NotFound warning storm).
+            for irqfd in irqfds {
+                stop_irqfd(irqfd);
+            }
+            let vm = match CONTROL_FILES.lock().remove(&control_file) {
+                Some(ControlFileState::Vm(vm)) => vm,
+                _ => return ax_err!(NotFound),
+            };
             let _ = vm.vm.shutdown();
+            // KVM-created vCPUs are registered in the VMM task table.  Join
+            // and remove them before dropping the VM so their stacks and VM
+            // references do not accumulate across repeated VM lifetimes.
+            #[cfg(feature = "shell")]
+            crate::vmm::vcpus::cleanup_vm_vcpus(vm.vm.id());
             for ioeventfd in vm.ioeventfds.into_values() {
                 let _ = api_control::release_user_fd_ref(ioeventfd.user_fd_ref);
-            }
-            for irqfd in vm.irqfds.into_values() {
-                stop_irqfd(irqfd);
             }
             for memory_slot in vm.memory_slots.into_values() {
                 unmap_memory_slot(&vm.vm, memory_slot);
@@ -115,10 +203,10 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 }
             }
         }
-        ControlFileState::Vcpu(vcpu) => {
+        CloseAction::Vcpu(vcpu) => {
             let _ = api_control::release_mmap_area(vcpu.mmap_area);
         }
-        ControlFileState::System => {}
+        CloseAction::None => {}
     }
     Ok(())
 }

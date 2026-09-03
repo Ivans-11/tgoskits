@@ -45,6 +45,7 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
         control_file,
         ControlFileState::Vm(VmFileState {
             vm,
+            vm_fd_closed: false,
             memory_slots: BTreeMap::new(),
             ioeventfds: BTreeMap::new(),
             irqfds: BTreeMap::new(),

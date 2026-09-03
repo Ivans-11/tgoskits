@@ -93,7 +93,9 @@ pub(super) fn handle_cpu_up(
         set_vcpu_file_mp_state_by_id(control_file, target_vcpu_id, abi::KVM_MP_STATE_RUNNABLE)
     }
     #[cfg(feature = "vmx")]
-    queue_vcpu_startup_by_id(control_file, target_vcpu_id, entry_point)
+    {
+        queue_vcpu_startup_by_id(control_file, target_vcpu_id, entry_point)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

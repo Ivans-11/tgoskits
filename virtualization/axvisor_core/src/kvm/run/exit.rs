@@ -307,8 +307,28 @@ pub(super) fn complete_io_read(
     api_control::read_mmap_area(mmap_area, abi::KVM_RUN_IO_DATA_OFFSET, &mut bytes[..len])?;
     match pending {
         PendingIoRead::Accumulator { width } => {
-            let value = u64::from_ne_bytes(bytes) as usize & access_width_mask(width);
-            vcpu.set_gpr(abi::X86_RAX_REG_INDEX, value);
+            let value = u64::from_ne_bytes(bytes) & access_width_mask(width) as u64;
+            #[cfg(target_arch = "x86_64")]
+            {
+                // IN to AL/AX leaves the upper part of RAX unchanged; IN to
+                // EAX zero-extends to 64 bits.  Preserve those semantics so
+                // PCI probing code does not observe register corruption.
+                let mut regs_bytes = [0; abi::KVM_X86_REGS_SIZE as usize];
+                vcpu.get_kvm_regs(&mut regs_bytes)?;
+                let mut regs =
+                    KvmRegs::decode(&regs_bytes).map_err(|_| ax_errno::AxError::InvalidData)?;
+                regs.rax = match width {
+                    AccessWidth::Byte => (regs.rax & !0xff) | value,
+                    AccessWidth::Word => (regs.rax & !0xffff) | value,
+                    AccessWidth::Dword => value,
+                    AccessWidth::Qword => value,
+                };
+                regs.encode(&mut regs_bytes)
+                    .map_err(|_| ax_errno::AxError::InvalidData)?;
+                vcpu.set_kvm_regs(&regs_bytes)?;
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            vcpu.set_gpr(abi::X86_RAX_REG_INDEX, value as usize);
         }
         PendingIoRead::String {
             width,
