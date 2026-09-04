@@ -29,6 +29,10 @@ non-zero-vma = ["ax-percpu-macros/non-zero-vma"]
 # and the caller is responsible for setting the CPU-local base register (e.g. via
 # `init_percpu_reg`) before current-CPU access.
 custom-base = ["ax-percpu-macros/custom-base"]
+# Use a host-provided callback to resolve the current per-CPU area.  This is
+# intended for environments where the architecture's normal thread-pointer
+# register is owned by the host (for example, a kernel integration).
+external-base = []
 
 [dependencies]
 cfg-if = "1.0"

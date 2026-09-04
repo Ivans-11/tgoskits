@@ -1,3 +1,12 @@
+#[cfg(all(feature = "external-base", target_arch = "x86_64"))]
+unsafe extern "C" {
+    /// Resolve the per-CPU area for the currently running host CPU.
+    ///
+    /// The provider owns CPU identification and must return the base address
+    /// of the area corresponding to the calling context.
+    fn ax_percpu_current_base() -> usize;
+}
+
 /// Reads the architecture-specific per-CPU data register.
 ///
 /// This register is used to hold the per-CPU data base on each CPU.
@@ -6,17 +15,24 @@ pub fn read_percpu_reg() -> usize {
     unsafe {
         cfg_if::cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
-                #[cfg(target_os = "linux")]
+                #[cfg(feature = "external-base")]
                 {
-                    tp = GS;
+                    tp = ax_percpu_current_base();
                 }
-                #[cfg(target_os = "none")]
+                #[cfg(not(feature = "external-base"))]
                 {
-                    tp = x86::msr::rdmsr(x86::msr::IA32_GS_BASE) as usize
-                }
-                #[cfg(all(not(target_os = "linux"), not(target_os = "none")))]
-                {
-                    unimplemented!()
+                    #[cfg(target_os = "linux")]
+                    {
+                        tp = GS;
+                    }
+                    #[cfg(target_os = "none")]
+                    {
+                        tp = x86::msr::rdmsr(x86::msr::IA32_GS_BASE) as usize
+                    }
+                    #[cfg(all(not(target_os = "linux"), not(target_os = "none")))]
+                    {
+                        unimplemented!()
+                    }
                 }
             } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
                 core::arch::asm!("mv {}, gp", out(reg) tp)
@@ -45,19 +61,29 @@ pub unsafe fn write_percpu_reg(tp: usize) {
     unsafe {
         cfg_if::cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
-                #[cfg(target_os = "linux")]
+                #[cfg(feature = "external-base")]
                 {
-                    GS = tp;
+                    // The Linux kernel owns GS; the host callback selects the
+                    // current area on every access, so no register write is
+                    // needed here.
+                    let _ = tp;
                 }
-                #[cfg(target_os = "none")]
+                #[cfg(not(feature = "external-base"))]
                 {
-                    x86::msr::wrmsr(x86::msr::IA32_GS_BASE, tp as u64);
+                    #[cfg(target_os = "linux")]
+                    {
+                        GS = tp;
+                    }
+                    #[cfg(target_os = "none")]
+                    {
+                        x86::msr::wrmsr(x86::msr::IA32_GS_BASE, tp as u64);
+                    }
+                    #[cfg(all(not(target_os = "linux"), not(target_os = "none")))]
+                    {
+                        unimplemented!()
+                    }
+                    SELF_PTR.write_current_raw(tp);
                 }
-                #[cfg(all(not(target_os = "linux"), not(target_os = "none")))]
-                {
-                    unimplemented!()
-                }
-                SELF_PTR.write_current_raw(tp);
             } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
                 core::arch::asm!("mv gp, {}", in(reg) tp)
             } else if #[cfg(all(target_arch = "aarch64", not(feature = "arm-el2")))] {
