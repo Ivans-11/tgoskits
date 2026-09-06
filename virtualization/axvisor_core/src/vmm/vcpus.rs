@@ -303,7 +303,6 @@ fn ipi_target_from_exit(
 ///
 /// This should be called after all VCpu threads have exited to avoid resource leaks.
 /// It will join all VCpu tasks to ensure they are fully cleaned up.
-#[cfg(feature = "shell")]
 pub(crate) fn cleanup_vm_vcpus(vm_id: usize) {
     use alloc::vec::Vec;
 

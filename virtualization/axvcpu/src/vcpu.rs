@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use alloc::collections::BTreeMap;
 use core::cell::UnsafeCell;
 
 use ax_errno::{AxResult, ax_err};
 use ax_kspin::SpinNoIrq as Mutex;
 use axaddrspace::{GuestPhysAddr, HostPhysAddr};
-use axvisor_api::vmm::{VCpuId, VMId};
+use axvisor_api::{
+    task::TaskHandle,
+    vmm::{VCpuId, VMId},
+};
 
 use super::{AxArchVCpu, AxVCpuCpuidEntry, AxVCpuExitReason, InterruptTriggerMode};
 
@@ -428,12 +432,30 @@ impl<A: AxArchVCpu> AxVCpu<A> {
 #[ax_percpu::def_percpu]
 static mut CURRENT_VCPU: Option<*mut u8> = None;
 
+// A host-backed vCPU may execute in a userspace thread that can be preempted
+// and migrated while AxVisor is running.  Per-CPU state alone can then be
+// observed by a different KVM_RUN thread and falsely look nested.  Keep the
+// task-keyed state when the host provides a task identity, while retaining the
+// per-CPU fallback for execution without a task context.
+static CURRENT_VCPU_BY_TASK: Mutex<BTreeMap<TaskHandle, usize>> = Mutex::new(BTreeMap::new());
+
+fn current_task_handle() -> Option<TaskHandle> {
+    axvisor_api::task::current_task()
+}
+
 /// Get the current VCpu on the current physical CPU.
 ///
 /// It's guaranteed that each time before a method of [`AxArchVCpu`] is called, the current VCpu is set to the corresponding [`AxVCpu`].
 /// So methods of [`AxArchVCpu`] can always get the [`AxVCpu`] containing itself by calling this method.
 #[allow(static_mut_refs)]
 pub fn get_current_vcpu<'a, A: AxArchVCpu>() -> Option<&'a AxVCpu<A>> {
+    if let Some(task) = current_task_handle() {
+        return CURRENT_VCPU_BY_TASK
+            .lock()
+            .get(&task)
+            .copied()
+            .and_then(|p| unsafe { (p as *const AxVCpu<A>).as_ref() });
+    }
     unsafe {
         CURRENT_VCPU
             .current_ref_raw()
@@ -448,6 +470,13 @@ pub fn get_current_vcpu<'a, A: AxArchVCpu>() -> Option<&'a AxVCpu<A>> {
 /// See [`get_current_vcpu`] for more details.
 #[allow(static_mut_refs)]
 pub fn get_current_vcpu_mut<'a, A: AxArchVCpu>() -> Option<&'a mut AxVCpu<A>> {
+    if let Some(task) = current_task_handle() {
+        return CURRENT_VCPU_BY_TASK
+            .lock()
+            .get(&task)
+            .copied()
+            .and_then(|p| unsafe { (p as *mut AxVCpu<A>).as_mut() });
+    }
     unsafe {
         CURRENT_VCPU
             .current_ref_mut_raw()
@@ -464,6 +493,12 @@ pub fn get_current_vcpu_mut<'a, A: AxArchVCpu>() -> Option<&'a mut AxVCpu<A>> {
 /// Do not call this method unless you know what you are doing.
 #[allow(static_mut_refs)]
 pub unsafe fn set_current_vcpu<A: AxArchVCpu>(vcpu: &AxVCpu<A>) {
+    if let Some(task) = current_task_handle() {
+        CURRENT_VCPU_BY_TASK
+            .lock()
+            .insert(task, vcpu as *const _ as usize);
+        return;
+    }
     unsafe {
         CURRENT_VCPU
             .current_ref_mut_raw()
@@ -478,6 +513,10 @@ pub unsafe fn set_current_vcpu<A: AxArchVCpu>(vcpu: &AxVCpu<A>) {
 /// Do not call this method unless you know what you are doing.
 #[allow(static_mut_refs)]
 pub unsafe fn clear_current_vcpu<A: AxArchVCpu>() {
+    if let Some(task) = current_task_handle() {
+        CURRENT_VCPU_BY_TASK.lock().remove(&task);
+        return;
+    }
     unsafe {
         CURRENT_VCPU.current_ref_mut_raw().take();
     }

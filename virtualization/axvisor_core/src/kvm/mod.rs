@@ -111,7 +111,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                         }
                     }
                     _ => unreachable!(),
-                };
+                    };
                 if has_vcpus {
                     CloseAction::None
                 } else {
@@ -140,7 +140,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                         vm.vm_fd_closed && vm.vcpu_files.is_empty()
                     } else {
                         false
-                    };
+                };
                 if cleanup_vm {
                     // The closing vCPU has already been removed from
                     // `vm.vcpu_files`, so the VM cleanup loop below cannot
@@ -188,7 +188,6 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
             // KVM-created vCPUs are registered in the VMM task table.  Join
             // and remove them before dropping the VM so their stacks and VM
             // references do not accumulate across repeated VM lifetimes.
-            #[cfg(feature = "shell")]
             crate::vmm::vcpus::cleanup_vm_vcpus(vm.vm.id());
             for ioeventfd in vm.ioeventfds.into_values() {
                 let _ = api_control::release_user_fd_ref(ioeventfd.user_fd_ref);

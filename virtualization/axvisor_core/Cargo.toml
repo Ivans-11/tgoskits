@@ -24,7 +24,7 @@ hashbrown = "0.14"
 byte-unit = { version = "5", default-features = false, features = ["byte"] }
 ax-cpumask = { workspace = true }
 ax-kernel-guard = { workspace = true }
-ax-kspin = { workspace = true }
+ax-kspin = { workspace = true, features = ["smp"] }
 ax-lazyinit = { workspace = true }
 ax-percpu = { workspace = true, features = ["arm-el2", "non-zero-vma"] }
 ax-timer-list = { workspace = true }
