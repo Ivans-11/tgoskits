@@ -1,8 +1,22 @@
+use core::arch::asm;
+
 use raw_cpuid::CpuId;
-use x86::controlregs::{Xcr0, xcr0 as xcr0_read, xcr0_write};
+use x86::controlregs::{Xcr0, xcr0_write};
 use x86_64::registers::control::{Cr4, Cr4Flags};
 
 use crate::msr::Msr;
+
+// The x86 crate's xcr0() truncates bits unknown to its Xcr0 flags, including
+// AMX. Preserve all bits so the host can restore its existing XSAVE images.
+unsafe fn read_xcr0() -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: callers check XSAVE support and run with OSXSAVE enabled.
+    unsafe {
+        asm!("xgetbv", in("ecx") 0u32, out("eax") low, out("edx") high,
+             options(nomem, nostack, preserves_flags));
+    }
+    u64::from(low) | (u64::from(high) << 32)
+}
 
 /// Extended processor state switched between host and guest.
 #[derive(Debug)]
@@ -21,7 +35,7 @@ impl XState {
         let xsave_available = xsave_available();
         let xsaves_supported = xsave_available && xsaves_available();
         let xcr0 = if xsave_available {
-            unsafe { xcr0_read().bits() }
+            unsafe { read_xcr0() }
         } else {
             0
         };
@@ -44,7 +58,7 @@ impl XState {
     pub fn switch_to_guest(&mut self) {
         unsafe {
             if self.xsave_available {
-                self.host_xcr0 = xcr0_read().bits();
+                self.host_xcr0 = read_xcr0();
                 xcr0_write(Xcr0::from_bits_unchecked(self.guest_xcr0));
 
                 if self.xsaves_available {
@@ -58,7 +72,7 @@ impl XState {
     pub fn switch_to_host(&mut self) {
         unsafe {
             if self.xsave_available {
-                self.guest_xcr0 = xcr0_read().bits();
+                self.guest_xcr0 = read_xcr0();
                 xcr0_write(Xcr0::from_bits_unchecked(self.host_xcr0));
 
                 if self.xsaves_available {
