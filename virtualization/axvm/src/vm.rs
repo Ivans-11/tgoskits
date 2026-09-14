@@ -670,7 +670,17 @@ impl AxVM {
             loop {
                 let exit_reason = Self::with_bound_vcpu(&vcpu, || {
                     vcpu.set_hlt_exiting(true)?;
-                    vcpu.run()
+                    // `Nothing` means the architecture backend consumed the
+                    // exit and needs no upper-layer work. Keep the VMCS bound
+                    // for a bounded number of such batches instead of paying
+                    // an unbind/bind pair for each one.
+                    for _ in 0..8 {
+                        let exit_reason = vcpu.run()?;
+                        if !matches!(exit_reason, AxVCpuExitReason::Nothing) {
+                            return Ok(exit_reason);
+                        }
+                    }
+                    Ok(AxVCpuExitReason::Nothing)
                 })?;
                 match exit_reason {
                     AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
@@ -1047,6 +1057,31 @@ impl AxVM {
             .lock()
             .address_space
             .map_linear(gpa, hpa, size, flags)?;
+        Ok(())
+    }
+
+    /// Maps several equal-sized linear regions while taking the address-space
+    /// lock only once. Each tuple is still installed as an independent mapping.
+    pub fn map_regions_linear(
+        &self,
+        regions: &[(GuestPhysAddr, HostPhysAddr)],
+        size: usize,
+        flags: MappingFlags,
+    ) -> AxResult {
+        let mut address_space = self.inner_mut.lock();
+        let mut mapped = 0usize;
+        for &(gpa, hpa) in regions {
+            if let Err(err) = address_space
+                .address_space
+                .map_linear(gpa, hpa, size, flags)
+            {
+                for &(rollback_gpa, _) in &regions[..mapped] {
+                    let _ = address_space.address_space.unmap(rollback_gpa, size);
+                }
+                return Err(err.into());
+            }
+            mapped += 1;
+        }
         Ok(())
     }
 

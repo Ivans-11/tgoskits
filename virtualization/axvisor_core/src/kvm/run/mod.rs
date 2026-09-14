@@ -132,8 +132,8 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         complete_io_read(control_file, &vm, &vcpu, pending)?;
     }
 
-    update_vcpu_run_interrupt_state(control_file, &vcpu)?;
     if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
+        update_vcpu_run_interrupt_state(control_file, &vcpu)?;
         return Err(AxErrorKind::Interrupted.into());
     }
 
@@ -142,6 +142,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         // is still open.  Stop KVM_RUN promptly so the last AxVM reference is
         // released before a subsequent VM is created.
         if vm.stopping() || vm.stopped() {
+            update_vcpu_run_interrupt_state(control_file, &vcpu)?;
             return Err(AxErrorKind::Interrupted.into());
         }
         if current_vcpu_mp_state(control_file)? != abi::KVM_MP_STATE_RUNNABLE {
@@ -150,11 +151,11 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         for interrupt in take_control_vcpu_interrupts(control_file) {
             inject_virtual_interrupt(interrupt, &vcpu)?;
         }
-        update_vcpu_run_interrupt_state(control_file, &vcpu)?;
         if vcpu_run_interrupted(control_file, &signal_mask)? {
+            update_vcpu_run_interrupt_state(control_file, &vcpu)?;
             return Err(AxErrorKind::Interrupted.into());
         }
-        if vcpu_run_irq_window_open(control_file)? {
+        if vcpu_run_irq_window_open(control_file, &vcpu)? {
             break abi::KVM_EXIT_IRQ_WINDOW_OPEN;
         }
 
@@ -237,18 +238,18 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                     true,
                 )? => {}
             #[cfg(target_arch = "x86_64")]
-            AxVCpuExitReason::SysRegWrite { addr, value }
-                if handle_kvm_msr_write(&vm, &vcpu, addr.addr(), value)? =>
-            {
-                super::set_emulated_msr(control_file, addr.addr() as u32, value)?;
-                axvisor_api::task::yield_now();
-            }
-            #[cfg(target_arch = "x86_64")]
             AxVCpuExitReason::Hypercall {
                 nr: abi::KVM_HC_CLOCK_PAIRING,
                 ..
             } => {
                 vcpu.set_gpr(abi::X86_RAX_REG_INDEX, (-abi::KVM_ENOSYS) as usize);
+                axvisor_api::task::yield_now();
+            }
+            #[cfg(target_arch = "x86_64")]
+            AxVCpuExitReason::SysRegWrite { addr, value }
+                if handle_kvm_msr_write(&vm, &vcpu, addr.addr(), value)? =>
+            {
+                super::set_emulated_msr(control_file, addr.addr() as u32, value)?;
                 axvisor_api::task::yield_now();
             }
             #[cfg(target_arch = "x86_64")]
@@ -302,6 +303,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             }
         }
     };
+    update_vcpu_run_interrupt_state(control_file, &vcpu)?;
     write_vcpu_run_u32(control_file, abi::KVM_RUN_EXIT_REASON_OFFSET, exit_reason)?;
     Ok(0)
 }

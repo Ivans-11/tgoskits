@@ -59,6 +59,9 @@ use crate::{
 };
 
 const VMX_PREEMPTION_TIMER_SET_VALUE: u32 = 100_000;
+// Bound the time spent handling local exits without returning to the host's
+// outer vCPU loop. External interrupts and non-local exits return immediately.
+const MAX_BUILTIN_EXITS_PER_RUN: usize = 64;
 
 const QEMU_EXIT_PORT: u16 = 0x604;
 const HOST_QEMU_EXIT_PORT: u16 = 0xf4;
@@ -133,6 +136,30 @@ struct PendingEvent {
     level_triggered: bool,
 }
 
+/// Last values written to this VMCS's host-state area. VMCLEAR resets the
+/// launch state, but preserves these fields. Sample the host again on every
+/// bind: CPU identity alone cannot detect task/address-space or TLS changes.
+#[derive(Clone, Copy)]
+struct VmcsHostState {
+    pat: u64,
+    efer: u64,
+    cr0: usize,
+    cr3: usize,
+    cr4: usize,
+    es: u16,
+    cs: u16,
+    ss: u16,
+    ds: u16,
+    fs: u16,
+    gs: u16,
+    fs_base: usize,
+    gs_base: usize,
+    tr: u16,
+    tr_base: usize,
+    gdtr_base: usize,
+    idtr_base: usize,
+}
+
 /// A virtual CPU within a guest.
 #[repr(C)]
 pub struct VmxVcpu {
@@ -172,12 +199,20 @@ pub struct VmxVcpu {
     // VMCS-related fields
     /// The VMCS region.
     vmcs: VmxRegion,
+    /// Software shadow of host fields; never used to skip sampling the host.
+    vmcs_host_state: Option<VmcsHostState>,
+    /// Fault address/access captured during the VM-exit decode.
+    pending_fault_info: Option<NestedPageFaultInfo>,
+    /// Last successfully applied HLT-exit policy. VMCLEAR preserves controls.
+    hlt_exiting: Option<bool>,
     /// The I/O bitmap for the VMCS.
     io_bitmap: IOBitmap,
     /// The MSR bitmap for the VMCS.
     msr_bitmap: MsrBitmap,
     /// Guest/host syscall MSRs switched by VM-entry and VM-exit.
     msr_switch: VmxMsrSwitch<5>,
+    /// Host task whose syscall MSRs are currently in the VMCS switch list.
+    msr_host_task: Option<axvisor_api::task::TaskHandle>,
 
     // Interrupt-related fields
     /// Pending events to be injected to the guest.
@@ -227,9 +262,13 @@ impl VmxVcpu {
             cpuid: Vec::new(),
             // is_host: false,
             vmcs: VmxRegion::new(vmcs_revision_id, false)?,
+            vmcs_host_state: None,
+            pending_fault_info: None,
+            hlt_exiting: None,
             io_bitmap: IOBitmap::passthrough_all()?,
             msr_bitmap: MsrBitmap::passthrough_all()?,
             msr_switch: VmxMsrSwitch::new(SWITCHED_MSR_INDICES)?,
+            msr_host_task: None,
             pending_events: VecDeque::with_capacity(8),
             vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
             tsc_adjust: 0,
@@ -259,7 +298,7 @@ impl VmxVcpu {
     // }
 
     /// Bind this [`VmxVcpu`] to current logical processor.
-    pub fn bind_to_current_processor(&self) -> AxResult {
+    pub fn bind_to_current_processor(&mut self) -> AxResult {
         debug!(
             "VmxVcpu bind to current processor vmcs @ {:#x}",
             self.vmcs.phys_addr()
@@ -318,8 +357,9 @@ impl VmxVcpu {
     pub fn inner_run(&mut self) -> Option<VmxExitInfo> {
         self.inject_pending_events().unwrap();
 
-        // Run guest
-        self.prepare_msr_switch();
+        // Run guest. Host syscall MSRs are prepared by `run()` once for the
+        // whole bounded internal-exit batch; callers of this low-level helper
+        // must not rely on it to refresh host state independently.
         self.load_guest_xstate();
 
         #[cfg(feature = "tracing")]
@@ -357,6 +397,11 @@ impl VmxVcpu {
 
         // Handle vm-exits
         let exit_info = self.exit_info().unwrap();
+        if exit_info.exit_reason == VmxExitReason::EPT_VIOLATION {
+            self.pending_fault_info = self.nested_page_fault_info().ok();
+        } else {
+            self.pending_fault_info = None;
+        }
         // debug!("VM exit: {:#x?}", exit_info);
 
         match self.builtin_vmexit_handler(&exit_info) {
@@ -650,23 +695,7 @@ impl VmxVcpu {
         Ok(())
     }
 
-    fn setup_vmcs_host(&self) -> AxResult {
-        VmcsHost64::IA32_PAT.write(Msr::IA32_PAT.read())?;
-        VmcsHost64::IA32_EFER.write(Msr::IA32_EFER.read())?;
-
-        VmcsHostNW::CR0.write(Cr0::read_raw() as _)?;
-        VmcsHostNW::CR3.write(Cr3::read_raw().0.start_address().as_u64() as _)?;
-        VmcsHostNW::CR4.write(Cr4::read_raw() as _)?;
-
-        VmcsHost16::ES_SELECTOR.write(x86::segmentation::es().bits())?;
-        VmcsHost16::CS_SELECTOR.write(x86::segmentation::cs().bits())?;
-        VmcsHost16::SS_SELECTOR.write(x86::segmentation::ss().bits())?;
-        VmcsHost16::DS_SELECTOR.write(x86::segmentation::ds().bits())?;
-        VmcsHost16::FS_SELECTOR.write(x86::segmentation::fs().bits())?;
-        VmcsHost16::GS_SELECTOR.write(x86::segmentation::gs().bits())?;
-        VmcsHostNW::FS_BASE.write(Msr::IA32_FS_BASE.read() as _)?;
-        VmcsHostNW::GS_BASE.write(Msr::IA32_GS_BASE.read() as _)?;
-
+    fn setup_vmcs_host(&mut self) -> AxResult {
         let tr = unsafe { x86::task::tr() };
         let mut gdtp = DescriptorTablePointer::<u64>::default();
         let mut idtp = DescriptorTablePointer::<u64>::default();
@@ -674,15 +703,59 @@ impl VmxVcpu {
             dtables::sgdt(&mut gdtp);
             dtables::sidt(&mut idtp);
         }
-        VmcsHost16::TR_SELECTOR.write(tr.bits())?;
-        VmcsHostNW::TR_BASE.write(get_tr_base(tr, &gdtp) as _)?;
-        VmcsHostNW::GDTR_BASE.write(gdtp.base as _)?;
-        VmcsHostNW::IDTR_BASE.write(idtp.base as _)?;
-        VmcsHostNW::RIP.write(Self::vmx_exit as *const () as usize)?;
-
-        VmcsHostNW::IA32_SYSENTER_ESP.write(0)?;
-        VmcsHostNW::IA32_SYSENTER_EIP.write(0)?;
-        VmcsHost32::IA32_SYSENTER_CS.write(0)?;
+        let current = VmcsHostState {
+            pat: Msr::IA32_PAT.read(),
+            efer: Msr::IA32_EFER.read(),
+            cr0: Cr0::read_raw() as _,
+            cr3: Cr3::read_raw().0.start_address().as_u64() as _,
+            cr4: Cr4::read_raw() as _,
+            es: x86::segmentation::es().bits(),
+            cs: x86::segmentation::cs().bits(),
+            ss: x86::segmentation::ss().bits(),
+            ds: x86::segmentation::ds().bits(),
+            fs: x86::segmentation::fs().bits(),
+            gs: x86::segmentation::gs().bits(),
+            fs_base: Msr::IA32_FS_BASE.read() as _,
+            gs_base: Msr::IA32_GS_BASE.read() as _,
+            tr: tr.bits(),
+            tr_base: get_tr_base(tr, &gdtp) as _,
+            gdtr_base: gdtp.base as _,
+            idtr_base: idtp.base as _,
+        };
+        // Invalidate before writing so a partial failure forces a full refresh
+        // on the next bind. VM entry/exit never changes the host-state fields.
+        let previous = self.vmcs_host_state.take();
+        macro_rules! update {
+            ($field:ident, $vmcs:expr) => {
+                if previous.is_none_or(|old| old.$field != current.$field) {
+                    $vmcs.write(current.$field)?;
+                }
+            };
+        }
+        update!(pat, VmcsHost64::IA32_PAT);
+        update!(efer, VmcsHost64::IA32_EFER);
+        update!(cr0, VmcsHostNW::CR0);
+        update!(cr3, VmcsHostNW::CR3);
+        update!(cr4, VmcsHostNW::CR4);
+        update!(es, VmcsHost16::ES_SELECTOR);
+        update!(cs, VmcsHost16::CS_SELECTOR);
+        update!(ss, VmcsHost16::SS_SELECTOR);
+        update!(ds, VmcsHost16::DS_SELECTOR);
+        update!(fs, VmcsHost16::FS_SELECTOR);
+        update!(gs, VmcsHost16::GS_SELECTOR);
+        update!(fs_base, VmcsHostNW::FS_BASE);
+        update!(gs_base, VmcsHostNW::GS_BASE);
+        update!(tr, VmcsHost16::TR_SELECTOR);
+        update!(tr_base, VmcsHostNW::TR_BASE);
+        update!(gdtr_base, VmcsHostNW::GDTR_BASE);
+        update!(idtr_base, VmcsHostNW::IDTR_BASE);
+        if previous.is_none() {
+            VmcsHostNW::RIP.write(Self::vmx_exit as *const () as usize)?;
+            VmcsHostNW::IA32_SYSENTER_ESP.write(0)?;
+            VmcsHostNW::IA32_SYSENTER_EIP.write(0)?;
+            VmcsHost32::IA32_SYSENTER_CS.write(0)?;
+        }
+        self.vmcs_host_state = Some(current);
 
         Ok(())
     }
@@ -803,6 +876,8 @@ impl VmxVcpu {
                 | CpuCtrl::CR8_STORE_EXITING)
                 .bits(),
         )?;
+        // The complete primary-control setup supersedes any previous policy.
+        self.hlt_exiting = None;
 
         // Enable EPT, RDTSCP, INVPCID, and unrestricted guest.
         use SecondaryControls as CpuCtrl2;
@@ -2132,9 +2207,14 @@ impl VmxVcpu {
     }
 
     fn prepare_msr_switch(&mut self) {
+        let task = axvisor_api::task::current_task();
+        if task.is_some() && self.msr_host_task == task {
+            return;
+        }
         for (slot, msr) in SWITCHED_HOST_MSRS.into_iter().enumerate() {
             self.msr_switch.set_host_value(slot, msr.read());
         }
+        self.msr_host_task = task;
     }
 
     fn complete_string_io_write(
@@ -2243,7 +2323,25 @@ impl AxArchVCpu for VmxVcpu {
     }
 
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
-        let inner_exit = self.inner_run();
+        // Both static and control callers bind this vCPU with host IRQs saved.
+        // An exit handled entirely here needs neither a new binding nor a new
+        // VMLAUNCH. Keep the VMCS current and use VMRESUME for the next entry.
+        // Never extend the binding into upper-layer page faults/device handling
+        // (which may sleep), and do not hide AP startup requests from the VMM.
+        // IRQs are saved by the outer binding guard, so the host task cannot
+        // be switched while this batch executes. Reading these MSRs for every
+        // internally handled exit is therefore redundant and expensive.
+        self.prepare_msr_switch();
+        let mut inner_exit = None;
+        for _ in 0..MAX_BUILTIN_EXITS_PER_RUN {
+            inner_exit = self.inner_run();
+            if inner_exit.is_some() {
+                break;
+            }
+            if let Some(exit) = self.take_pending_cpu_up_exit() {
+                return Ok(exit);
+            }
+        }
         match inner_exit {
             Some(exit_info) => Ok(if exit_info.entry_failure {
                 AxVCpuExitReason::FailEntry {
@@ -2467,10 +2565,13 @@ impl AxArchVCpu for VmxVcpu {
 
     fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
         let exit_info = self.exit_info()?;
+        let info = match self.pending_fault_info.take() {
+            Some(info) => info,
+            None => self.nested_page_fault_info()?,
+        };
         if exit_info.exit_reason != VmxExitReason::EPT_VIOLATION {
             return Ok(None);
         }
-        let info = self.nested_page_fault_info()?;
         let write = info.access_flags.contains(MappingFlags::WRITE);
         let read = info.access_flags.contains(MappingFlags::READ);
         if !(read || write) {
@@ -2496,6 +2597,9 @@ impl AxArchVCpu for VmxVcpu {
     }
 
     fn set_hlt_exiting(&mut self, enabled: bool) -> AxResult {
+        if self.hlt_exiting == Some(enabled) {
+            return Ok(());
+        }
         use super::vmcs::controls::PrimaryControls as CpuCtrl;
         let hlt_exiting = CpuCtrl::HLT_EXITING.bits();
         vmcs::set_control(
@@ -2504,7 +2608,9 @@ impl AxArchVCpu for VmxVcpu {
             VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.read()?,
             if enabled { hlt_exiting } else { 0 },
             if enabled { 0 } else { hlt_exiting },
-        )
+        )?;
+        self.hlt_exiting = Some(enabled);
+        Ok(())
     }
 
     fn set_gpr(&mut self, reg: usize, val: usize) {

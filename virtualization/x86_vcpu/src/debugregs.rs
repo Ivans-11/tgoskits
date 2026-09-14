@@ -37,15 +37,23 @@ impl DebugRegisterState {
     pub(crate) fn switch_to_guest(&mut self) {
         self.host_dr7 = read_dr7();
         write_dr7(DEBUG_CONTROL_DISABLED);
-        self.host_db = read_db();
-        write_db(self.guest_db);
+        // With the reset debug state there are no guest hardware breakpoints.
+        // Keep DR6/DR7 protected, but avoid the eight serializing DR0-DR3
+        // moves on every VM entry/exit. KVM similarly enables this path only
+        // when guest debugging is active.
+        if self.guest_db != [0; 4] {
+            self.host_db = read_db();
+            write_db(self.guest_db);
+        }
     }
 
     /// Captures guest debug addresses and restores the host state.
     pub(crate) fn switch_to_host(&mut self) {
         write_dr7(DEBUG_CONTROL_DISABLED);
-        self.guest_db = read_db();
-        write_db(self.host_db);
+        if self.guest_db != [0; 4] {
+            self.guest_db = read_db();
+            write_db(self.host_db);
+        }
         write_dr7(self.host_dr7);
     }
 }

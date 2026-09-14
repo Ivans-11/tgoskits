@@ -212,19 +212,24 @@ pub(super) fn update_vcpu_run_interrupt_state(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub(super) fn vcpu_run_irq_window_open(control_file: api_control::ControlFileId) -> AxResult<bool> {
-    Ok(
-        read_vcpu_run_u8(control_file, abi::KVM_RUN_REQUEST_INTERRUPT_WINDOW_OFFSET)? != 0
-            && read_vcpu_run_u8(
-                control_file,
-                abi::KVM_RUN_READY_FOR_INTERRUPT_INJECTION_OFFSET,
-            )? != 0,
-    )
+pub(super) fn vcpu_run_irq_window_open(
+    control_file: api_control::ControlFileId,
+    vcpu: &axvm::AxVCpuRef,
+) -> AxResult<bool> {
+    if read_vcpu_run_u8(control_file, abi::KVM_RUN_REQUEST_INTERRUPT_WINDOW_OFFSET)? == 0 {
+        return Ok(false);
+    }
+    update_vcpu_run_interrupt_state(control_file, vcpu)?;
+    Ok(read_vcpu_run_u8(
+        control_file,
+        abi::KVM_RUN_READY_FOR_INTERRUPT_INJECTION_OFFSET,
+    )? != 0)
 }
 
 #[cfg(not(target_arch = "x86_64"))]
 pub(super) fn vcpu_run_irq_window_open(
     _control_file: api_control::ControlFileId,
+    _vcpu: &axvm::AxVCpuRef,
 ) -> AxResult<bool> {
     Ok(false)
 }

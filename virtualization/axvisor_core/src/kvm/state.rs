@@ -25,13 +25,19 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 use axaddrspace::GuestPhysAddr;
 use axaddrspace::device::AccessWidth;
 use axvisor_api::{control as api_control, sync::WaitQueue, task::TaskHandle};
 use axvm::AxVMRef;
+#[cfg(target_arch = "x86_64")]
+use hashbrown::HashMap;
+#[cfg(target_arch = "x86_64")]
+type MappedPages = HashMap<u64, MappedMemoryPage>;
+#[cfg(not(target_arch = "x86_64"))]
+type MappedPages = BTreeMap<u64, MappedMemoryPage>;
 #[cfg(target_arch = "x86_64")]
 pub(in crate::kvm) use kvm_uapi::x86::{PvClockVcpuTimeInfo, PvClockWallClock};
 pub(in crate::kvm) use kvm_uapi::{
@@ -184,14 +190,48 @@ pub(in crate::kvm) struct MemorySlot {
     pub(in crate::kvm) userspace_addr: u64,
     pub(in crate::kvm) user_address_space: api_control::UserAddressSpaceId,
     pub(in crate::kvm) pinned_pages: api_control::PinnedUserPagesId,
-    pub(in crate::kvm) mapped_pages: BTreeMap<u64, MappedMemoryPage>,
+    pub(in crate::kvm) mapped_pages: MappedPages,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(in crate::kvm) struct MappedMemoryPage {
-    pub(in crate::kvm) pinned_pages: api_control::PinnedUserPagesId,
+    pub(in crate::kvm) pinned_pages: PinnedPageGroup,
     pub(in crate::kvm) writable: bool,
 }
+
+#[derive(Clone, Debug)]
+pub(in crate::kvm) struct PinnedPageGroup {
+    pub(in crate::kvm) id: api_control::PinnedUserPagesId,
+    remaining: Arc<AtomicUsize>,
+}
+
+impl PinnedPageGroup {
+    pub(in crate::kvm) fn new(id: api_control::PinnedUserPagesId, pages: usize) -> Self {
+        Self {
+            id,
+            remaining: Arc::new(AtomicUsize::new(pages.max(1))),
+        }
+    }
+
+    pub(in crate::kvm) fn release(&self) {
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = api_control::release_pinned_user_pages(self.id);
+        }
+    }
+}
+
+impl PartialEq for PinnedPageGroup {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for PinnedPageGroup {}
+impl PartialEq for MappedMemoryPage {
+    fn eq(&self, other: &Self) -> bool {
+        self.pinned_pages == other.pinned_pages && self.writable == other.writable
+    }
+}
+impl Eq for MappedMemoryPage {}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(in crate::kvm) struct IoEventFdKey {

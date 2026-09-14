@@ -19,7 +19,7 @@ use axvm::AxVMRef;
 
 use super::{CONTROL_FILES, ControlFileState};
 #[cfg(target_arch = "x86_64")]
-use crate::kvm::state::MappedMemoryPage;
+use crate::kvm::state::{MappedMemoryPage, PinnedPageGroup};
 use crate::kvm::{
     abi::raw as abi,
     state::{MemorySlot, UserspaceMemoryRegion, VmFileState},
@@ -148,11 +148,21 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
     fault_addr: GuestPhysAddr,
     access_flags: MappingFlags,
 ) -> AxResult<bool> {
+    handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn handle_memory_slot_page_fault_inner(
+    vm_file: api_control::ControlFileId,
+    fault_addr: GuestPhysAddr,
+    access_flags: MappingFlags,
+    prefetched: bool,
+) -> AxResult<bool> {
     let fault_gpa = fault_addr.as_usize() as u64;
     let page_gpa = align_down_to_page(fault_gpa);
     let snapshot = {
-        let control_files = CONTROL_FILES.lock();
-        let Some(ControlFileState::Vm(vm)) = control_files.get(&vm_file) else {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
             return ax_err!(NotFound);
         };
         let Some((&slot_id, slot)) = memory_slot_for_gpa(vm, fault_gpa) else {
@@ -169,16 +179,41 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
         MemorySlotSnapshot::new(slot_id, slot, page_gpa)?
     };
 
-    // Match Linux KVM's GUP behavior: a read/execute fault only requires a
-    // readable host page. If the guest later writes it, pin it again with
-    // write access so that the host can perform COW or reject the write.
-    let writable = access_flags.contains(MappingFlags::WRITE);
-    let pinned = api_control::pin_user_pages(
-        snapshot.user_address_space,
-        snapshot.page_hva,
-        abi::PAGE_SIZE_USIZE,
-        writable,
-    )?;
+    // Match Linux KVM's GUP fast path: for a read fault, first try to retain a
+    // writable page. If the host mapping is read-only, fall back to a normal
+    // read pin. This lets the common anonymous/RAM case stay writable from the
+    // first EPT mapping, avoiding a second read->write EPT fault, while still
+    // preserving read-only userspace mappings and their COW semantics.
+    let write_fault = access_flags.contains(MappingFlags::WRITE);
+    let (pinned, writable) = if write_fault {
+        (
+            api_control::pin_user_pages(
+                snapshot.user_address_space,
+                snapshot.page_hva,
+                abi::PAGE_SIZE_USIZE,
+                true,
+            )?,
+            true,
+        )
+    } else {
+        match api_control::pin_user_pages(
+            snapshot.user_address_space,
+            snapshot.page_hva,
+            abi::PAGE_SIZE_USIZE,
+            true,
+        ) {
+            Ok(pinned) => (pinned, true),
+            Err(_) => (
+                api_control::pin_user_pages(
+                    snapshot.user_address_space,
+                    snapshot.page_hva,
+                    abi::PAGE_SIZE_USIZE,
+                    false,
+                )?,
+                false,
+            ),
+        }
+    };
     if pinned.pages.len() != 1 {
         let _ = api_control::release_pinned_user_pages(pinned.id);
         return ax_err!(InvalidInput);
@@ -232,7 +267,7 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
                 slot.mapped_pages.insert(
                     page_gpa,
                     MappedMemoryPage {
-                        pinned_pages: pinned.id,
+                        pinned_pages: PinnedPageGroup::new(pinned.id, 1),
                         writable,
                     },
                 );
@@ -246,7 +281,84 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
         let _ = api_control::release_pinned_user_pages(pinned.id);
     }
     if let Some(old_page) = replaced_page {
-        let _ = api_control::release_pinned_user_pages(old_page.pinned_pages);
+        old_page.pinned_pages.release();
+    }
+
+    // Fault handling must remain correct for sparse slots and read-only
+    // mappings.  Once the faulting page is installed, opportunistically map a
+    // small forward window using independent pin IDs.  The window is bounded
+    // to avoid turning a single access into an unbounded GUP operation; any
+    // failed speculative page is simply left for the normal fault path.
+    if result.is_ok() && !prefetched && writable {
+        let slot_end = snapshot
+            .guest_phys_addr
+            .saturating_add(snapshot.memory_size);
+        let count = ((slot_end.saturating_sub(page_gpa)) / abi::PAGE_SIZE_USIZE as u64)
+            .saturating_sub(1)
+            .min(63) as usize;
+        if count > 0 {
+            if let Ok(batch) = api_control::pin_user_pages(
+                snapshot.user_address_space,
+                snapshot.page_hva + abi::PAGE_SIZE_USIZE,
+                count * abi::PAGE_SIZE_USIZE,
+                true,
+            ) {
+                if batch.pages.is_empty() {
+                    let _ = api_control::release_pinned_user_pages(batch.id);
+                    return result;
+                }
+                let group = PinnedPageGroup::new(batch.id, batch.pages.len());
+                let flags = MappingFlags::READ
+                    | MappingFlags::WRITE
+                    | MappingFlags::EXECUTE
+                    | MappingFlags::USER;
+                let mut failed = 0usize;
+                let mut control_files = CONTROL_FILES.lock();
+                if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
+                    if let Some(slot) = vm.memory_slots.get_mut(&snapshot.slot_id) {
+                        let mut regions = alloc::vec::Vec::with_capacity(batch.pages.len());
+                        for (index, page_hpa) in batch.pages.iter().enumerate() {
+                            let next_gpa =
+                                page_gpa + (index as u64 + 1) * abi::PAGE_SIZE_USIZE as u64;
+                            if snapshot.matches(slot) && !slot.mapped_pages.contains_key(&next_gpa)
+                            {
+                                regions.push((
+                                    GuestPhysAddr::from(next_gpa as usize),
+                                    HostPhysAddr::from(page_hpa.as_usize()),
+                                ));
+                            } else {
+                                failed += 1;
+                            }
+                        }
+                        if vm
+                            .vm
+                            .map_regions_linear(&regions, abi::PAGE_SIZE_USIZE, flags)
+                            .is_ok()
+                        {
+                            for (gpa, _) in regions {
+                                slot.mapped_pages.insert(
+                                    gpa.as_usize() as u64,
+                                    MappedMemoryPage {
+                                        pinned_pages: group.clone(),
+                                        writable: true,
+                                    },
+                                );
+                            }
+                        } else {
+                            failed += regions.len();
+                        }
+                    } else {
+                        failed = batch.pages.len();
+                    }
+                } else {
+                    failed = batch.pages.len();
+                }
+                drop(control_files);
+                for _ in 0..failed {
+                    group.release();
+                }
+            }
+        }
     }
     result
 }
@@ -338,7 +450,7 @@ pub(in crate::kvm) fn unmap_memory_slot(vm: &AxVMRef, slot: MemorySlot) {
 
     for (page_gpa, mapped_page) in slot.mapped_pages {
         let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa as usize), abi::PAGE_SIZE_USIZE);
-        let _ = api_control::release_pinned_user_pages(mapped_page.pinned_pages);
+        mapped_page.pinned_pages.release();
     }
     if slot.user_address_space != 0 {
         let _ = api_control::release_user_address_space(slot.user_address_space);

@@ -59,11 +59,19 @@ impl XState {
         unsafe {
             if self.xsave_available {
                 self.host_xcr0 = read_xcr0();
-                xcr0_write(Xcr0::from_bits_unchecked(self.guest_xcr0));
+                // Like KVM, avoid a serializing write (and a possible nested
+                // VM exit) when the hardware already has the required value.
+                // Still sample every switch: host state can change between
+                // runs, and all XCR0 bits, including AMX, must be preserved.
+                if self.host_xcr0 != self.guest_xcr0 {
+                    xcr0_write(Xcr0::from_bits_unchecked(self.guest_xcr0));
+                }
 
                 if self.xsaves_available {
                     self.host_xss = Msr::IA32_XSS.read();
-                    Msr::IA32_XSS.write(self.guest_xss);
+                    if self.host_xss != self.guest_xss {
+                        Msr::IA32_XSS.write(self.guest_xss);
+                    }
                 }
             }
         }
@@ -73,11 +81,15 @@ impl XState {
         unsafe {
             if self.xsave_available {
                 self.guest_xcr0 = read_xcr0();
-                xcr0_write(Xcr0::from_bits_unchecked(self.host_xcr0));
+                if self.guest_xcr0 != self.host_xcr0 {
+                    xcr0_write(Xcr0::from_bits_unchecked(self.host_xcr0));
+                }
 
                 if self.xsaves_available {
                     self.guest_xss = Msr::IA32_XSS.read();
-                    Msr::IA32_XSS.write(self.host_xss);
+                    if self.guest_xss != self.host_xss {
+                        Msr::IA32_XSS.write(self.host_xss);
+                    }
                 }
             }
         }
