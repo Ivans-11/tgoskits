@@ -163,7 +163,10 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         // Let the guest execute its normal supervisor instructions without
         // spuriously trapping them back to the hypervisor.
         hstatus.set_vtvm(false);
-        hstatus.set_vtw(false);
+        // Trap guest WFI so the backend can handle the idle instruction and
+        // return a bounded architectural exit when no interrupt is pending.
+        // Treating WFI as a trap-generating hint is permitted by RISC-V.
+        hstatus.set_vtw(true);
         hstatus.set_vtsr(false);
         unsafe {
             hstatus.write();
@@ -873,6 +876,11 @@ impl RISCVVCpu {
             VirtualInstructionRead::Instruction(instr) => instr,
             VirtualInstructionRead::Handled(exit_reason) => return Ok(exit_reason),
         };
+        const WFI_INSTRUCTION: u32 = 0x1050_0073;
+        if instr == WFI_INSTRUCTION {
+            self.advance_pc(4);
+            return Ok(AxVCpuExitReason::PreemptionTimer);
+        }
         let csr = ((instr >> 20) & 0xfff) as u16;
 
         if csr != CSR_STIMECMP {

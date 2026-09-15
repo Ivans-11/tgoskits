@@ -284,12 +284,11 @@ fn handle_memory_slot_page_fault_inner(
         old_page.pinned_pages.release();
     }
 
-    // Fault handling must remain correct for sparse slots and read-only
-    // mappings.  Once the faulting page is installed, opportunistically map a
-    // small forward window using independent pin IDs.  The window is bounded
-    // to avoid turning a single access into an unbounded GUP operation; any
-    // failed speculative page is simply left for the normal fault path.
-    if result.is_ok() && !prefetched && writable {
+    // Once the faulting page is installed, opportunistically probe a bounded
+    // forward window. Speculative pages are pinned and mapped read-only; a
+    // later guest write still returns through the normal writable-fault path.
+    // Any page that cannot be probed is left for ordinary demand paging.
+    if result.is_ok() && !prefetched && write_fault {
         let slot_end = snapshot
             .guest_phys_addr
             .saturating_add(snapshot.memory_size);
@@ -301,17 +300,14 @@ fn handle_memory_slot_page_fault_inner(
                 snapshot.user_address_space,
                 snapshot.page_hva + abi::PAGE_SIZE_USIZE,
                 count * abi::PAGE_SIZE_USIZE,
-                true,
+                false,
             ) {
                 if batch.pages.is_empty() {
                     let _ = api_control::release_pinned_user_pages(batch.id);
                     return result;
                 }
                 let group = PinnedPageGroup::new(batch.id, batch.pages.len());
-                let flags = MappingFlags::READ
-                    | MappingFlags::WRITE
-                    | MappingFlags::EXECUTE
-                    | MappingFlags::USER;
+                let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
                 let mut failed = 0usize;
                 let mut control_files = CONTROL_FILES.lock();
                 if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
@@ -340,7 +336,7 @@ fn handle_memory_slot_page_fault_inner(
                                     gpa.as_usize() as u64,
                                     MappedMemoryPage {
                                         pinned_pages: group.clone(),
-                                        writable: true,
+                                        writable: false,
                                     },
                                 );
                             }

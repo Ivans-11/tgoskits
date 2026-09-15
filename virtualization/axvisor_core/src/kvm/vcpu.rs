@@ -385,6 +385,11 @@ pub(in crate::kvm) fn kvm_interrupt(
         abi::KVM_INTERRUPT_UNSET => VirtualInterrupt::deassert(abi::RISCV_S_EXT_VECTOR),
         #[cfg(not(target_arch = "riscv64"))]
         abi::KVM_INTERRUPT_UNSET => VirtualInterrupt::deassert(1),
+        // The x86 KVM ABI carries an 8-bit interrupt vector here. gVisor uses
+        // ordinary vectors for its bounce interrupt; preserve the historical
+        // SET/UNSET encodings above while accepting the complete x86 range.
+        #[cfg(not(target_arch = "riscv64"))]
+        irq if irq < 256 => VirtualInterrupt::edge(irq as usize),
         _ => return ax_err!(Unsupported),
     };
     crate::vmm::interrupt::inject_virtual_interrupt(interrupt, &get_vcpu(control_file)?)?;
