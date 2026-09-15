@@ -30,10 +30,19 @@ pub fn hfence_vvma_all() {
 }
 
 pub fn inject_current_interrupt(irq_id: usize) -> bool {
-    let Some(context) = crate::context::try_current_vcpu_context() else {
-        return false;
-    };
-    inject_interrupt(context.vm_id, irq_id)
+    if let Some(context) = crate::context::try_current_vcpu_context() {
+        return inject_interrupt(context.vm_id, irq_id);
+    }
+
+    // Host external interrupts are handled on the platform IRQ path, which
+    // may not run on a vCPU task.  In that case there is no current context;
+    // route the already-claimed IRQ to the VMs known to Axvisor instead of
+    // reporting it as an unhandled host interrupt.
+    let mut handled = false;
+    for vm in crate::vmm::vm_list::get_vm_list() {
+        handled |= inject_interrupt(vm.id(), irq_id);
+    }
+    handled
 }
 
 pub fn inject_interrupt(vm_id: usize, irq_id: usize) -> bool {

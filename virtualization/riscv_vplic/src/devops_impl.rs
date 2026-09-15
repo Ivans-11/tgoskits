@@ -11,11 +11,6 @@ use vm_interrupt::{InterruptControllerRoute, InterruptLineLevel, VirtualInterrup
 use crate::{consts::*, utils::*, vplic::VPlicGlobal};
 
 const SUPERVISOR_EXTERNAL_INTERRUPT: usize = 9;
-const VIRTIO_MMIO_FIRST_IRQ: usize = 1;
-const VIRTIO_MMIO_LAST_IRQ: usize = 8;
-const VIRTIO_MMIO_BASE: usize = 0x1000_0000;
-const VIRTIO_MMIO_STRIDE: usize = 0x1000;
-const VIRTIO_MMIO_INTERRUPT_STATUS_OFFSET: usize = 0x60;
 
 impl VPlicGlobal {
     /// Reads the guest-visible priority of an interrupt source.
@@ -226,23 +221,6 @@ impl VPlicGlobal {
 
             if self.queue_irq_if_inactive(irq_id) {
                 claimed_any = true;
-            }
-        }
-
-        // QEMU's RISC-V `virt` machine exposes eight virtio-mmio transports,
-        // whose base address and PLIC source advance together. Poll every
-        // transport because static guests may pass through more than the
-        // rootfs device at IRQ 8 (for example, virtio-net at IRQ 7).
-        for irq_id in VIRTIO_MMIO_FIRST_IRQ..=VIRTIO_MMIO_LAST_IRQ {
-            let interrupt_status_addr = VIRTIO_MMIO_BASE
-                + irq_id * VIRTIO_MMIO_STRIDE
-                + VIRTIO_MMIO_INTERRUPT_STATUS_OFFSET;
-            let interrupt_status = perform_mmio_read(
-                HostPhysAddr::from_usize(interrupt_status_addr),
-                AccessWidth::Dword,
-            )?;
-            if interrupt_status != 0 {
-                claimed_any |= self.queue_irq_if_inactive(irq_id);
             }
         }
 
