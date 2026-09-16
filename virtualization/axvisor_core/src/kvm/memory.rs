@@ -285,9 +285,9 @@ fn handle_memory_slot_page_fault_inner(
     }
 
     // Once the faulting page is installed, opportunistically probe a bounded
-    // forward window. Speculative pages are pinned and mapped read-only; a
-    // later guest write still returns through the normal writable-fault path.
-    // Any page that cannot be probed is left for ordinary demand paging.
+    // forward window. Force COW while pinning so the EPT mapping and the VMM's
+    // userspace mapping keep referring to the same page. The speculative EPT
+    // entries remain read-only and are upgraded by the normal write-fault path.
     if result.is_ok() && !prefetched && write_fault {
         let slot_end = snapshot
             .guest_phys_addr
@@ -300,7 +300,7 @@ fn handle_memory_slot_page_fault_inner(
                 snapshot.user_address_space,
                 snapshot.page_hva + abi::PAGE_SIZE_USIZE,
                 count * abi::PAGE_SIZE_USIZE,
-                false,
+                true,
             ) {
                 if batch.pages.is_empty() {
                     let _ = api_control::release_pinned_user_pages(batch.id);
