@@ -306,7 +306,10 @@ fn ipi_target_from_exit(
 pub(crate) fn cleanup_vm_vcpus(vm_id: usize) {
     use alloc::vec::Vec;
 
-    if let Some(vm_vcpus) = VM_VCPU_TASKS.lock().remove(&vm_id) {
+    // Bind the removal result before entering the branch so the lock guard is
+    // dropped before join_task(), which may block and reschedule.
+    let vm_vcpus = VM_VCPU_TASKS.lock().remove(&vm_id);
+    if let Some(vm_vcpus) = vm_vcpus {
         // Take task references out before joining so we never block while
         // holding the per-VM task-list lock.
         let tasks: Vec<_> = vm_vcpus

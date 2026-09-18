@@ -12,32 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Axvisor Kernel
-//!
-//! Kernel entry point for the Axvisor hypervisor.
-//!
-//! This module wires together early boot presentation, hardware virtualization
-//! enablement, VM initialization/startup, and the interactive management shell.
-//! The implementation is intentionally small so that the boot order is visible
-//! from a single file.
+//! ArceOS host adapter used by Axvisor production and test binaries.
 
 #![no_std]
-#![no_main]
 #![cfg(target_os = "none")]
 
 extern crate alloc;
 extern crate ax_std as std;
 
-/// Axvisor kernel entry point.
-///
-/// This wrapper only bridges the target-specific entry point to the reusable
-/// core boot flow.
-#[unsafe(no_mangle)]
-fn main() {
-    axvisor::link_host_adapter();
+pub mod hal;
 
-    #[cfg(target_arch = "riscv64")]
-    axvisor::hal::arch::prepare_virtualization();
-
-    axvisor_core::boot::run();
-}
+/// Keeps the link-time Axvisor API implementations in this host adapter.
+#[inline(never)]
+pub fn link_host_adapter() {}

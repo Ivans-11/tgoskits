@@ -1,0 +1,6 @@
+env = {}
+features = ["conformance-test", "sstc"]
+log = "Info"
+plat_dyn = true
+target = "riscv64gc-unknown-none-elf"
+max_cpu_num = 4

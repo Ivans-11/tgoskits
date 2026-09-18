@@ -1,0 +1,22 @@
+args = [
+  "-nographic",
+  "-cpu",
+  "rv64",
+  "-machine",
+  "virt",
+  "-bios",
+  "default",
+  "-smp",
+  "4",
+  "-m",
+  "1g",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "CONFORMANCE .*status=FAIL",
+  "CONFORMANCE summary=FAIL",
+]
+success_regex = ["CONFORMANCE summary=PASS complete=true"]
+timeout = 120
+to_bin = true
+uefi = false

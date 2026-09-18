@@ -1,0 +1,12 @@
+[package]
+name = "axvisor_conformance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-contract conformance tests for AxVisor adapters"
+
+[dependencies]
+axvisor_api = { workspace = true, default-features = false }
+log = "0.4"

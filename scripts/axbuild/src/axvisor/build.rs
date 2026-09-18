@@ -156,7 +156,16 @@ fn patch_axvisor_cargo_config(
 ) -> anyhow::Result<()> {
     cargo.package = request.package.clone();
     cargo.to_bin = default_axvisor_to_bin(&request.arch);
-    ensure_axvisor_bin_arg(&mut cargo.args);
+    let bin = if cargo
+        .features
+        .iter()
+        .any(|feature| feature == "conformance-test")
+    {
+        "axvisor-conformance"
+    } else {
+        AXVISOR_PACKAGE
+    };
+    ensure_axvisor_bin_arg(&mut cargo.args, bin);
     cargo
         .env
         .insert("AX_ARCH".to_string(), request.arch.clone());
@@ -205,13 +214,13 @@ fn default_axvisor_to_bin(arch: &str) -> bool {
     !matches!(arch, "x86_64" | "loongarch64")
 }
 
-fn ensure_axvisor_bin_arg(args: &mut Vec<String>) {
+fn ensure_axvisor_bin_arg(args: &mut Vec<String>, bin: &str) {
     if args.iter().any(|arg| arg == "--bin") {
         return;
     }
 
     args.push("--bin".to_string());
-    args.push(AXVISOR_PACKAGE.to_string());
+    args.push(bin.to_string());
 }
 
 pub(crate) fn load_target_from_build_config(path: &Path) -> anyhow::Result<Option<String>> {

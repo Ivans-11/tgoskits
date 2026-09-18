@@ -1930,6 +1930,7 @@ dependencies = [
  "axbuild",
  "axplat-dyn",
  "axvisor_api",
+ "axvisor_conformance",
  "axvisor_core",
  "clap",
  "extern-trait",
@@ -1964,6 +1965,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "axvisor_conformance"
+version = "0.5.11"
+dependencies = [
+ "axvisor_api",
+ "log",
 ]
 
 [[package]]
