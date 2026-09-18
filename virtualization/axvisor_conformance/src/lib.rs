@@ -120,7 +120,7 @@ impl Report {
 /// Host-supplied stimuli that are not part of the production host contract.
 ///
 /// A runner may implement these hooks to observe a one-shot timer notification
-/// or safely exercise a physical IRQ route. Keeping the hooks here avoids
+/// or safely exercise a host-interrupt route. Keeping the hooks here avoids
 /// adding test-only operations to `axvisor_api`.
 pub trait Stimulus {
     /// Initializes test-side per-CPU state after the host adapter has
@@ -131,7 +131,7 @@ pub trait Stimulus {
         None
     }
 
-    /// Selects a host-valid vector for registration and physical-ingress tests.
+    /// Selects a host-valid vector for registration and interrupt-ingress tests.
     fn test_irq_vector(&self) -> usize {
         #[cfg(target_arch = "riscv64")]
         return 10;
@@ -141,7 +141,7 @@ pub trait Stimulus {
         return 32;
     }
 
-    fn verify_physical_irq(&self, _vector: usize) -> Option<bool> {
+    fn verify_irq_ingress(&self, _vector: usize) -> Option<bool> {
         None
     }
 }
@@ -243,7 +243,11 @@ fn check_memory(report: &mut Report) {
     for frame in reclaimed {
         memory::dealloc_frame(frame);
     }
-    report.record("MemoryIf", "frame-ownership-stability-and-reclaim", valid);
+    report.record(
+        "MemoryIf",
+        "frame-ownership-stability-and-reclamation",
+        valid,
+    );
 
     let Some(first) = memory::alloc_contiguous_frames(2, 2 * PAGE_SIZE) else {
         report.record("MemoryIf", "contiguous-aligned-frames", false);
@@ -272,9 +276,14 @@ fn check_task(report: &mut Report) {
             cpu_set: None,
         },
         move || {
-            identity_for_task.store(task::current_task().is_some(), Ordering::Release);
+            let identity_before_yield = task::current_task();
             stage_for_task.store(1, Ordering::Release);
             task::yield_now();
+            let identity_after_yield = task::current_task();
+            identity_for_task.store(
+                identity_before_yield.is_some() && identity_before_yield == identity_after_yield,
+                Ordering::Release,
+            );
             stage_for_task.store(2, Ordering::Release);
         },
     );
@@ -369,10 +378,11 @@ fn check_sync(report: &mut Report) {
         wake_one_ordered && done.load(Ordering::Acquire) == 2 && !rescued.load(Ordering::Acquire),
     );
 
-    // Keep the queue alive until both tasks have terminated; dropping it here
-    // also exercises wait-object destruction after waiter reclamation.
+    // The last owning reference must remain with this task after all waiters
+    // terminate. Dropping it then exercises destruction after waiter join.
+    let exclusively_owned = Arc::strong_count(&queue) == 1;
     drop(queue);
-    report.record("SyncIf", "wait-object-lifetime", true);
+    report.record("SyncIf", "destruction-after-waiter-join", exclusively_owned);
 }
 
 fn check_time(report: &mut Report, stimulus: &impl Stimulus) {
@@ -410,9 +420,9 @@ fn check_irq(report: &mut Report, stimulus: &impl Stimulus) {
         dispatched && DISPATCHED_VECTOR.load(Ordering::Acquire) == test_vector,
     );
 
-    match stimulus.verify_physical_irq(test_vector) {
-        Some(passed) => report.record("IrqIf", "physical-ingress-and-callback-context", passed),
-        None => report.not_run("IrqIf", "physical-ingress-and-callback-context"),
+    match stimulus.verify_irq_ingress(test_vector) {
+        Some(passed) => report.record("IrqIf", "host-interrupt-ingress-and-dispatch", passed),
+        None => report.not_run("IrqIf", "host-interrupt-ingress-and-dispatch"),
     }
 }
 
@@ -420,7 +430,7 @@ fn check_irq(report: &mut Report, stimulus: &impl Stimulus) {
 fn check_arch(report: &mut Report) {
     let fdt_present = axvisor_api::arch::host_fdt_paddr().is_some();
     axvisor_api::arch::remote_hfence_vvma_all();
-    report.record("ArchIf", "riscv-host-facts-and-remote-fence", fdt_present);
+    report.record("ArchIf", "riscv-host-facts-and-fence-path", fdt_present);
 }
 
 #[cfg(target_arch = "x86_64")]

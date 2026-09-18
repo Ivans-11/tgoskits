@@ -91,7 +91,7 @@ impl axvisor_conformance::Stimulus for ArceosStimulus {
         Some(PASSED.load(Ordering::Acquire) == 1)
     }
 
-    fn verify_physical_irq(&self, test_vector: usize) -> Option<bool> {
+    fn verify_irq_ingress(&self, test_vector: usize) -> Option<bool> {
         use core::sync::atomic::{AtomicUsize, Ordering};
         use core::time::Duration;
 
