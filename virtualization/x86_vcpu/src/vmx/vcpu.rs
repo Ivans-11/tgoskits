@@ -58,7 +58,8 @@ use crate::{
     x86_sipi_entry_state, xstate::XState,
 };
 
-const VMX_PREEMPTION_TIMER_SET_VALUE: u32 = 100_000;
+// Keep oversubscribed static vCPUs responsive during guest SMP startup.
+const VMX_PREEMPTION_TIMER_SET_VALUE: u32 = 50_000;
 // Bound the time spent handling local exits without returning to the host's
 // outer vCPU loop. External interrupts and non-local exits return immediately.
 const MAX_BUILTIN_EXITS_PER_RUN: usize = 64;
@@ -2814,7 +2815,7 @@ mod tests {
     #[test]
     fn test_constants() {
         // Test that constants have expected values
-        assert_eq!(VMX_PREEMPTION_TIMER_SET_VALUE, 100_000);
+        assert_eq!(VMX_PREEMPTION_TIMER_SET_VALUE, 50_000);
         assert_eq!(QEMU_EXIT_PORT, 0x604);
         assert_eq!(QEMU_EXIT_MAGIC, 0x2000);
         assert_eq!(MSR_IA32_EFER_LMA_BIT, 1 << 10);

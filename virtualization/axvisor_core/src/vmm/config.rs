@@ -215,8 +215,10 @@ pub fn init_guest_vm(raw_cfg: &str) -> AxResult<usize> {
 
     let main_mem = vm
         .memory_regions()
-        .first()
+        .iter()
+        .find(|region| region.is_identical())
         .cloned()
+        .or_else(|| vm.memory_regions().first().cloned())
         .ok_or_else(|| ax_err_type!(InvalidData, "VM must have at least one memory region"))?;
 
     if !skip_guest_address_adjustment {
@@ -276,7 +278,7 @@ fn vm_alloc_memory_regions(vm_create_config: &AxVMCrateConfig, vm: &VM) -> AxRes
         })
     };
 
-    for memory in &vm_create_config.kernel.memory_regions {
+    let allocate = |memory: &axvm::config::VmMemConfig| -> AxResult {
         match memory.map_type {
             VmMemMappingType::MapAlloc => {
                 vm.alloc_memory_region(make_layout(memory)?, Some(GuestPhysAddr::from(memory.gpa)))
@@ -310,6 +312,27 @@ fn vm_alloc_memory_regions(vm_create_config: &AxVMCrateConfig, vm: &VM) -> AxRes
                 })?;
             }
         }
+        Ok(())
+    };
+
+    // Fixed-GPA regions must be allocated before identity-mapped memory.  An
+    // identity mapping derives its GPA from the host allocation, which can
+    // otherwise overlap a low boot scratch region on some host allocators.
+    for memory in vm_create_config
+        .kernel
+        .memory_regions
+        .iter()
+        .filter(|memory| memory.map_type != VmMemMappingType::MapIdentical)
+    {
+        allocate(memory)?;
+    }
+    for memory in vm_create_config
+        .kernel
+        .memory_regions
+        .iter()
+        .filter(|memory| memory.map_type == VmMemMappingType::MapIdentical)
+    {
+        allocate(memory)?;
     }
     Ok(())
 }

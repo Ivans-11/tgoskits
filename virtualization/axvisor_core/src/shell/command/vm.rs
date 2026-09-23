@@ -690,31 +690,21 @@ fn delete_vm_by_id(vm_id: usize, keep_data: bool) {
         return;
     };
 
-    // Remove VM from global list
-    // Note: This drops the reference from the global list, but the VM object
-    // will only be fully destroyed when all vCPU threads exit and drop their references
+    // Keep the VM in the global list until all vCPU tasks have joined.  A task
+    // may not have reached its first VM lookup when teardown begins; removing
+    // the VM first would make that task observe a missing VM and panic.
+    match status {
+        VMStatus::Running | VMStatus::Suspended | VMStatus::Stopping | VMStatus::Stopped => {
+            println!("  Waiting for vCPU threads to exit...");
+            println!("  Cleaning up VCpu resources...");
+            vcpus::cleanup_vm_vcpus(vm_id);
+        }
+        _ => vcpus::cleanup_vm_vcpus(vm_id),
+    }
+
     match crate::vmm::vm_list::remove_vm(vm_id) {
         Some(_vm) => {
             println!("✓ VM[{}] removed from VM list", vm_id);
-
-            // Wait for vCPU threads to exit if VM has VCpu tasks
-            match status {
-                VMStatus::Running
-                | VMStatus::Suspended
-                | VMStatus::Stopping
-                | VMStatus::Stopped => {
-                    println!("  Waiting for vCPU threads to exit...");
-
-                    // Clean up VCpu resources after threads have exited
-                    println!("  Cleaning up VCpu resources...");
-                    vcpus::cleanup_vm_vcpus(vm_id);
-                }
-                _ => {
-                    // VM not running, no vCPU threads to wait for
-                    // But still need to clean up VCpu queue entry if it exists
-                    vcpus::cleanup_vm_vcpus(vm_id);
-                }
-            }
 
             if keep_data {
                 println!("✓ VM[{}] deleted (configuration and data preserved)", vm_id);

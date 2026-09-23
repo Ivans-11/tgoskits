@@ -155,7 +155,7 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         self.regs.guest_regs.sstatus = sstatus.bits();
 
         // Set hstatus.
-        let mut hstatus = hstatus::read();
+        let mut hstatus = hstatus::Hstatus::from_bits(0);
         hstatus.set_spv(true);
         hstatus.set_vsxl(hstatus::VsxlValues::Vsxl64);
         // Set SPVP bit in order to accessing VS-mode memory from HS-mode.
@@ -165,9 +165,6 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         hstatus.set_vtvm(false);
         hstatus.set_vtw(false);
         hstatus.set_vtsr(false);
-        unsafe {
-            hstatus.write();
-        }
         self.regs.guest_regs.hstatus = hstatus.bits();
 
         let mut hie = hie::Hie::from_bits(0);
