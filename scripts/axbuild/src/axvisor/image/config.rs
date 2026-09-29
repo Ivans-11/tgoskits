@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/rcore-os/tgosimages/refs/heads/main/registry/default.toml";
-pub const DEFAULT_FALLBACK_REGISTRY_URL: &str =
-    "https://raw.githubusercontent.com/rcore-os/tgosimages/refs/heads/main/registry/v0.0.25.toml";
+pub const DEFAULT_FALLBACK_REGISTRY_URL: &str = concat!(
+    "https://raw.githubusercontent.com/rcore-os/tgosimages/",
+    "eaa2672aabc87cc2bad356591f4163b6ce88d590/registry/v0.0.25.toml"
+);
 pub const IMAGE_CONFIG_FILENAME: &str = ".image.toml";
 const DEFAULT_AUTO_SYNC_THRESHOLD: u64 = 60 * 60 * 24 * 7;
 const LOCAL_STORAGE_ENV: &str = "AXVISOR_IMAGE_LOCAL_STORAGE";

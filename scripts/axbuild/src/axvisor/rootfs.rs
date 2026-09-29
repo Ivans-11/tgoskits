@@ -9,13 +9,26 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow, bail};
 use ostool::{build::config::Cargo, run::qemu::QemuConfig};
 
-use super::{Axvisor, build};
-use crate::{context::ResolvedAxvisorRequest, rootfs};
+use super::{
+    Axvisor, build,
+    image::{
+        config::{ImageConfig, fallback_registry_url},
+        registry::ImageRegistry,
+        spec::ImageSpecRef,
+        storage::Storage,
+    },
+};
+use crate::{context::ResolvedAxvisorRequest, rootfs, support::download::http_client};
+
+const AXVISOR_LINUX_KERNEL_PATH: &str = "/guest/linux/linux-qemu";
+const AXVISOR_LINUX_ROOTFS_HEADROOM: u64 = 16 * 1024 * 1024;
+const AXVISOR_LINUX_ROOTFS_FORMAT: u32 = 3;
 
 pub(super) async fn qemu(axvisor: &mut Axvisor, args: super::ArgsQemu) -> anyhow::Result<()> {
     let request = axvisor.prepare_request(
@@ -76,6 +89,14 @@ pub(crate) async fn ensure_qemu_rootfs_ready(
     workspace_root: &Path,
     explicit_rootfs: Option<&Path>,
 ) -> anyhow::Result<()> {
+    if explicit_rootfs.is_none()
+        && infer_rootfs_path(&request.vmconfigs)?.is_none()
+        && axvisor_linux_image_name(&request.arch).is_some()
+    {
+        ensure_axvisor_linux_rootfs(workspace_root, &request.arch).await?;
+        return Ok(());
+    }
+
     let rootfs_path = managed_rootfs_path(request, workspace_root, explicit_rootfs)?;
     rootfs::store::ensure_optional_managed_rootfs(
         workspace_root,
@@ -109,7 +130,13 @@ pub(crate) fn qemu_rootfs_path(
 
     infer_rootfs_path(&request.vmconfigs)?
         .map(Ok)
-        .unwrap_or_else(|| rootfs::store::default_rootfs_path(workspace_root, &request.arch))
+        .unwrap_or_else(|| {
+            axvisor_linux_rootfs_path(workspace_root, &request.arch)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    rootfs::store::default_rootfs_path(workspace_root, &request.arch)
+                })
+        })
 }
 
 /// Patches a QEMU config with a concrete Axvisor rootfs path.
@@ -135,6 +162,9 @@ pub(crate) fn managed_rootfs_path(
     }
 
     if infer_rootfs_path(&request.vmconfigs)?.is_none() {
+        if axvisor_linux_rootfs_path(workspace_root, &request.arch).is_some() {
+            return Ok(None);
+        }
         return Ok(Some(rootfs::store::default_rootfs_path(
             workspace_root,
             &request.arch,
@@ -142,6 +172,185 @@ pub(crate) fn managed_rootfs_path(
     }
 
     Ok(None)
+}
+
+fn axvisor_linux_image_name(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("qemu_aarch64_linux"),
+        "riscv64" => Some("qemu_riscv64_linux"),
+        "x86_64" => Some("qemu_x86_64_linux"),
+        _ => None,
+    }
+}
+
+fn axvisor_linux_kernel_name(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("qemu-aarch64"),
+        "riscv64" => Some("qemu-riscv64"),
+        "x86_64" => Some("qemu-x86_64"),
+        _ => None,
+    }
+}
+
+fn axvisor_linux_rootfs_path(workspace_root: &Path, arch: &str) -> Option<PathBuf> {
+    axvisor_linux_image_name(arch).map(|_| {
+        rootfs::store::rootfs_dir(workspace_root).join(format!("axvisor-{arch}-linux.img"))
+    })
+}
+
+async fn ensure_axvisor_linux_rootfs(workspace_root: &Path, arch: &str) -> anyhow::Result<PathBuf> {
+    let image_name = axvisor_linux_image_name(arch)
+        .ok_or_else(|| anyhow!("no packaged Axvisor Linux image for architecture `{arch}`"))?;
+    let kernel_name = axvisor_linux_kernel_name(arch)
+        .ok_or_else(|| anyhow!("no packaged Axvisor Linux kernel for architecture `{arch}`"))?;
+
+    let config = ImageConfig::read_config(workspace_root)?;
+    let storage = Storage::new_from_config(&config).await?;
+    let spec = ImageSpecRef::parse(image_name);
+    let image_dir = match storage.pull_image(spec, None, true).await {
+        Ok(image_dir) => image_dir,
+        Err(primary_err) if primary_err.to_string().starts_with("image not found:") => {
+            let client = http_client()?;
+            let fallback_url = fallback_registry_url();
+            let fallback_registry = ImageRegistry::fetch_with_includes(&client, &fallback_url)
+                .await
+                .with_context(|| {
+                    format!("failed to fetch Axvisor fallback image registry {fallback_url}")
+                })?;
+            Storage {
+                path: config.local_storage.clone(),
+                image_registry: fallback_registry,
+            }
+            .pull_image(spec, None, true)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to prepare Axvisor guest image `{image_name}` after the current \
+                     registry reported: {primary_err}"
+                )
+            })?
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to prepare Axvisor guest image `{image_name}`"));
+        }
+    };
+    let source_rootfs = image_dir.join("rootfs.img");
+    let source_kernel = image_dir.join(kernel_name);
+    if !source_rootfs.is_file() || !source_kernel.is_file() {
+        bail!(
+            "Axvisor guest image `{image_name}` is incomplete: expected {} and {}",
+            source_rootfs.display(),
+            source_kernel.display()
+        );
+    }
+
+    let archive_hash = fs::read_to_string(image_dir.join(".archive.sha256"))
+        .with_context(|| format!("failed to identify Axvisor guest image `{image_name}`"))?;
+    let rootfs_path = axvisor_linux_rootfs_path(workspace_root, arch)
+        .expect("supported Axvisor Linux architecture must have a rootfs path");
+    let marker_path = rootfs_path.with_extension("img.source");
+    let source_key = format!(
+        "{image_name}:{}:format-{AXVISOR_LINUX_ROOTFS_FORMAT}",
+        archive_hash.trim()
+    );
+    if rootfs_path.is_file()
+        && fs::read_to_string(&marker_path)
+            .map(|marker| marker.trim() == source_key)
+            .unwrap_or(false)
+    {
+        return Ok(rootfs_path);
+    }
+
+    let rootfs_dir = rootfs_path
+        .parent()
+        .expect("Axvisor Linux rootfs path must have a parent");
+    fs::create_dir_all(rootfs_dir)
+        .with_context(|| format!("failed to create {}", rootfs_dir.display()))?;
+    let temporary = rootfs_path.with_extension("img.part");
+    if temporary.exists() {
+        fs::remove_file(&temporary)
+            .with_context(|| format!("failed to remove {}", temporary.display()))?;
+    }
+    fs::copy(&source_rootfs, &temporary).with_context(|| {
+        format!(
+            "failed to copy Axvisor guest rootfs {} to {}",
+            source_rootfs.display(),
+            temporary.display()
+        )
+    })?;
+    grow_rootfs_for_kernel(&temporary, &source_kernel)?;
+    inject_axvisor_linux_kernel(&temporary, &source_kernel, rootfs_dir, arch)?;
+    fs::rename(&temporary, &rootfs_path).with_context(|| {
+        format!(
+            "failed to install prepared Axvisor rootfs {}",
+            rootfs_path.display()
+        )
+    })?;
+    fs::write(&marker_path, format!("{source_key}\n"))
+        .with_context(|| format!("failed to write {}", marker_path.display()))?;
+    Ok(rootfs_path)
+}
+
+fn inject_axvisor_linux_kernel(
+    rootfs_path: &Path,
+    kernel_path: &Path,
+    rootfs_dir: &Path,
+    arch: &str,
+) -> anyhow::Result<()> {
+    let overlay_dir = rootfs_dir.join(format!(".axvisor-{arch}-linux-overlay"));
+    if overlay_dir.exists() {
+        fs::remove_dir_all(&overlay_dir)
+            .with_context(|| format!("failed to remove {}", overlay_dir.display()))?;
+    }
+    let overlay_kernel = overlay_dir.join(AXVISOR_LINUX_KERNEL_PATH.trim_start_matches('/'));
+    fs::create_dir_all(
+        overlay_kernel
+            .parent()
+            .expect("Axvisor Linux kernel path must have a parent"),
+    )
+    .with_context(|| format!("failed to create Axvisor Linux kernel overlay for {arch}"))?;
+    fs::copy(kernel_path, &overlay_kernel)
+        .with_context(|| format!("failed to stage {}", kernel_path.display()))?;
+
+    let result = rootfs::inject::inject_overlay(rootfs_path, &overlay_dir);
+    let cleanup = fs::remove_dir_all(&overlay_dir)
+        .with_context(|| format!("failed to remove {}", overlay_dir.display()));
+    result?;
+    cleanup
+}
+
+fn grow_rootfs_for_kernel(rootfs_path: &Path, kernel_path: &Path) -> anyhow::Result<()> {
+    let rootfs_size = fs::metadata(rootfs_path)
+        .with_context(|| format!("failed to stat {}", rootfs_path.display()))?
+        .len();
+    let kernel_size = fs::metadata(kernel_path)
+        .with_context(|| format!("failed to stat {}", kernel_path.display()))?
+        .len();
+    let required_size = rootfs_size
+        .checked_add(kernel_size)
+        .and_then(|size| size.checked_add(AXVISOR_LINUX_ROOTFS_HEADROOM))
+        .ok_or_else(|| anyhow!("Axvisor Linux rootfs size overflow"))?;
+    let expanded_size = required_size.next_multiple_of(1024 * 1024);
+
+    fs::OpenOptions::new()
+        .write(true)
+        .open(rootfs_path)
+        .with_context(|| format!("failed to open {}", rootfs_path.display()))?
+        .set_len(expanded_size)
+        .with_context(|| format!("failed to expand {}", rootfs_path.display()))?;
+
+    let status = Command::new("resize2fs")
+        .arg(rootfs_path)
+        .status()
+        .with_context(|| "failed to run resize2fs while preparing the Axvisor Linux rootfs")?;
+    if !status.success() {
+        bail!(
+            "failed to resize Axvisor Linux rootfs {}: resize2fs exited with {status}",
+            rootfs_path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Infers a rootfs image path from VM config files by looking next to the
@@ -260,7 +469,7 @@ kernel_path = "{}"
     }
 
     #[test]
-    fn patch_qemu_rootfs_uses_unified_rootfs_by_default() {
+    fn patch_qemu_rootfs_uses_packaged_linux_rootfs_by_default() {
         let root = tempdir().unwrap();
         let mut qemu = QemuConfig {
             args: vec!["id=disk0,if=none,format=raw,file=/old/tmp/rootfs.img".to_string()],
@@ -274,7 +483,7 @@ kernel_path = "{}"
             vec![format!(
                 "id=disk0,if=none,format=raw,file={}",
                 root.path()
-                    .join("tmp/axbuild/rootfs/rootfs-aarch64-alpine.img")
+                    .join("tmp/axbuild/rootfs/axvisor-aarch64-linux.img")
                     .display()
             )]
         );
@@ -304,7 +513,7 @@ kernel_path = "{}"
                 format!(
                     "id=disk0,if=none,format=raw,file={}",
                     root.path()
-                        .join("tmp/axbuild/rootfs/rootfs-aarch64-alpine.img")
+                        .join("tmp/axbuild/rootfs/axvisor-aarch64-linux.img")
                         .display()
                 ),
                 "-append".to_string(),
@@ -314,7 +523,7 @@ kernel_path = "{}"
     }
 
     #[test]
-    fn managed_rootfs_path_uses_default_unified_rootfs_when_vmconfig_has_no_rootfs() {
+    fn managed_rootfs_path_skips_generic_download_for_packaged_linux_rootfs() {
         let root = tempdir().unwrap();
         let vmconfig = root.path().join("vm.toml");
         fs::write(
@@ -328,10 +537,7 @@ kernel_path = "/tmp/qemu-aarch64"
 
         assert_eq!(
             managed_rootfs_path(&request(root.path(), vec![vmconfig]), root.path(), None).unwrap(),
-            Some(
-                root.path()
-                    .join("tmp/axbuild/rootfs/rootfs-aarch64-alpine.img")
-            )
+            None
         );
     }
 
