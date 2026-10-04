@@ -125,6 +125,10 @@ pub(crate) fn deliver_interrupt(route: InterruptRoute) {
     }
 
     if !queue_control_interrupt(route) {
+        if vmm::with_vm(route.vm_id, |vm| vm.stopping() || vm.stopped()).unwrap_or(true) {
+            return;
+        }
+
         #[cfg(not(feature = "control"))]
         warn!(
             "Failed to queue interrupt {:?} to VM[{}] VCpu[{}]: VM vCPU resources not found",

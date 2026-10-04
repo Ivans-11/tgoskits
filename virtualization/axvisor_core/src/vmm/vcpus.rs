@@ -661,6 +661,10 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                 "VM[{}] VCpu[{}] stopping because of VM stopping",
                 vm_id, vcpu_id
             );
+            // Some host schedulers may run a woken vCPU before wake_all() has
+            // finished signaling every waiter. Re-broadcast while draining so
+            // shutdown cannot strand a CPU-down vCPU in the wait queue.
+            notify_all_vcpus(vm_id);
 
             if mark_vcpu_exiting(vm_id) {
                 info!("VM[{vm_id}] VCpu[{vcpu_id}] last VCpu exiting, decreasing running VM count");

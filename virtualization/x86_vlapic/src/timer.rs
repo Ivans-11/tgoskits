@@ -277,18 +277,20 @@ impl ApicTimer {
     }
 
     pub fn stop_timer(&mut self) -> AxResult {
-        // TODO: maybe disable irq here?
+        if let Some(token) = self.invalidate_timer() {
+            cancel_timer(token);
+        }
+
+        Ok(())
+    }
+
+    fn invalidate_timer(&mut self) -> Option<usize> {
         self.next_generation();
         self.last_start_ticks = 0;
         self.deadline_ns = 0;
         self.shared.interval_ns.store(0, Ordering::Release);
         self.shared.deadline_ns.store(0, Ordering::Release);
-
-        if let Some(token) = self.cancel_token.take() {
-            cancel_timer(token);
-        }
-
-        Ok(())
+        self.cancel_token.take()
     }
 
     /// Whether the timer mode is periodic.
@@ -340,6 +342,18 @@ impl ApicTimer {
     //         self.deadline_ns = 0;
     //     }
     // }
+}
+
+impl Drop for ApicTimer {
+    fn drop(&mut self) {
+        let token = self.invalidate_timer();
+        #[cfg(not(test))]
+        if let Some(token) = token {
+            cancel_timer(token);
+        }
+        #[cfg(test)]
+        let _ = token;
+    }
 }
 
 fn schedule_apic_timer(
@@ -532,6 +546,45 @@ mod tests {
                 .deadline_ns
                 .load(core::sync::atomic::Ordering::Acquire),
             200
+        );
+    }
+
+    #[test]
+    fn dropping_timer_invalidates_pending_callback() {
+        let vm_id = VMId::from(1 as usize);
+        let vcpu_id = VCpuId::from(0 as usize);
+        let mut timer = ApicTimer::new(vm_id, vcpu_id);
+        let shared = alloc::sync::Arc::clone(&timer.shared);
+
+        timer.initial_count_register = 100;
+        timer.cancel_token = Some(1);
+        let armed_generation = timer.next_generation();
+        shared
+            .interval_ns
+            .store(100, core::sync::atomic::Ordering::Release);
+        shared
+            .deadline_ns
+            .store(200, core::sync::atomic::Ordering::Release);
+
+        drop(timer);
+
+        assert_ne!(
+            shared
+                .generation
+                .load(core::sync::atomic::Ordering::Acquire),
+            armed_generation
+        );
+        assert_eq!(
+            shared
+                .interval_ns
+                .load(core::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            shared
+                .deadline_ns
+                .load(core::sync::atomic::Ordering::Acquire),
+            0
         );
     }
 
