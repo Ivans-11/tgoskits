@@ -36,6 +36,8 @@ use vm_interrupt::VmInterruptRouter;
 #[cfg(target_arch = "x86_64")]
 use x86_vlapic::{EmulatedIoApic, EmulatedPit, EmulatedSerialPort, IoApicInterrupt};
 
+#[cfg(target_arch = "aarch64")]
+use crate::pl011::EmulatedPl011;
 use crate::{AxVmDeviceConfig, range_alloc::RangeAllocator};
 
 /// A set of emulated device types that can be accessed by a specific address range type.
@@ -306,12 +308,20 @@ impl AxVmDevices {
                     }
                 }
                 EmulatedDeviceType::Console => {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        this.add_mmio_dev(Arc::new(EmulatedPl011::new(
+                            config.base_gpa.into(),
+                            config.length,
+                        )));
+                        info!("PL011 console initialized at GPA {:#x}", config.base_gpa);
+                    }
                     #[cfg(target_arch = "x86_64")]
                     {
                         this.add_port_dev(Arc::new(EmulatedSerialPort::new()));
                         info!("x86 16550 serial initialized for ports 0x3f8..=0x3ff");
                     }
-                    #[cfg(not(target_arch = "x86_64"))]
+                    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         warn!(
                             "emu type: {} is not supported on this platform",

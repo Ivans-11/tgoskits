@@ -135,8 +135,10 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
                 Ok(0)
             }
             GICR_SETLPIR | GICR_CLRLPIR | GICR_INVALLR => perform_mmio_read(gicr_base + reg, width),
+            // Keep the host redistributor private and report the virtual one
+            // as awake (ProcessorSleep=0, ChildrenAsleep=0).
+            GICR_WAKER => Ok(0),
             reg if reg == GICR_STATUSR
-                || reg == GICR_WAKER
                 || reg == GICR_IGROUPR
                 || reg == GICR_ISENABLER
                 || reg == GICR_ICENABLER
@@ -206,13 +208,9 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
                 || GICR_IPRIORITYR_RANGE.contains(&reg)
                 || GICR_ICFGR_RANGE.contains(&reg) =>
             {
-                let mut value = value;
-                // avoid linux disable maintenance interrupt
-                if reg == GICR_ICENABLER {
-                    value &= !(1 << MAINTENACE_INTERRUPT);
-                    // value &= !(1 << SGI_IPI_ID);
-                }
-                perform_mmio_write(gicr_base + reg, width, value)
+                // Keep the host redistributor private. The virtual one is
+                // permanently awake, so WAKER writes have no effect.
+                Ok(())
             }
             _ => {
                 todo!("vgicr write unimplemented for reg {:#x}", reg);

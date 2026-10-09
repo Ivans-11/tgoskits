@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use alloc::boxed::Box;
+
 use aarch64_cpu::registers::*;
 use ax_errno::AxResult;
 use axaddrspace::{GuestPhysAddr, HostPhysAddr, device::SysRegAddr};
@@ -19,22 +21,13 @@ use axvcpu::{AxArchVCpu, AxVCpuExitReason};
 
 use crate::{
     TrapFrame,
-    context_frame::GuestSystemRegisters,
     exception::{TrapKind, handle_exception_sync},
     exception_utils::exception_class_value,
+    state::{FpState, GuestSystemRegisters, HostSystemRegisters},
 };
 
-#[ax_percpu::def_percpu]
-static HOST_SP_EL0: u64 = 0;
-
-/// Save host's `SP_EL0` to the current ax-percpu region.
-unsafe fn save_host_sp_el0() {
-    unsafe { HOST_SP_EL0.write_current_raw(SP_EL0.get()) }
-}
-
-/// Restore host's `SP_EL0` from the current ax-percpu region.
-unsafe fn restore_host_sp_el0() {
-    SP_EL0.set(unsafe { HOST_SP_EL0.read_current_raw() });
+unsafe extern "C" {
+    fn exception_vector_base_vcpu();
 }
 
 /// (v)CPU register state that must be saved or restored when entering/exiting a VM or switching
@@ -58,6 +51,7 @@ pub struct Aarch64VCpu {
     ctx: TrapFrame,
     host_stack_top: u64,
     guest_system_regs: GuestSystemRegisters,
+    fp_state: Box<FpState>,
     /// The MPIDR_EL1 value for the vCPU.
     mpidr: u64,
 }
@@ -92,10 +86,14 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
         let mut ctx = TrapFrame::default();
         ctx.set_argument(config.dtb_addr);
 
+        let fp_state = Box::<FpState>::new_zeroed();
+
         Ok(Self {
             ctx,
             host_stack_top: 0,
             guest_system_regs: GuestSystemRegisters::default(),
+            // SAFETY: FpState contains only integers and has no invalid bit patterns.
+            fp_state: unsafe { fp_state.assume_init() },
             mpidr: config.mpidr_el1,
         })
     }
@@ -118,22 +116,32 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
     }
 
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
-        unsafe {
-            core::arch::asm!("msr daifset, #2");
-        }
+        let mut host_system_regs = HostSystemRegisters::default();
+        let mut host_fp_state = FpState::default();
+        let host_vhe;
 
         // Run guest.
         let exit_reson = unsafe {
-            // Save host SP_EL0 to the ctx becase it's used as current task ptr.
-            // This has to be done before vm system regs are restored.
-            save_host_sp_el0();
-            self.restore_vm_system_regs();
+            // Save host state before selecting the guest register banks.
+            host_system_regs.store();
+            host_vhe = host_system_regs.vhe_enabled();
+            host_fp_state.save();
+            VBAR_EL2.set(exception_vector_base_vcpu as *const () as usize as _);
+            self.restore_vm_system_regs(host_vhe);
+            self.fp_state.restore();
             self.run_guest()
         };
 
         unsafe {
-            core::arch::asm!("msr daifclr, #2");
-        }
+            // Save all guest state while HCR_EL2 still selects the guest EL1
+            // register bank, then restore the host state before executing the
+            // regular VM-exit handler.
+            self.fp_state.save();
+            self.guest_system_regs.store(host_vhe);
+            host_system_regs.restore();
+            host_fp_state.restore();
+            host_system_regs.restore_daif();
+        };
 
         let trap_kind = TrapKind::try_from(exit_reson as u8).expect("Invalid TrapKind");
         self.vmexit_handler(trap_kind)
@@ -201,13 +209,12 @@ impl Aarch64VCpu {
 
         let mut hcr_el2 =
             HCR_EL2::VM::Enable + HCR_EL2::TSC::EnableTrapEl1SmcToEl2 + HCR_EL2::RW::EL1IsAarch64;
-
+        if feature_id_state_requires_filtering() {
+            hcr_el2 += HCR_EL2::TID3::SET;
+        }
         if !config.passthrough_interrupt {
-            // Set HCR_EL2.IMO will trap IRQs to EL2 while enabling virtual IRQs.
-            //
-            // We must choose one of the two:
-            // - Enable virtual IRQs and trap physical IRQs to EL2.
-            // - Disable virtual IRQs and pass through physical IRQs to EL1.
+            // Route physical IRQ/FIQ exceptions to EL2. Guest interrupts are
+            // delivered through the GICv3 virtual CPU interface (ICH LRs).
             hcr_el2 += HCR_EL2::IMO::EnableVirtualIRQ + HCR_EL2::FMO::EnableVirtualFIQ;
         }
 
@@ -277,15 +284,23 @@ impl Aarch64VCpu {
     }
 
     /// Restores guest system control registers.
-    unsafe fn restore_vm_system_regs(&mut self) {
+    unsafe fn restore_vm_system_regs(&mut self, vhe: bool) {
         unsafe {
             // load system regs
+            if vhe {
+                core::arch::asm!("msr CPTR_EL2, {0}", in(reg) 3u64 << 20);
+            } else {
+                core::arch::asm!("msr CPTR_EL2, xzr");
+            }
+            self.guest_system_regs.restore(vhe);
+            // Enable the architectural GICv3 virtual CPU interface while the
+            // guest is running. A guest using the system-register interface
+            // (ICC_*) acknowledges virtual Group 1 interrupts through it.
             core::arch::asm!(
-                "
-                mov x3, xzr           // Trap nothing from EL1 to El2.
-                msr cptr_el2, x3"
+                "msr ich_hcr_el2, {hcr}\n\
+                 isb",
+                hcr = in(reg) 1u64,
             );
-            self.guest_system_regs.restore();
             core::arch::asm!(
                 "
                 ic  iallu
@@ -313,24 +328,30 @@ impl Aarch64VCpu {
             self.ctx
         );
 
-        unsafe {
-            // Store guest system regs
-            self.guest_system_regs.store();
-
-            // Store guest `SP_EL0` into the `Aarch64VCpu` struct,
-            // which will be restored when the guest is resumed in `exception_return_el2`.
-            self.ctx.sp_el0 = self.guest_system_regs.sp_el0;
-
-            // Restore host `SP_EL0`.
-            // This has to be done after guest's SP_EL0 is stored by `ext_regs_store`.
-            restore_host_sp_el0();
-        }
-
         let result = match exit_reason {
             TrapKind::Synchronous => handle_exception_sync(&mut self.ctx),
-            TrapKind::Irq => Ok(AxVCpuExitReason::ExternalInterrupt {
-                vector: axvisor_api::arch::fetch_irq(),
-            }),
+            TrapKind::Irq => {
+                let vector = axvisor_api::arch::fetch_irq();
+                if vector == 27 || vector == 30 {
+                    // Timer outputs are level-triggered. Disable the saved
+                    // bank and deliver the physical exit as a virtual PPI;
+                    // EL1 will reprogram the timer after handling it.
+                    if vector == 27 {
+                        self.guest_system_regs.cntv_ctl_el0 = 0;
+                    } else {
+                        self.guest_system_regs.cntp_ctl_el0 = 0;
+                    }
+                    axvisor_api::arch::hardware_inject_virtual_interrupt(vector as u8);
+                    Ok(AxVCpuExitReason::Nothing)
+                } else if vector >= 1020 {
+                    // GICv3 reserves 1020..=1023 for special/spurious IDs;
+                    // there is no host interrupt for the generic VMM loop to
+                    // dispatch in this case.
+                    Ok(AxVCpuExitReason::Nothing)
+                } else {
+                    Ok(AxVCpuExitReason::ExternalInterrupt { vector })
+                }
+            }
             _ => panic!("Unhandled exception {:?}", exit_reason),
         };
 
@@ -368,6 +389,26 @@ impl Aarch64VCpu {
         reg: usize,
     ) -> AxResult<Option<AxVCpuExitReason>> {
         const SYSREG_ICC_SGI1R_EL1: SysRegAddr = SysRegAddr::new(0x3A_3016); // ICC_SGI1R_EL1
+        const SYSREG_ID_AA64MMFR0_EL1: SysRegAddr = SysRegAddr::new(0x30_000E);
+        const OP0_MASK: usize = 0b11 << 20;
+        const OP1_MASK: usize = 0b111 << 14;
+        const CRN_MASK: usize = 0b1111 << 10;
+        const CRM_MASK: usize = 0b1111 << 1;
+
+        let encoding = addr.addr();
+        let crm = (encoding & CRM_MASK) >> 1;
+        let is_feature_id_register =
+            encoding & (OP0_MASK | OP1_MASK | CRN_MASK) == 0b11 << 20 && (1..=7).contains(&crm);
+
+        if !write && is_feature_id_register {
+            let value = if addr == SYSREG_ID_AA64MMFR0_EL1 {
+                ID_AA64MMFR0_EL1.read(ID_AA64MMFR0_EL1::PARange) as usize
+            } else {
+                0
+            };
+            self.set_gpr(reg, value);
+            return Ok(Some(AxVCpuExitReason::Nothing));
+        }
 
         match (addr, write) {
             (SYSREG_ICC_SGI1R_EL1, true) => {
@@ -421,6 +462,15 @@ impl Aarch64VCpu {
             }
         }
     }
+}
+
+fn feature_id_state_requires_filtering() -> bool {
+    let pfr0 = ID_AA64PFR0_EL1.get();
+    let pfr1 = ID_AA64PFR1_EL1.get();
+    let isar1 = ID_AA64ISAR1_EL1.get();
+    (pfr0 & ((0xf << 32) | (0xf << 40) | (0xf << 44))) != 0
+        || (pfr1 & ((0xf << 8) | (0xf << 16) | (0xf << 24) | (0xf << 44))) != 0
+        || (isar1 & ((0xf << 4) | (0xf << 8) | (0xf << 24) | (0xf << 28))) != 0
 }
 
 pub(crate) fn pa_bits() -> usize {

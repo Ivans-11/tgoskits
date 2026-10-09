@@ -135,6 +135,12 @@ pub fn crate_guest_fdt(
             if node_path.starts_with("/cpus") && should_skip_guest_cpu_prop(prop.name) {
                 continue;
             }
+            if node_path == "/chosen"
+                && prop.name == "bootargs"
+                && crate_config.kernel.cmdline.is_some()
+            {
+                continue;
+            }
             if fdt_rewriter.write_rewritten_property(
                 node,
                 node_path,
@@ -147,6 +153,13 @@ pub fn crate_guest_fdt(
             }
             fdt_writer
                 .property(prop.name, prop.raw_value())
+                .map_err(fdt_write_err)?;
+        }
+        if node_path == "/chosen"
+            && let Some(cmdline) = crate_config.kernel.cmdline.as_deref()
+        {
+            fdt_writer
+                .property_string("bootargs", cmdline)
                 .map_err(fdt_write_err)?;
         }
         fdt_rewriter.after_node(node_path);
@@ -203,6 +216,12 @@ fn determine_node_action(
         NodeAction::Skip
     } else if node_path.starts_with("/cpus") {
         NodeAction::CpuNode
+    } else if is_required_arch_node(node, node_path) {
+        // A generated AArch64 FDT must retain the firmware-facing platform
+        // description even when the corresponding MMIO ranges are emulated.
+        // These nodes describe PSCI, the architectural timer, and the GIC
+        // system-register CPU interface to an AArch64 guest.
+        NodeAction::IncludeAsPassthroughDevice
     } else if passthrough_device_names.contains(&node_path.to_string()) {
         // Fully matched passthrough device node
         NodeAction::IncludeAsPassthroughDevice
@@ -217,6 +236,21 @@ fn determine_node_action(
     } else {
         NodeAction::Skip
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn is_required_arch_node(node: &Node, node_path: &str) -> bool {
+    node_path == "/chosen"
+        || node_path == "/psci"
+        || node_path == "/apb-pclk"
+        || node
+            .compatibles()
+            .any(|compat| matches!(compat, "arm,armv8-timer" | "arm,gic-v3" | "arm,pl011"))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn is_required_arch_node(_node: &Node, _node_path: &str) -> bool {
+    false
 }
 
 /// Determine if node is a descendant of passthrough device

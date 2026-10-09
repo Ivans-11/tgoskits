@@ -18,9 +18,8 @@ use aarch64_cpu::registers::*;
 use ax_errno::AxResult;
 use axvcpu::AxArchPerCpu;
 
-/// Per-CPU data. A pointer to this struct is loaded into TP when a CPU starts. This structure
+/// Per-CPU data. A pointer to this struct is loaded into TP when a CPU starts.
 #[repr(C)]
-#[repr(align(4096))]
 pub struct Aarch64PerCpu {
     /// per cpu id
     pub cpu_id: usize,
@@ -46,13 +45,13 @@ impl AxArchPerCpu for Aarch64PerCpu {
     }
 
     fn hardware_enable(&mut self) -> AxResult {
-        // First we save origin `exception_vector_base`.
-        // Safety:
-        // Todo: take care of `preemption`
-        self.original_vbar_el2 = VBAR_EL2.get();
+        if HCR_EL2.is_set(HCR_EL2::E2H) {
+            // A VHE execution environment is already active. Guest entry
+            // installs guest-specific EL2 state only while a vCPU is running.
+            return Ok(());
+        }
 
-        // Set current `VBAR_EL2` to `exception_vector_base_vcpu`
-        // defined in this crate.
+        self.original_vbar_el2 = VBAR_EL2.get();
         VBAR_EL2.set(exception_vector_base_vcpu as *const () as usize as _);
 
         HCR_EL2.modify(
@@ -76,11 +75,11 @@ impl AxArchPerCpu for Aarch64PerCpu {
     }
 
     fn hardware_disable(&mut self) -> AxResult {
-        // Reset `VBAR_EL2` into previous value.
-        // Safety:
-        // Todo: take care of `preemption`
-        VBAR_EL2.set(mem::take(&mut self.original_vbar_el2));
+        if HCR_EL2.is_set(HCR_EL2::E2H) {
+            return Ok(());
+        }
 
+        VBAR_EL2.set(mem::take(&mut self.original_vbar_el2));
         HCR_EL2.set(HCR_EL2::VM::Disable.into());
         Ok(())
     }

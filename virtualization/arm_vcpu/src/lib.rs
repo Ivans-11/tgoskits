@@ -16,6 +16,8 @@
 #![cfg(target_arch = "aarch64")]
 #![doc = include_str!("../README.md")]
 
+extern crate alloc;
+
 #[macro_use]
 extern crate log;
 
@@ -25,6 +27,7 @@ mod exception_utils;
 mod exception;
 mod pcpu;
 mod smc;
+mod state;
 mod vcpu;
 
 pub use self::{

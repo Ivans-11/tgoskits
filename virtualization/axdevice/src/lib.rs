@@ -23,6 +23,9 @@
 //! The module is structured into two main parts: `config` and `device`, which manage the configuration and handling of AxVm devices respectively.
 
 extern crate alloc;
+
+#[cfg(target_arch = "aarch64")]
+mod pl011;
 #[macro_use]
 extern crate log;
 

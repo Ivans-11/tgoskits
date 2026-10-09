@@ -28,6 +28,7 @@ axdevice_base = { workspace = true }
 vm-interrupt = { workspace = true }
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 arm_vgic = { workspace = true, features = ["vgicv3"] }
+axvisor_api = { workspace = true }
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv_vplic = { workspace = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
