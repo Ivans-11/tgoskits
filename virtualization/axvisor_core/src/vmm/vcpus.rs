@@ -511,6 +511,13 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                         if matches!(exit_reason, AxVCpuExitReason::PreemptionTimer) {
                             axvisor_api::task::yield_now();
                         }
+                        #[cfg(target_arch = "aarch64")]
+                        if matches!(
+                            exit_reason,
+                            AxVCpuExitReason::ExternalInterrupt { vector: 26 }
+                        ) {
+                            axvisor_api::task::yield_now();
+                        }
                     }
                     AxVCpuExitReason::Hypercall { nr, args } => {
                         debug!("Hypercall [{nr}] args {args:x?}");

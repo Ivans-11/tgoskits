@@ -23,7 +23,9 @@ log = "0.4"
 spin = { workspace = true }
 
 aarch64-cpu = "11.0"
+arm-gic-driver = { workspace = true }
 numeric-enum-macro = "0.2"
+tock-registers = { workspace = true }
 
 ax-errno = { workspace = true }
 ax-percpu = { workspace = true, features = ["arm-el2"] }

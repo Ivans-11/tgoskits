@@ -21,8 +21,8 @@ use vm_interrupt::VmInterruptRouter;
 pub struct AxVmDeviceConfig {
     /// Interrupt routing endpoint for devices owned by this VM.
     pub interrupt_router: Option<Arc<dyn VmInterruptRouter>>,
-    /// Guest topology map: `(vCPU ID, guest CPU/hart ID)`.
-    pub guest_cpu_topology: Vec<(usize, usize)>,
+    /// vCPU topology map: `(vCPU ID, host CPU affinity, guest CPU/hart ID)`.
+    pub vcpu_topology: Vec<(usize, Option<usize>, usize)>,
     /// The vector of EmulatedDeviceConfig
     pub emu_configs: Vec<EmulatedDeviceConfig>,
 }
@@ -33,7 +33,7 @@ impl AxVmDeviceConfig {
     pub fn new(emu_configs: Vec<EmulatedDeviceConfig>) -> Self {
         Self {
             interrupt_router: None,
-            guest_cpu_topology: Vec::new(),
+            vcpu_topology: Vec::new(),
             emu_configs,
         }
     }

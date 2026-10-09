@@ -580,6 +580,7 @@ name = "arm_vcpu"
 version = "0.5.9"
 dependencies = [
  "aarch64-cpu 11.2.0",
+ "arm-gic-driver",
  "ax-errno 0.6.0",
  "ax-percpu",
  "axaddrspace",
@@ -589,6 +590,7 @@ dependencies = [
  "log",
  "numeric-enum-macro",
  "spin 0.12.0",
+ "tock-registers 0.10.1",
 ]
 
 [[package]]

@@ -45,6 +45,10 @@ pub struct VGicR {
 
     /// CPU ID associated with this redistributor.
     pub cpu_id: usize,
+    /// Guest-visible MPIDR affinity associated with this redistributor.
+    pub guest_cpu_id: usize,
+    /// Whether this is the final redistributor in the guest-visible region.
+    pub is_last: bool,
     /// Host physical base address of GICR for this CPU.
     pub host_gicr_base_this_cpu: HostPhysAddr,
 
@@ -65,14 +69,23 @@ impl VGicR {
     }
 
     /// Creates a new VGicR instance.
-    pub fn new(addr: GuestPhysAddr, size: Option<usize>, cpu_id: usize) -> Self {
+    pub fn new(
+        addr: GuestPhysAddr,
+        size: Option<usize>,
+        cpu_id: usize,
+        guest_cpu_id: usize,
+        host_cpu_id: usize,
+        is_last: bool,
+    ) -> Self {
         let size = size.unwrap_or(DEFAULT_SIZE_PER_GICR);
-        let host_gicr_base_this_cpu = crate::api_reexp::get_host_gicr_base() + cpu_id * size;
+        let host_gicr_base_this_cpu = crate::api_reexp::get_host_gicr_base() + host_cpu_id * size;
 
         Self {
             addr,
             size,
             cpu_id,
+            guest_cpu_id,
+            is_last,
             host_gicr_base_this_cpu,
             regs: UnsafeCell::new(VGicRRegs { propbaser: 0 }),
         }
@@ -108,9 +121,16 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
             }
             GICR_TYPER => {
                 let mut value = perform_mmio_read(gicr_base + reg, width)?;
+                const PROCESSOR_NUMBER_MASK: usize = 0xffff << 8;
+                const AFFINITY_MASK: usize = 0xffff_ffff << 32;
 
-                // TODO: set GICR_TYPER_LAST if it is the last redistributor of a VM.
-                if true {
+                let affinity =
+                    (self.guest_cpu_id & 0x00ff_ffff) | ((self.guest_cpu_id >> 8) & 0xff00_0000);
+                value &= !(PROCESSOR_NUMBER_MASK | AFFINITY_MASK | GICR_TYPER_LAST);
+                value |= (self.cpu_id & 0xffff) << 8;
+                value |= affinity << 32;
+
+                if self.is_last {
                     value |= GICR_TYPER_LAST;
                 }
 

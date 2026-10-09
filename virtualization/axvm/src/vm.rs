@@ -377,12 +377,7 @@ impl AxVM {
         #[cfg_attr(not(target_arch = "aarch64"), expect(unused_mut))]
         let mut devices = axdevice::AxVmDevices::new(AxVmDeviceConfig {
             interrupt_router: Some(Arc::new(AxVmInterruptRouter { vm_id: self.id() })),
-            guest_cpu_topology: inner_mut
-                .config
-                .vcpu_topology()
-                .iter()
-                .map(|(vcpu_id, _, guest_cpu_id)| (*vcpu_id, *guest_cpu_id))
-                .collect(),
+            vcpu_topology: inner_mut.config.vcpu_topology(),
             emu_configs: inner_mut.config.emu_devices().to_vec(),
         });
 

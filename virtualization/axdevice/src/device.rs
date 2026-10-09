@@ -137,7 +137,7 @@ impl AxVmDevices {
         Self::init(
             &mut this,
             config.interrupt_router.clone(),
-            &config.guest_cpu_topology,
+            &config.vcpu_topology,
             &config.emu_configs,
         );
         this
@@ -147,11 +147,11 @@ impl AxVmDevices {
     fn init(
         this: &mut Self,
         _interrupt_router: Option<Arc<dyn VmInterruptRouter>>,
-        guest_cpu_topology: &[(usize, usize)],
+        vcpu_topology: &[(usize, Option<usize>, usize)],
         emu_configs: &Vec<EmulatedDeviceConfig>,
     ) {
         #[cfg(not(target_arch = "riscv64"))]
-        let _ = guest_cpu_topology;
+        let _ = vcpu_topology;
 
         for config in emu_configs {
             match config.emu_type {
@@ -171,33 +171,46 @@ impl AxVmDevices {
                 EmulatedDeviceType::GPPTRedistributor => {
                     #[cfg(target_arch = "aarch64")]
                     {
-                        const GPPT_GICR_ARG_ERR_MSG: &str =
-                            "expect 3 args for gppt redistributor (cpu_num, stride, pcpu_id)";
-
-                        let cpu_num = config
-                            .cfg_list
-                            .first()
-                            .copied()
-                            .expect(GPPT_GICR_ARG_ERR_MSG);
-                        let stride = config
-                            .cfg_list
-                            .get(1)
-                            .copied()
-                            .expect(GPPT_GICR_ARG_ERR_MSG);
-                        let pcpu_id = config
-                            .cfg_list
-                            .get(2)
-                            .copied()
-                            .expect(GPPT_GICR_ARG_ERR_MSG);
+                        const GPPT_GICR_ARG_ERR_MSG: &str = "expect no args or legacy (cpu_num, \
+                                                             stride, first_pcpu) for gppt \
+                                                             redistributor";
+                        let legacy = match config.cfg_list.as_slice() {
+                            [] => None,
+                            [cpu_num, stride, first_pcpu] => Some((*cpu_num, *stride, *first_pcpu)),
+                            _ => panic!("{GPPT_GICR_ARG_ERR_MSG}"),
+                        };
+                        let cpu_num = legacy
+                            .map(|(cpu_num, ..)| cpu_num)
+                            .unwrap_or(vcpu_topology.len());
+                        let stride = legacy.map(|(_, stride, _)| stride).unwrap_or(config.length);
 
                         for i in 0..cpu_num {
+                            let (_, affinity, guest_cpu_id) = vcpu_topology
+                                .iter()
+                                .find(|(vcpu_id, ..)| *vcpu_id == i)
+                                .copied()
+                                .expect("missing vCPU topology for gppt redistributor");
+                            let host_cpu_id = if let Some((_, _, first_pcpu)) = legacy {
+                                first_pcpu + i
+                            } else {
+                                let affinity = affinity
+                                    .expect("gppt redistributor requires a host CPU affinity");
+                                assert!(
+                                    affinity.is_power_of_two(),
+                                    "gppt redistributor requires a single host CPU affinity"
+                                );
+                                affinity.trailing_zeros() as usize
+                            };
                             let addr = config.base_gpa + i * stride;
                             let size = config.length;
                             #[allow(clippy::arc_with_non_send_sync)]
                             this.add_mmio_dev(Arc::new(arm_vgic::v3::vgicr::VGicR::new(
                                 addr.into(),
                                 Some(size),
-                                pcpu_id + i,
+                                i,
+                                guest_cpu_id,
+                                host_cpu_id,
+                                i + 1 == cpu_num,
                             )));
 
                             info!(
@@ -283,8 +296,7 @@ impl AxVmDevices {
                         let interrupt_router = _interrupt_router
                             .clone()
                             .expect("riscv vPLIC requires a VM interrupt router");
-                        let context_routes =
-                            riscv_plic_context_routes(context_num, guest_cpu_topology);
+                        let context_routes = riscv_plic_context_routes(context_num, vcpu_topology);
                         this.add_mmio_dev(Arc::new(VPlicGlobal::new(
                             config.base_gpa.into(),
                             Some(config.length),
@@ -661,10 +673,10 @@ impl AxVmDevices {
 #[cfg(target_arch = "riscv64")]
 fn riscv_plic_context_routes(
     context_num: usize,
-    guest_cpu_topology: &[(usize, usize)],
+    vcpu_topology: &[(usize, Option<usize>, usize)],
 ) -> Vec<Option<usize>> {
     let mut routes = alloc::vec![None; context_num];
-    for &(vcpu_id, guest_hart_id) in guest_cpu_topology {
+    for &(vcpu_id, _, guest_hart_id) in vcpu_topology {
         let supervisor_context = guest_hart_id.saturating_mul(2).saturating_add(1);
         if supervisor_context < context_num {
             routes[supervisor_context] = Some(vcpu_id);

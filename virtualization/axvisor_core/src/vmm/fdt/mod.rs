@@ -17,6 +17,8 @@
 //! This module provides functionality for parsing and processing device tree blobs,
 //! including CPU configuration, passthrough device detection, and FDT generation.
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 mod arch;
 mod create;
 mod device;

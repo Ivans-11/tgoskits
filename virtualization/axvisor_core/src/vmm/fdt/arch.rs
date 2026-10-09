@@ -1,21 +1,24 @@
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 use alloc::vec::Vec;
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 use ax_errno::AxResult;
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 use fdt_parser::Node;
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 use super::vm_fdt::{FdtWriter, FdtWriterNode};
+
+#[cfg(target_arch = "aarch64")]
+pub(super) type FdtRewriter<'a> = super::aarch64::Aarch64FdtRewriter<'a>;
 
 #[cfg(target_arch = "riscv64")]
 pub(super) type FdtRewriter<'a> = super::riscv::RiscvFdtRewriter<'a>;
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 pub(super) struct FdtRewriter;
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
 impl FdtRewriter {
     pub(super) fn new(_nodes: &[Node<'_>]) -> Self {
         Self

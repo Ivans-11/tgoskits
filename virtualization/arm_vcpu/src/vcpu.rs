@@ -23,7 +23,7 @@ use crate::{
     TrapFrame,
     exception::{TrapKind, handle_exception_sync},
     exception_utils::exception_class_value,
-    state::{FpState, GuestSystemRegisters, HostSystemRegisters},
+    state::{FpState, GuestSystemRegisters, HostSystemRegisters, VirtualGicState},
 };
 
 unsafe extern "C" {
@@ -51,6 +51,7 @@ pub struct Aarch64VCpu {
     ctx: TrapFrame,
     host_stack_top: u64,
     guest_system_regs: GuestSystemRegisters,
+    virtual_gic_state: Box<VirtualGicState>,
     fp_state: Box<FpState>,
     /// The MPIDR_EL1 value for the vCPU.
     mpidr: u64,
@@ -87,11 +88,14 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
         ctx.set_argument(config.dtb_addr);
 
         let fp_state = Box::<FpState>::new_zeroed();
+        let virtual_gic_state = Box::<VirtualGicState>::new_zeroed();
 
         Ok(Self {
             ctx,
             host_stack_top: 0,
             guest_system_regs: GuestSystemRegisters::default(),
+            // SAFETY: VirtualGicState contains only integers and has no invalid bit patterns.
+            virtual_gic_state: unsafe { virtual_gic_state.assume_init() },
             // SAFETY: FpState contains only integers and has no invalid bit patterns.
             fp_state: unsafe { fp_state.assume_init() },
             mpidr: config.mpidr_el1,
@@ -128,6 +132,7 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
             host_fp_state.save();
             VBAR_EL2.set(exception_vector_base_vcpu as *const () as usize as _);
             self.restore_vm_system_regs(host_vhe);
+            self.virtual_gic_state.restore();
             self.fp_state.restore();
             self.run_guest()
         };
@@ -137,6 +142,7 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
             // register bank, then restore the host state before executing the
             // regular VM-exit handler.
             self.fp_state.save();
+            self.virtual_gic_state.save();
             self.guest_system_regs.store(host_vhe);
             host_system_regs.restore();
             host_fp_state.restore();
@@ -160,8 +166,11 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {
-        axvisor_api::arch::hardware_inject_virtual_interrupt(vector as u8);
-        Ok(())
+        if self.virtual_gic_state.inject_interrupt(vector) {
+            Ok(())
+        } else {
+            ax_errno::ax_err!(ResourceBusy, "No free GIC list register")
+        }
     }
 
     fn set_return_value(&mut self, val: usize) {
@@ -332,16 +341,28 @@ impl Aarch64VCpu {
             TrapKind::Synchronous => handle_exception_sync(&mut self.ctx),
             TrapKind::Irq => {
                 let vector = axvisor_api::arch::fetch_irq();
-                if vector == 27 || vector == 30 {
-                    // Timer outputs are level-triggered. Disable the saved
-                    // bank and deliver the physical exit as a virtual PPI;
-                    // EL1 will reprogram the timer after handling it.
-                    if vector == 27 {
-                        self.guest_system_regs.cntv_ctl_el0 = 0;
-                    } else {
-                        self.guest_system_regs.cntp_ctl_el0 = 0;
+                let inject_virtual_timer =
+                    vector == 27 || self.guest_system_regs.cntv_ctl_el0 & 0x7 == 0x5;
+                let inject_physical_timer =
+                    vector == 30 || self.guest_system_regs.cntp_ctl_el0 & 0x7 == 0x5;
+
+                // A higher-priority physical IRQ can hide an expired timer
+                // PPI from HPPIR. Derive the level-triggered timer state from
+                // its saved control register as well, then mask it until EL1
+                // observes ISTATUS and programs the next deadline.
+                if inject_virtual_timer {
+                    self.guest_system_regs.cntv_ctl_el0 |= 0x2;
+                    if !self.virtual_gic_state.inject_interrupt(27) {
+                        warn!("No free GIC list register for virtual timer interrupt");
                     }
-                    axvisor_api::arch::hardware_inject_virtual_interrupt(vector as u8);
+                }
+                if inject_physical_timer {
+                    self.guest_system_regs.cntp_ctl_el0 |= 0x2;
+                    if !self.virtual_gic_state.inject_interrupt(30) {
+                        warn!("No free GIC list register for physical timer interrupt");
+                    }
+                }
+                if vector == 27 || vector == 30 {
                     Ok(AxVCpuExitReason::Nothing)
                 } else if vector >= 1020 {
                     // GICv3 reserves 1020..=1023 for special/spurious IDs;

@@ -15,6 +15,128 @@
 use core::arch::asm;
 
 use aarch64_cpu::registers::*;
+use arm_gic_driver::sys_reg::{
+    ICH_AP0R0_EL2, ICH_AP0R1_EL2, ICH_AP0R2_EL2, ICH_AP0R3_EL2, ICH_AP1R0_EL2, ICH_AP1R1_EL2,
+    ICH_AP1R2_EL2, ICH_AP1R3_EL2, ICH_HCR_EL2, ICH_VMCR_EL2, ICH_VTR_EL2, ich_lr_el2_get,
+    ich_lr_el2_set,
+};
+use tock_registers::LocalRegisterCopy;
+
+const MAX_GIC_LIST_REGISTERS: usize = 16;
+
+/// Per-vCPU state held in the GICv3 virtual CPU interface.
+#[derive(Debug, Default)]
+pub(crate) struct VirtualGicState {
+    vmcr: u64,
+    ap0r: [u64; 4],
+    ap1r: [u64; 4],
+    list_registers: [u64; MAX_GIC_LIST_REGISTERS],
+}
+
+impl VirtualGicState {
+    pub(crate) fn inject_interrupt(&mut self, vector: usize) -> bool {
+        const LR_PENDING: u64 = 1 << 62;
+        const LR_GROUP1: u64 = 1 << 60;
+        const LR_STATE_MASK: u64 = 0b11 << 62;
+        const LR_VINTID_MASK: u64 = u32::MAX as u64;
+
+        if let Some(lr) = self
+            .list_registers
+            .iter_mut()
+            .take(gic_list_register_count())
+            .find(|lr| **lr & LR_STATE_MASK != 0 && **lr & LR_VINTID_MASK == vector as u64)
+        {
+            *lr |= LR_PENDING;
+            return true;
+        }
+
+        let Some(lr) = self
+            .list_registers
+            .iter_mut()
+            .take(gic_list_register_count())
+            .find(|lr| **lr & LR_STATE_MASK == 0)
+        else {
+            return false;
+        };
+        *lr = vector as u64 | LR_GROUP1 | LR_PENDING;
+        true
+    }
+
+    pub(crate) unsafe fn save(&mut self) {
+        unsafe {
+            ICH_HCR_EL2.set(0);
+            asm!("dsb sy", "isb");
+            self.vmcr = ICH_VMCR_EL2.get();
+            save_active_priorities(&mut self.ap0r, &mut self.ap1r);
+            for (index, lr) in self
+                .list_registers
+                .iter_mut()
+                .take(gic_list_register_count())
+                .enumerate()
+            {
+                *lr = ich_lr_el2_get(index).get();
+            }
+        }
+    }
+
+    pub(crate) unsafe fn restore(&self) {
+        unsafe {
+            ICH_VMCR_EL2.set(self.vmcr);
+            restore_active_priorities(&self.ap0r, &self.ap1r);
+            for (index, &lr) in self
+                .list_registers
+                .iter()
+                .take(gic_list_register_count())
+                .enumerate()
+            {
+                ich_lr_el2_set(index, LocalRegisterCopy::new(lr));
+            }
+            asm!("isb");
+        }
+    }
+}
+
+fn gic_list_register_count() -> usize {
+    (ICH_VTR_EL2.read(ICH_VTR_EL2::LISTREGS) as usize + 1).min(MAX_GIC_LIST_REGISTERS)
+}
+
+fn gic_active_priority_register_count() -> usize {
+    match ICH_VTR_EL2.read(ICH_VTR_EL2::PREBITS) + 1 {
+        7 => 4,
+        6 => 2,
+        _ => 1,
+    }
+}
+
+unsafe fn save_active_priorities(ap0r: &mut [u64; 4], ap1r: &mut [u64; 4]) {
+    ap0r[0] = ICH_AP0R0_EL2.get();
+    ap1r[0] = ICH_AP1R0_EL2.get();
+    if gic_active_priority_register_count() >= 2 {
+        ap0r[1] = ICH_AP0R1_EL2.get();
+        ap1r[1] = ICH_AP1R1_EL2.get();
+    }
+    if gic_active_priority_register_count() == 4 {
+        ap0r[2] = ICH_AP0R2_EL2.get();
+        ap0r[3] = ICH_AP0R3_EL2.get();
+        ap1r[2] = ICH_AP1R2_EL2.get();
+        ap1r[3] = ICH_AP1R3_EL2.get();
+    }
+}
+
+unsafe fn restore_active_priorities(ap0r: &[u64; 4], ap1r: &[u64; 4]) {
+    ICH_AP0R0_EL2.set(ap0r[0]);
+    ICH_AP1R0_EL2.set(ap1r[0]);
+    if gic_active_priority_register_count() >= 2 {
+        ICH_AP0R1_EL2.set(ap0r[1]);
+        ICH_AP1R1_EL2.set(ap1r[1]);
+    }
+    if gic_active_priority_register_count() == 4 {
+        ICH_AP0R2_EL2.set(ap0r[2]);
+        ICH_AP0R3_EL2.set(ap0r[3]);
+        ICH_AP1R2_EL2.set(ap1r[2]);
+        ICH_AP1R3_EL2.set(ap1r[3]);
+    }
+}
 
 /// Floating-point and SIMD state switched between the host and guest.
 #[repr(C, align(16))]
