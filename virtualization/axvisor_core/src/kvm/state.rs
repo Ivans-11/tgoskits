@@ -59,10 +59,25 @@ pub(in crate::kvm) enum ControlFileState {
 
 #[cfg(target_arch = "aarch64")]
 #[derive(Clone, Debug)]
-pub(in crate::kvm) struct DeviceFileState {
-    pub(in crate::kvm) vm_file: api_control::ControlFileId,
-    pub(in crate::kvm) dist_configured: bool,
-    pub(in crate::kvm) redist_configured: bool,
+pub(in crate::kvm) enum DeviceFileState {
+    VgicV3 {
+        vm_file: api_control::ControlFileId,
+        dist_configured: bool,
+        redist_configured: bool,
+    },
+    VgicIts {
+        vm_file: api_control::ControlFileId,
+        addr_configured: bool,
+    },
+}
+
+#[cfg(target_arch = "aarch64")]
+impl DeviceFileState {
+    pub(in crate::kvm) fn vm_file(&self) -> api_control::ControlFileId {
+        match self {
+            Self::VgicV3 { vm_file, .. } | Self::VgicIts { vm_file, .. } => *vm_file,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -78,7 +93,7 @@ pub(in crate::kvm) struct VmFileState {
     pub(in crate::kvm) gsi_routes: BTreeMap<u32, GsiRoute>,
     pub(in crate::kvm) vcpu_files: BTreeMap<u32, api_control::ControlFileId>,
     #[cfg(target_arch = "aarch64")]
-    pub(in crate::kvm) device_file: Option<api_control::ControlFileId>,
+    pub(in crate::kvm) device_files: BTreeMap<u32, api_control::ControlFileId>,
     pub(in crate::kvm) clock: Vec<u8>,
     pub(in crate::kvm) pit2: Vec<u8>,
     #[cfg(target_arch = "x86_64")]

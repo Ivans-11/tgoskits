@@ -52,7 +52,7 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
             gsi_routes: BTreeMap::new(),
             vcpu_files: BTreeMap::new(),
             #[cfg(target_arch = "aarch64")]
-            device_file: None,
+            device_files: BTreeMap::new(),
             clock: vec![0; abi::KVM_CLOCK_DATA_SIZE as usize],
             pit2: vec![0; abi::KVM_PIT_STATE2_SIZE as usize],
             #[cfg(target_arch = "x86_64")]

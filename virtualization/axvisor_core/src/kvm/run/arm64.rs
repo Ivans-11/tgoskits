@@ -18,6 +18,31 @@ use axvm::AxVMRef;
 
 use crate::kvm::util::{access_width_mask, sign_extend_value};
 
+const PSCI_0_2_FN_BASE: u64 = 0x8400_0000;
+const PSCI_0_2_FN64_BASE: u64 = 0xc400_0000;
+const PSCI_FN_RANGE_SIZE: u64 = 0x20;
+const PSCI_0_2_FN_PSCI_VERSION: u64 = PSCI_0_2_FN_BASE;
+const PSCI_0_2_FN_MIGRATE_INFO_TYPE: u64 = PSCI_0_2_FN_BASE + 6;
+const PSCI_VERSION_0_2: usize = 2;
+const PSCI_0_2_TOS_MP: usize = 2;
+const PSCI_RET_NOT_SUPPORTED: usize = usize::MAX;
+
+pub(super) fn handle_psci_hypercall(vcpu: &axvm::AxVCpuRef, function: u64) -> bool {
+    let is_psci = (PSCI_0_2_FN_BASE..PSCI_0_2_FN_BASE + PSCI_FN_RANGE_SIZE).contains(&function)
+        || (PSCI_0_2_FN64_BASE..PSCI_0_2_FN64_BASE + PSCI_FN_RANGE_SIZE).contains(&function);
+    if !is_psci {
+        return false;
+    }
+
+    let result = match function {
+        PSCI_0_2_FN_PSCI_VERSION => PSCI_VERSION_0_2,
+        PSCI_0_2_FN_MIGRATE_INFO_TYPE => PSCI_0_2_TOS_MP,
+        _ => PSCI_RET_NOT_SUPPORTED,
+    };
+    vcpu.set_gpr(0, result);
+    true
+}
+
 pub(super) fn handle_in_kernel_device_exit(
     vm: &AxVMRef,
     vcpu: &axvm::AxVCpuRef,

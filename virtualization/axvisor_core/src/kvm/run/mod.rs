@@ -23,7 +23,7 @@ mod riscv;
 mod x86;
 
 #[cfg(target_arch = "aarch64")]
-use arm64::handle_in_kernel_device_exit;
+use arm64::{handle_in_kernel_device_exit, handle_psci_hypercall};
 use exit::{complete_io_read, complete_mmio_read, kvm_exit_reason, prepare_userspace_exit};
 #[cfg(target_arch = "riscv64")]
 use riscv::{handle_cpu_up, handle_send_ipi};
@@ -251,6 +251,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 ..
             } => {
                 vcpu.set_gpr(abi::X86_RAX_REG_INDEX, (-abi::KVM_ENOSYS) as usize);
+                axvisor_api::task::yield_now();
+            }
+            #[cfg(target_arch = "aarch64")]
+            AxVCpuExitReason::Hypercall { nr, .. } if handle_psci_hypercall(&vcpu, nr) => {
                 axvisor_api::task::yield_now();
             }
             #[cfg(target_arch = "x86_64")]

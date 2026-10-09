@@ -166,12 +166,10 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
             }
             #[cfg(target_arch = "aarch64")]
             ControlFileState::Device(device) => {
-                let vm_file = device.vm_file;
+                let vm_file = device.vm_file();
                 control_files.remove(&control_file);
                 if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
-                    if vm.device_file == Some(control_file) {
-                        vm.device_file = None;
-                    }
+                    vm.device_files.retain(|_, file| *file != control_file);
                 }
                 CloseAction::None
             }
@@ -583,7 +581,7 @@ fn check_extension(capability: usize) -> usize {
         KVM_CAP_IRQ_ROUTING => usize::from(cfg!(target_arch = "x86_64")) * KVM_MAX_IRQ_ROUTES,
         KVM_CAP_JOIN_MEMORY_REGIONS_WORKS => 1,
         KVM_CAP_MCE => usize::from(cfg!(target_arch = "x86_64")),
-        KVM_CAP_IRQFD => usize::from(cfg!(target_arch = "x86_64")),
+        KVM_CAP_IRQFD => usize::from(cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))),
         KVM_CAP_PIT2 => usize::from(cfg!(target_arch = "x86_64")),
         KVM_CAP_PIT_STATE2 => usize::from(cfg!(target_arch = "x86_64")),
         KVM_CAP_SET_IDENTITY_MAP_ADDR => usize::from(cfg!(target_arch = "x86_64")),

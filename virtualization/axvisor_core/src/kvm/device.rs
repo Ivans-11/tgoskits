@@ -14,7 +14,9 @@
 
 use ax_errno::{AxError, AxResult, ax_err};
 use axvisor_api::control as api_control;
-use axvm::config::{HOST_CONTROLLED_GIC_DIST_BASE, HOST_CONTROLLED_GIC_REDIST_BASE};
+use axvm::config::{
+    HOST_CONTROLLED_GIC_DIST_BASE, HOST_CONTROLLED_GIC_ITS_BASE, HOST_CONTROLLED_GIC_REDIST_BASE,
+};
 use kvm_uapi::arm64::*;
 
 use super::{
@@ -30,7 +32,9 @@ pub(in crate::kvm) fn create_device(
     api_control::copy_from_user(arg, &mut bytes)?;
     let type_ = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
     let flags = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
-    if type_ != KVM_DEV_TYPE_ARM_VGIC_V3 || flags & !KVM_CREATE_DEVICE_TEST != 0 {
+    if !matches!(type_, KVM_DEV_TYPE_ARM_VGIC_V3 | KVM_DEV_TYPE_ARM_VGIC_ITS)
+        || flags & !KVM_CREATE_DEVICE_TEST != 0
+    {
         return ax_err!(Unsupported);
     }
     if flags == KVM_CREATE_DEVICE_TEST {
@@ -43,18 +47,23 @@ pub(in crate::kvm) fn create_device(
         let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
             return ax_err!(NotFound);
         };
-        if vm.device_file.is_some() {
+        if vm.device_files.contains_key(&type_) {
             return ax_err!(AlreadyExists);
         }
-        vm.device_file = Some(device_file);
-        control_files.insert(
-            device_file,
-            ControlFileState::Device(DeviceFileState {
+        vm.device_files.insert(type_, device_file);
+        let state = match type_ {
+            KVM_DEV_TYPE_ARM_VGIC_V3 => DeviceFileState::VgicV3 {
                 vm_file,
                 dist_configured: false,
                 redist_configured: false,
-            }),
-        );
+            },
+            KVM_DEV_TYPE_ARM_VGIC_ITS => DeviceFileState::VgicIts {
+                vm_file,
+                addr_configured: false,
+            },
+            _ => unreachable!(),
+        };
+        control_files.insert(device_file, ControlFileState::Device(state));
     }
 
     let fd = match api_control::create_user_fd(device_file, KVM_CONTROL_OPS, None) {
@@ -79,11 +88,11 @@ pub(in crate::kvm) fn device_ioctl(
     let attr = read_device_attr(arg)?;
     match cmd {
         KVM_HAS_DEVICE_ATTR => {
-            validate_attr(&attr)?;
+            validate_attr(control_file, &attr)?;
             Ok(0)
         }
         KVM_SET_DEVICE_ATTR => {
-            validate_attr(&attr)?;
+            validate_attr(control_file, &attr)?;
             set_device_attr(control_file, attr)?;
             Ok(0)
         }
@@ -91,16 +100,29 @@ pub(in crate::kvm) fn device_ioctl(
     }
 }
 
-fn validate_attr(attr: &KvmDeviceAttr) -> AxResult {
+fn validate_attr(control_file: api_control::ControlFileId, attr: &KvmDeviceAttr) -> AxResult {
     if attr.flags != 0 {
         return ax_err!(InvalidInput);
     }
-    match (attr.group, attr.attr) {
-        (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_DIST)
-        | (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST)
-        | (KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0)
-        | (KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT) => Ok(()),
-        _ => Err(AxError::Unsupported),
+    let control_files = CONTROL_FILES.lock();
+    match control_files.get(&control_file) {
+        Some(ControlFileState::Device(DeviceFileState::VgicV3 { .. })) => {
+            match (attr.group, attr.attr) {
+                (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_DIST)
+                | (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST)
+                | (KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0)
+                | (KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT) => Ok(()),
+                _ => Err(AxError::Unsupported),
+            }
+        }
+        Some(ControlFileState::Device(DeviceFileState::VgicIts { .. })) => {
+            match (attr.group, attr.attr) {
+                (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_ITS_ADDR_TYPE)
+                | (KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT) => Ok(()),
+                _ => Err(AxError::Unsupported),
+            }
+        }
+        _ => ax_err!(NotFound),
     }
 }
 
@@ -117,35 +139,65 @@ fn set_device_attr(control_file: api_control::ControlFileId, attr: KvmDeviceAttr
     let Some(ControlFileState::Device(device)) = control_files.get_mut(&control_file) else {
         return ax_err!(NotFound);
     };
-    match (attr.group, attr.attr) {
-        (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_DIST)
-            if value == HOST_CONTROLLED_GIC_DIST_BASE as u64 =>
-        {
-            device.dist_configured = true;
-        }
-        (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST)
-            if value == HOST_CONTROLLED_GIC_REDIST_BASE as u64 =>
-        {
-            device.redist_configured = true;
-        }
-        (KVM_DEV_ARM_VGIC_GRP_ADDR, _) => return ax_err!(InvalidInput),
-        (KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0) => {
-            let nr_irqs = u32::try_from(value).map_err(|_| AxError::InvalidInput)?;
-            if !(64..=256).contains(&nr_irqs) || nr_irqs % 32 != 0 {
-                return ax_err!(InvalidInput);
+    let vm_file = device.vm_file();
+    let initialized = match device {
+        DeviceFileState::VgicV3 {
+            dist_configured,
+            redist_configured,
+            ..
+        } => match (attr.group, attr.attr) {
+            (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_DIST)
+                if value == HOST_CONTROLLED_GIC_DIST_BASE as u64 =>
+            {
+                *dist_configured = true;
+                false
             }
-        }
-        (KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT) => {
-            if !device.dist_configured || !device.redist_configured {
-                return ax_err!(BadState);
+            (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST)
+                if value == HOST_CONTROLLED_GIC_REDIST_BASE as u64 =>
+            {
+                *redist_configured = true;
+                false
             }
-            let vm_file = device.vm_file;
-            let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
-                return ax_err!(NotFound);
-            };
-            vm.irqchip_created = true;
-        }
-        _ => return ax_err!(Unsupported),
+            (KVM_DEV_ARM_VGIC_GRP_ADDR, _) => return ax_err!(InvalidInput),
+            (KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0) => {
+                let nr_irqs = u32::try_from(value).map_err(|_| AxError::InvalidInput)?;
+                if !(64..=256).contains(&nr_irqs) || nr_irqs % 32 != 0 {
+                    return ax_err!(InvalidInput);
+                }
+                false
+            }
+            (KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT) => {
+                if !*dist_configured || !*redist_configured {
+                    return ax_err!(BadState);
+                }
+                true
+            }
+            _ => return ax_err!(Unsupported),
+        },
+        DeviceFileState::VgicIts {
+            addr_configured, ..
+        } => match (attr.group, attr.attr) {
+            (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_ITS_ADDR_TYPE)
+                if value == HOST_CONTROLLED_GIC_ITS_BASE as u64 =>
+            {
+                *addr_configured = true;
+                false
+            }
+            (KVM_DEV_ARM_VGIC_GRP_ADDR, _) => return ax_err!(InvalidInput),
+            (KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT) => {
+                if !*addr_configured {
+                    return ax_err!(BadState);
+                }
+                false
+            }
+            _ => return ax_err!(Unsupported),
+        },
+    };
+    if initialized {
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
+            return ax_err!(NotFound);
+        };
+        vm.irqchip_created = true;
     }
     Ok(())
 }

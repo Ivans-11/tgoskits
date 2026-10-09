@@ -51,6 +51,7 @@ pub struct KvmDeviceAttr {
 }
 
 pub const KVM_DEV_TYPE_ARM_VGIC_V3: u32 = 7;
+pub const KVM_DEV_TYPE_ARM_VGIC_ITS: u32 = 8;
 pub const KVM_CREATE_DEVICE_TEST: u32 = 1;
 
 pub const KVM_DEV_ARM_VGIC_GRP_ADDR: u32 = 0;
@@ -59,3 +60,4 @@ pub const KVM_DEV_ARM_VGIC_GRP_CTRL: u32 = 4;
 pub const KVM_DEV_ARM_VGIC_CTRL_INIT: u64 = 0;
 pub const KVM_VGIC_V3_ADDR_TYPE_DIST: u64 = 2;
 pub const KVM_VGIC_V3_ADDR_TYPE_REDIST: u64 = 3;
+pub const KVM_VGIC_ITS_ADDR_TYPE: u64 = 4;
