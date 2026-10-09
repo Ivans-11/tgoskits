@@ -587,6 +587,7 @@ dependencies = [
  "axdevice_base",
  "axvcpu",
  "axvisor_api",
+ "kvm-uapi",
  "log",
  "numeric-enum-macro",
  "spin 0.12.0",

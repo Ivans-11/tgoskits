@@ -53,6 +53,16 @@ pub(in crate::kvm) enum ControlFileState {
     System,
     Vm(VmFileState),
     Vcpu(VcpuFileState),
+    #[cfg(target_arch = "aarch64")]
+    Device(DeviceFileState),
+}
+
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Debug)]
+pub(in crate::kvm) struct DeviceFileState {
+    pub(in crate::kvm) vm_file: api_control::ControlFileId,
+    pub(in crate::kvm) dist_configured: bool,
+    pub(in crate::kvm) redist_configured: bool,
 }
 
 #[derive(Clone)]
@@ -67,6 +77,8 @@ pub(in crate::kvm) struct VmFileState {
     pub(in crate::kvm) irqfds: BTreeMap<IrqFdKey, IrqFd>,
     pub(in crate::kvm) gsi_routes: BTreeMap<u32, GsiRoute>,
     pub(in crate::kvm) vcpu_files: BTreeMap<u32, api_control::ControlFileId>,
+    #[cfg(target_arch = "aarch64")]
+    pub(in crate::kvm) device_file: Option<api_control::ControlFileId>,
     pub(in crate::kvm) clock: Vec<u8>,
     pub(in crate::kvm) pit2: Vec<u8>,
     #[cfg(target_arch = "x86_64")]
@@ -107,6 +119,8 @@ pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) lapic: Vec<u8>,
     pub(in crate::kvm) vapic_addr: Option<u64>,
     pub(in crate::kvm) operation_lock: Arc<VcpuOperationLock>,
+    #[cfg(target_arch = "aarch64")]
+    pub(in crate::kvm) initialized: bool,
 }
 
 /// Serializes stateful ioctls issued through one KVM vCPU file.

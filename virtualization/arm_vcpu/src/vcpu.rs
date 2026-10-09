@@ -26,6 +26,8 @@ use crate::{
     state::{FpState, GuestSystemRegisters, HostSystemRegisters, VirtualGicState},
 };
 
+mod kvm_regs;
+
 unsafe extern "C" {
     fn exception_vector_base_vcpu();
 }
@@ -163,6 +165,18 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
 
     fn set_gpr(&mut self, idx: usize, val: usize) {
         self.ctx.set_gpr(idx, val);
+    }
+
+    fn get_arch_reg(&self, reg_id: u64) -> AxResult<u64> {
+        self.get_kvm_arch_reg(reg_id)
+    }
+
+    fn arch_reg_ids(&self) -> &'static [u64] {
+        self.kvm_arch_reg_ids()
+    }
+
+    fn set_arch_reg(&mut self, reg_id: u64, value: u64) -> AxResult {
+        self.set_kvm_arch_reg(reg_id, value)
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {

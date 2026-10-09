@@ -158,7 +158,14 @@ impl AxVmDevices {
                 EmulatedDeviceType::InterruptController => {
                     #[cfg(target_arch = "aarch64")]
                     {
-                        this.add_mmio_dev(Arc::new(Vgic::new()));
+                        let vgic = match config.cfg_list.as_slice() {
+                            [dist_offset] if config.length != 0 => {
+                                Vgic::new_gicv3(config.base_gpa, config.length, *dist_offset)
+                            }
+                            [] => Vgic::new(),
+                            _ => panic!("invalid interrupt controller configuration"),
+                        };
+                        this.add_mmio_dev(Arc::new(vgic));
                     }
                     #[cfg(not(target_arch = "aarch64"))]
                     {

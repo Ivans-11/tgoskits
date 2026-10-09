@@ -354,7 +354,26 @@ fn host_controlled_emu_devices() -> Vec<EmulatedDeviceConfig> {
     ]
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
+pub const HOST_CONTROLLED_GIC_REDIST_BASE: usize = 0x3ffd_0000;
+#[cfg(target_arch = "aarch64")]
+pub const HOST_CONTROLLED_GIC_DIST_BASE: usize = 0x3fff_0000;
+#[cfg(target_arch = "aarch64")]
+const HOST_CONTROLLED_GIC_SIZE: usize = 0x30000;
+
+#[cfg(target_arch = "aarch64")]
+fn host_controlled_emu_devices() -> Vec<EmulatedDeviceConfig> {
+    alloc::vec![EmulatedDeviceConfig {
+        name: "kvm-gicv3".into(),
+        base_gpa: HOST_CONTROLLED_GIC_REDIST_BASE,
+        length: HOST_CONTROLLED_GIC_SIZE,
+        emu_type: EmulatedDeviceType::InterruptController,
+        cfg_list: alloc::vec![HOST_CONTROLLED_GIC_DIST_BASE - HOST_CONTROLLED_GIC_REDIST_BASE],
+        ..Default::default()
+    }]
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn host_controlled_emu_devices() -> Vec<EmulatedDeviceConfig> {
     Vec::new()
 }

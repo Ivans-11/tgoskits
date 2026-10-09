@@ -329,6 +329,14 @@ struct GuestTimerRegisters {
 }
 
 impl GuestSystemRegisters {
+    pub(crate) fn sp_el1(&self) -> u64 {
+        self.sp_el1
+    }
+
+    pub(crate) fn set_sp_el1(&mut self, value: u64) {
+        self.sp_el1 = value;
+    }
+
     /// Resets the VM context by setting all registers to zero.
     ///
     /// This method allows the `GuestSystemRegisters` instance to be reused by resetting

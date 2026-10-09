@@ -33,3 +33,4 @@ axaddrspace = { workspace = true }
 axdevice_base = { workspace = true }
 axvcpu = { workspace = true }
 axvisor_api = { workspace = true }
+kvm-uapi = { workspace = true }

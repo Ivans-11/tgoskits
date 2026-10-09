@@ -51,6 +51,8 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
             irqfds: BTreeMap::new(),
             gsi_routes: BTreeMap::new(),
             vcpu_files: BTreeMap::new(),
+            #[cfg(target_arch = "aarch64")]
+            device_file: None,
             clock: vec![0; abi::KVM_CLOCK_DATA_SIZE as usize],
             pit2: vec![0; abi::KVM_PIT_STATE2_SIZE as usize],
             #[cfg(target_arch = "x86_64")]
@@ -131,6 +133,8 @@ pub(in crate::kvm) fn create_vcpu_file(
                 lapic: vec![0; abi::KVM_X86_LAPIC_STATE_SIZE as usize],
                 vapic_addr: None,
                 operation_lock: VcpuOperationLock::new(),
+                #[cfg(target_arch = "aarch64")]
+                initialized: false,
             }),
         );
         vcpu_file
@@ -143,6 +147,16 @@ pub(in crate::kvm) fn create_vcpu_file(
             Err(err)
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn get_preferred_target(arg: usize) -> AxResult<isize> {
+    use kvm_uapi::arm64::KVM_ARM_TARGET_GENERIC_V8;
+
+    let mut bytes = [0u8; abi::KVM_ARM_VCPU_INIT_SIZE as usize];
+    bytes[..4].copy_from_slice(&KVM_ARM_TARGET_GENERIC_V8.to_ne_bytes());
+    api_control::copy_to_user(arg, &bytes)?;
+    Ok(0)
 }
 
 pub(in crate::kvm) fn set_tss_addr(

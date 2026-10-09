@@ -33,15 +33,9 @@ impl BaseDeviceOps<GuestPhysAddrRange> for Vgic {
         EmuDeviceType::InterruptController
     }
 
-    /// Returns the address range for the device.
-    ///
-    /// This function defines the address range accessible to the device, starting from `0x800_0000`,
-    /// with a length of `0x10000` (64KB). It is used to specify where the device can read or write in memory.
-    ///
-    /// # Returns
-    /// An `AddrRange` instance representing the address range from `0x800_0000` to `0x800_FFFF`.
+    /// Returns the configured MMIO range for the device.
     fn address_range(&self) -> GuestPhysAddrRange {
-        GuestPhysAddrRange::from_start_size(0x800_0000.into(), 0x10000)
+        GuestPhysAddrRange::from_start_size(self.base().into(), self.size())
     }
 
     /// Handles memory read operations.
@@ -61,8 +55,7 @@ impl BaseDeviceOps<GuestPhysAddrRange> for Vgic {
         addr: <GuestPhysAddrRange as DeviceAddrRange>::Addr,
         width: AccessWidth,
     ) -> AxResult<usize> {
-        // Perform bitwise operation to ensure the address is aligned to byte boundaries
-        let addr = addr.as_usize() & 0xfff;
+        let addr = addr.as_usize() - self.base();
 
         // Match different read operations based on the width parameter
         match width {
@@ -78,15 +71,18 @@ impl BaseDeviceOps<GuestPhysAddrRange> for Vgic {
                 // Handle 4-byte read
                 self.handle_read32(addr)
             }
-            // Return success for unsupported widths without performing any operation
-            _ => Ok(0),
+            AccessWidth::Qword => {
+                let low = self.handle_read32(addr & !0x7)? as u64;
+                let high = self.handle_read32((addr & !0x7) + 4)? as u64;
+                Ok((low | (high << 32)) as usize)
+            }
         }
     }
     /// Handles write operations of different widths.
     ///
     /// This function performs a write operation based on the given physical address, width, and value.
-    /// It first converts the physical address to a `usize` and applies a mask to ensure proper alignment.
-    /// Then, depending on the width parameter, it calls the corresponding write handling function.
+    /// It converts the guest physical address to a device-relative offset and calls the corresponding
+    /// write handler.
     ///
     /// Parameters:
     /// - `addr`: The physical address to write to.
@@ -98,8 +94,7 @@ impl BaseDeviceOps<GuestPhysAddrRange> for Vgic {
         width: AccessWidth,
         val: usize,
     ) -> AxResult {
-        // Convert the physical address to a `usize` and apply a mask to ensure proper alignment
-        let addr = addr.as_usize() & 0xfff;
+        let addr = addr.as_usize() - self.base();
 
         // Depending on the width parameter, perform the corresponding write operation
         match width {
@@ -118,8 +113,11 @@ impl BaseDeviceOps<GuestPhysAddrRange> for Vgic {
                 self.handle_write32(addr, val);
                 Ok(())
             }
-            // For other width values, do nothing
-            _ => Ok(()),
+            AccessWidth::Qword => {
+                self.handle_write32(addr & !0x7, val as u32 as usize);
+                self.handle_write32((addr & !0x7) + 4, val >> 32);
+                Ok(())
+            }
         }
     }
 }

@@ -136,10 +136,20 @@ pub mod public {
     pub const KVM_SET_ONE_REG: u32 = iow(KVMIO, 0xac, KVM_ONE_REG_SIZE);
     /// Stops x86 kvmclock updates.
     pub const KVM_KVMCLOCK_CTRL: u32 = ioc(KVMIO, 0xad);
+    /// Initializes an AArch64 vCPU from a preferred target description.
+    pub const KVM_ARM_VCPU_INIT: u32 = iow(KVMIO, 0xae, KVM_ARM_VCPU_INIT_SIZE);
+    /// Gets the preferred AArch64 vCPU target for a VM.
+    pub const KVM_ARM_PREFERRED_TARGET: u32 = ior(KVMIO, 0xaf, KVM_ARM_VCPU_INIT_SIZE);
     /// Gets the architecture-specific vCPU register IDs supported by this vCPU.
     pub const KVM_GET_REG_LIST: u32 = iowr(KVMIO, 0xb0, KVM_REG_LIST_SIZE);
     /// Gets x86 XSAVE state using the KVM_CAP_XSAVE2 ioctl number.
     pub const KVM_GET_XSAVE2: u32 = ior(KVMIO, 0xcf, KVM_X86_XSAVE_SIZE);
+    /// Creates a device fd associated with a VM.
+    pub const KVM_CREATE_DEVICE: u32 = iowr(KVMIO, 0xe0, KVM_CREATE_DEVICE_SIZE);
+    /// Sets an attribute on a KVM device fd.
+    pub const KVM_SET_DEVICE_ATTR: u32 = iow(KVMIO, 0xe1, KVM_DEVICE_ATTR_SIZE);
+    /// Checks whether a KVM device fd supports an attribute.
+    pub const KVM_HAS_DEVICE_ATTR: u32 = iow(KVMIO, 0xe3, KVM_DEVICE_ATTR_SIZE);
 
     pub const KVM_CAP_IRQCHIP: usize = 0;
     pub const KVM_CAP_USER_MEMORY: usize = 3;
@@ -167,6 +177,9 @@ pub mod public {
     pub const KVM_CAP_MAX_VCPUS: usize = 66;
     pub const KVM_CAP_ONE_REG: usize = 70;
     pub const KVM_CAP_SIGNAL_MSI: usize = 77;
+    pub const KVM_CAP_ARM_PSCI: usize = 87;
+    pub const KVM_CAP_DEVICE_CTRL: usize = 89;
+    pub const KVM_CAP_ARM_PSCI_0_2: usize = 102;
     pub const KVM_CAP_IOEVENTFD_ANY_LENGTH: usize = 122;
     pub const KVM_CAP_IMMEDIATE_EXIT: usize = 136;
     pub const KVM_CAP_XSAVE2: usize = 208;
@@ -227,6 +240,9 @@ pub const KVM_ENABLE_CAP_SIZE: u32 = 104;
 pub const KVM_INTERRUPT_SIZE: u32 = 4;
 pub const KVM_MP_STATE_SIZE: u32 = 4;
 pub const KVM_ONE_REG_SIZE: u32 = 16;
+pub const KVM_ARM_VCPU_INIT_SIZE: u32 = 32;
+pub const KVM_CREATE_DEVICE_SIZE: u32 = 12;
+pub const KVM_DEVICE_ATTR_SIZE: u32 = 24;
 pub const KVM_REG_LIST_SIZE: u32 = 8;
 pub const KVM_X86_REGS_SIZE: u32 = 18 * 8;
 #[cfg(target_arch = "x86_64")]

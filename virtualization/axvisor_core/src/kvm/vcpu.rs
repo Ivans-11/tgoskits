@@ -158,6 +158,41 @@ pub(in crate::kvm) fn set_one_reg(
     Ok(0)
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn arm_vcpu_init(
+    control_file: api_control::ControlFileId,
+    arg: usize,
+) -> AxResult<isize> {
+    use kvm_uapi::arm64::{KVM_ARM_TARGET_GENERIC_V8, KVM_ARM_VCPU_PSCI_0_2};
+
+    let mut bytes = [0u8; abi::KVM_ARM_VCPU_INIT_SIZE as usize];
+    api_control::copy_from_user(arg, &mut bytes)?;
+    let target = u32::from_ne_bytes(bytes[..4].try_into().unwrap());
+    let mut features = [0u32; 7];
+    for (index, feature) in features.iter_mut().enumerate() {
+        let offset = 4 + index * 4;
+        *feature = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    }
+
+    let supported_features = 1u32 << KVM_ARM_VCPU_PSCI_0_2;
+    if target != KVM_ARM_TARGET_GENERIC_V8
+        || features[0] & !supported_features != 0
+        || features[1..].iter().any(|feature| *feature != 0)
+    {
+        return ax_err!(Unsupported);
+    }
+
+    let mut control_files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
+        return ax_err!(NotFound);
+    };
+    if vcpu.initialized {
+        return ax_err!(BadState);
+    }
+    vcpu.initialized = true;
+    Ok(0)
+}
+
 pub(in crate::kvm) fn get_reg_list(
     control_file: api_control::ControlFileId,
     arg: usize,

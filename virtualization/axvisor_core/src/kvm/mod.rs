@@ -16,6 +16,8 @@
 
 mod abi;
 mod cpuid;
+#[cfg(target_arch = "aarch64")]
+mod device;
 mod eventfd;
 mod memory;
 mod run;
@@ -35,6 +37,8 @@ use ax_kspin::SpinNoIrq as Mutex;
 use axaddrspace::GuestPhysAddr;
 use axvisor_api::control::{self as api_control, ControlOps};
 use cpuid::{get_cpuid2, get_supported_cpuid, set_cpuid2};
+#[cfg(target_arch = "aarch64")]
+use device::{create_device, device_ioctl};
 use eventfd::{
     read_ioeventfd, read_irqfd, set_gsi_routing, set_irq_line, signal_msi, stop_irqfd,
     update_ioeventfd, update_irqfd,
@@ -111,7 +115,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                         }
                     }
                     _ => unreachable!(),
-                    };
+                };
                 if has_vcpus {
                     CloseAction::None
                 } else {
@@ -140,7 +144,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                         vm.vm_fd_closed && vm.vcpu_files.is_empty()
                     } else {
                         false
-                };
+                    };
                 if cleanup_vm {
                     // The closing vCPU has already been removed from
                     // `vm.vcpu_files`, so the VM cleanup loop below cannot
@@ -159,6 +163,17 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 } else {
                     CloseAction::Vcpu(vcpu)
                 }
+            }
+            #[cfg(target_arch = "aarch64")]
+            ControlFileState::Device(device) => {
+                let vm_file = device.vm_file;
+                control_files.remove(&control_file);
+                if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
+                    if vm.device_file == Some(control_file) {
+                        vm.device_file = None;
+                    }
+                }
+                CloseAction::None
             }
             ControlFileState::System => {
                 control_files.remove(&control_file);
@@ -353,6 +368,8 @@ fn ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> AxRe
         ControlFileState::System => system_ioctl(cmd, arg),
         ControlFileState::Vm(_) => vm_ioctl(control_file, cmd, arg),
         ControlFileState::Vcpu(_) => vcpu_ioctl(control_file, cmd, arg),
+        #[cfg(target_arch = "aarch64")]
+        ControlFileState::Device(_) => device_ioctl(control_file, cmd, arg),
     }
 }
 
@@ -388,6 +405,10 @@ fn vm_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> A
     match cmd {
         KVM_CHECK_EXTENSION => Ok(check_extension(arg) as isize),
         KVM_CREATE_VCPU => create_vcpu_file(control_file, arg),
+        #[cfg(target_arch = "aarch64")]
+        KVM_CREATE_DEVICE => create_device(control_file, arg),
+        #[cfg(target_arch = "aarch64")]
+        KVM_ARM_PREFERRED_TARGET => get_preferred_target(arg),
         KVM_SET_USER_MEMORY_REGION => {
             let region = read_userspace_memory_region(arg)?;
             set_user_memory_region(control_file, region)?;
@@ -503,6 +524,8 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
         KVM_SET_VAPIC_ADDR => set_vapic_addr(control_file, arg),
         KVM_GET_ONE_REG => get_one_reg(control_file, arg),
         KVM_SET_ONE_REG => set_one_reg(control_file, arg),
+        #[cfg(target_arch = "aarch64")]
+        KVM_ARM_VCPU_INIT => arm_vcpu_init(control_file, arg),
         KVM_GET_REG_LIST => get_reg_list(control_file, arg),
         KVM_INTERRUPT => kvm_interrupt(control_file, arg),
         KVM_GET_MP_STATE => get_mp_state(control_file, arg),
@@ -547,7 +570,7 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
 
 fn check_extension(capability: usize) -> usize {
     match capability {
-        KVM_CAP_IRQCHIP => usize::from(cfg!(target_arch = "x86_64")),
+        KVM_CAP_IRQCHIP => usize::from(cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))),
         KVM_CAP_USER_MEMORY => 1,
         KVM_CAP_SET_TSS_ADDR => usize::from(cfg!(target_arch = "x86_64")),
         KVM_CAP_EXT_CPUID => usize::from(cfg!(target_arch = "x86_64")),
@@ -571,8 +594,11 @@ fn check_extension(capability: usize) -> usize {
         KVM_CAP_VCPU_EVENTS => usize::from(cfg!(target_arch = "x86_64")),
         KVM_CAP_XCRS => usize::from(cfg!(target_arch = "x86_64")),
         KVM_CAP_XSAVE => usize::from(cfg!(target_arch = "x86_64")),
-        KVM_CAP_ONE_REG => usize::from(cfg!(target_arch = "riscv64")),
+        KVM_CAP_ONE_REG => usize::from(cfg!(any(target_arch = "riscv64", target_arch = "aarch64"))),
         KVM_CAP_SIGNAL_MSI => usize::from(cfg!(target_arch = "x86_64")),
+        KVM_CAP_ARM_PSCI => usize::from(cfg!(target_arch = "aarch64")),
+        KVM_CAP_DEVICE_CTRL => usize::from(cfg!(target_arch = "aarch64")),
+        KVM_CAP_ARM_PSCI_0_2 => usize::from(cfg!(target_arch = "aarch64")),
         KVM_CAP_IOEVENTFD_ANY_LENGTH => 1,
         KVM_CAP_IMMEDIATE_EXIT => 1,
         KVM_CAP_XSAVE2 => 0,

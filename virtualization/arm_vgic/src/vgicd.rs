@@ -13,21 +13,22 @@
 // limitations under the License.
 
 extern crate alloc;
+use alloc::vec::Vec;
+
 use crate::{consts::*, interrupt::VgicInt};
 
 pub struct Vgicd {
     pub ctrlr: u32,
     pub typer: u32,
     pub iidr: u32,
-    interrupt: [VgicInt; SPI_ID_MAX],
+    interrupt: Vec<VgicInt>,
 }
 
 impl Vgicd {
     pub fn new() -> Self {
-        let mut gic_int = [VgicInt::new(0, 0); SPI_ID_MAX];
-        for (idx, item) in gic_int.iter_mut().enumerate() {
-            *item = VgicInt::new(idx as u32, 0);
-        }
+        let gic_int = (0..SPI_ID_MAX)
+            .map(|idx| VgicInt::new(idx as u32, 0))
+            .collect();
         let typer = crate::api_reexp::read_vgicd_typer();
         let iidr = crate::api_reexp::read_vgicd_iidr();
         Self {

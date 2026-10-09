@@ -15,11 +15,15 @@
 use ax_errno::{AxErrorKind, AxResult, ax_err};
 use axvcpu::AxVCpuExitReason;
 use axvisor_api::control as api_control;
+#[cfg(target_arch = "aarch64")]
+mod arm64;
 mod exit;
 #[cfg(target_arch = "riscv64")]
 mod riscv;
 mod x86;
 
+#[cfg(target_arch = "aarch64")]
+use arm64::handle_in_kernel_device_exit;
 use exit::{complete_io_read, complete_mmio_read, kvm_exit_reason, prepare_userspace_exit};
 #[cfg(target_arch = "riscv64")]
 use riscv::{handle_cpu_up, handle_send_ipi};
@@ -184,6 +188,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
 
         #[cfg(target_arch = "x86_64")]
         if handle_in_kernel_device_exit(&vm, &vcpu, irqchip_created, pit2_created, &exit_reason)? {
+            continue;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if handle_in_kernel_device_exit(&vm, &vcpu, irqchip_created, &exit_reason)? {
             continue;
         }
 
