@@ -87,6 +87,7 @@ fn open() -> AxResult<api_control::ControlFileId> {
 }
 
 fn close(control_file: api_control::ControlFileId) -> AxResult {
+    #[allow(clippy::large_enum_variant)]
     enum CloseAction {
         Vcpu(VcpuFileState),
         Vm {
@@ -275,7 +276,11 @@ fn control_vcpu_file_by_vm_id(
     .ok_or(AxError::NotFound)
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "riscv64"
+))]
 pub(in crate::kvm) fn vcpu_file_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
@@ -298,7 +303,11 @@ pub(in crate::kvm) fn vcpu_file_by_id(
         .ok_or(AxError::InvalidInput)
 }
 
-#[cfg(any(target_arch = "riscv64", all(target_arch = "x86_64", feature = "svm")))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    all(target_arch = "x86_64", feature = "svm")
+))]
 pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,

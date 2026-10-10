@@ -23,7 +23,7 @@ mod riscv;
 mod x86;
 
 #[cfg(target_arch = "aarch64")]
-use arm64::{handle_in_kernel_device_exit, handle_psci_hypercall};
+use arm64::{handle_cpu_up, handle_in_kernel_device_exit, handle_psci_hypercall, handle_send_ipi};
 use exit::{complete_io_read, complete_mmio_read, kvm_exit_reason, prepare_userspace_exit};
 #[cfg(target_arch = "riscv64")]
 use riscv::{handle_cpu_up, handle_send_ipi};
@@ -257,6 +257,22 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             AxVCpuExitReason::Hypercall { nr, .. } if handle_psci_hypercall(&vcpu, nr) => {
                 axvisor_api::task::yield_now();
             }
+            #[cfg(target_arch = "aarch64")]
+            AxVCpuExitReason::CpuUp {
+                target_cpu,
+                entry_point,
+                arg,
+            } => {
+                handle_cpu_up(
+                    control_file,
+                    &vm,
+                    &vcpu,
+                    target_cpu as usize,
+                    entry_point,
+                    arg,
+                )?;
+                axvisor_api::task::yield_now();
+            }
             #[cfg(target_arch = "x86_64")]
             AxVCpuExitReason::SysRegWrite { addr, value }
                 if handle_kvm_msr_write(&vm, &vcpu, addr.addr(), value)? =>
@@ -289,7 +305,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 )?;
                 axvisor_api::task::yield_now();
             }
-            #[cfg(target_arch = "riscv64")]
+            #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
             AxVCpuExitReason::SendIPI {
                 target_cpu,
                 target_cpu_aux,
@@ -404,11 +420,11 @@ fn vcpu_run_interrupted(
     if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
         return Ok(true);
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     {
         api_control::current_thread_has_pending_signal(signal_mask)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let _ = signal_mask;
         Ok(false)

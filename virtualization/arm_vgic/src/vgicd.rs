@@ -21,6 +21,7 @@ pub struct Vgicd {
     pub ctrlr: u32,
     pub typer: u32,
     pub iidr: u32,
+    icfgr: [u32; 64],
     interrupt: Vec<VgicInt>,
 }
 
@@ -35,6 +36,7 @@ impl Vgicd {
             ctrlr: 0,
             typer,
             iidr,
+            icfgr: [0; 64],
             interrupt: gic_int,
         }
     }
@@ -58,6 +60,17 @@ impl Vgicd {
             if isenabler & (1 << i) != 0 {
                 self.interrupt[(idx * 32 + i) as usize].set_enable(true);
             }
+        }
+    }
+
+    pub fn vgicd_icfgr_read(&self, idx: u32) -> usize {
+        self.icfgr.get(idx as usize).copied().unwrap_or(0) as usize
+    }
+
+    pub fn vgicd_icfgr_write(&mut self, idx: u32, value: usize) {
+        if let Some(config) = self.icfgr.get_mut(idx as usize) {
+            // In each two-bit INT_CONFIG field, only bit 1 is writable.
+            *config = value as u32 & 0xaaaa_aaaa;
         }
     }
 

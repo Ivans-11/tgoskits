@@ -357,6 +357,8 @@ fn host_controlled_emu_devices() -> Vec<EmulatedDeviceConfig> {
 #[cfg(target_arch = "aarch64")]
 pub const HOST_CONTROLLED_GIC_REDIST_BASE: usize = 0x3ffd_0000;
 #[cfg(target_arch = "aarch64")]
+pub const HOST_CONTROLLED_GIC_REDIST_SIZE: usize = 0x20000;
+#[cfg(target_arch = "aarch64")]
 pub const HOST_CONTROLLED_GIC_DIST_BASE: usize = 0x3fff_0000;
 #[cfg(target_arch = "aarch64")]
 pub const HOST_CONTROLLED_GIC_ITS_BASE: usize = 0x3ffb_0000;

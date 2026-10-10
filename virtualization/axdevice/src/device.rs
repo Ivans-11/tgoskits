@@ -26,7 +26,7 @@ use axaddrspace::{
     GuestPhysAddr, GuestPhysAddrRange,
     device::{AccessWidth, DeviceAddrRange, Port, PortRange, SysRegAddr, SysRegAddrRange},
 };
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use axdevice_base::map_device_of_type;
 use axdevice_base::{BaseDeviceOps, BaseMmioDeviceOps, BasePortDeviceOps, BaseSysRegDeviceOps};
 use axvmconfig::{EmulatedDeviceConfig, EmulatedDeviceType};
@@ -475,6 +475,19 @@ impl AxVmDevices {
     /// Iterates over the MMIO devices in the set.
     pub fn iter_mmio_dev(&self) -> impl Iterator<Item = &Arc<dyn BaseMmioDeviceOps>> {
         self.emu_mmio_devices.iter()
+    }
+
+    /// Configures the redistributor layout of the emulated AArch64 GICv3.
+    #[cfg(target_arch = "aarch64")]
+    pub fn configure_gicv3(&self, redist_base: usize, redist_count: usize) -> AxResult {
+        self.emu_mmio_devices
+            .iter()
+            .find_map(|device| {
+                map_device_of_type(device, |vgic: &Vgic| {
+                    vgic.configure_gicv3(redist_base, redist_count)
+                })
+            })
+            .ok_or(ax_errno::AxError::NotFound)?
     }
 
     /// Iterates over the system register devices in the set.

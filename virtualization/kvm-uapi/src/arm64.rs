@@ -15,7 +15,13 @@
 //! AArch64-specific Linux KVM ABI definitions.
 
 pub const KVM_ARM_TARGET_GENERIC_V8: u32 = 5;
+pub const KVM_ARM_VCPU_POWER_OFF: usize = 0;
 pub const KVM_ARM_VCPU_PSCI_0_2: usize = 2;
+
+pub const KVM_ARM_IRQ_TYPE_SHIFT: u32 = 24;
+pub const KVM_ARM_IRQ_TYPE_MASK: u32 = 0xf;
+pub const KVM_ARM_IRQ_NUM_MASK: u32 = 0xffff;
+pub const KVM_ARM_IRQ_TYPE_SPI: u32 = 1;
 
 pub const KVM_REG_ARM64: u64 = 0x6000_0000_0000_0000;
 pub const KVM_REG_SIZE_U64: u64 = 0x0030_0000_0000_0000;

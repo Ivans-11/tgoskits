@@ -37,7 +37,9 @@ const ARM64_REG_IDS: [u64; 36] = {
 impl Aarch64VCpu {
     pub(super) fn get_kvm_arch_reg(&self, reg_id: u64) -> AxResult<u64> {
         match reg_id {
-            KVM_REG_ARM64_CORE_X0..=CORE_X30 if (reg_id - KVM_REG_ARM64_CORE_X0) % 2 == 0 => {
+            KVM_REG_ARM64_CORE_X0..=CORE_X30
+                if (reg_id - KVM_REG_ARM64_CORE_X0).is_multiple_of(2) =>
+            {
                 Ok(self.ctx.gpr[((reg_id - KVM_REG_ARM64_CORE_X0) / 2) as usize])
             }
             KVM_REG_ARM64_CORE_SP_EL0 => Ok(self.ctx.sp_el0),
@@ -56,7 +58,9 @@ impl Aarch64VCpu {
 
     pub(super) fn set_kvm_arch_reg(&mut self, reg_id: u64, value: u64) -> AxResult {
         match reg_id {
-            KVM_REG_ARM64_CORE_X0..=CORE_X30 if (reg_id - KVM_REG_ARM64_CORE_X0) % 2 == 0 => {
+            KVM_REG_ARM64_CORE_X0..=CORE_X30
+                if (reg_id - KVM_REG_ARM64_CORE_X0).is_multiple_of(2) =>
+            {
                 self.ctx.gpr[((reg_id - KVM_REG_ARM64_CORE_X0) / 2) as usize] = value;
             }
             KVM_REG_ARM64_CORE_SP_EL0 => self.ctx.sp_el0 = value,

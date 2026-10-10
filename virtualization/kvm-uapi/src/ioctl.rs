@@ -188,9 +188,17 @@ pub mod public {
 // Linux reserves ioctl type 0xae for KVM.
 pub const KVMIO: u32 = 0xae;
 
-#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
 pub const KVM_MAX_VCPUS: usize = 8;
-#[cfg(not(any(target_arch = "riscv64", target_arch = "x86_64")))]
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+)))]
 pub const KVM_MAX_VCPUS: usize = 1;
 /// Maximum number of userspace memory slots supported by one VM.
 ///

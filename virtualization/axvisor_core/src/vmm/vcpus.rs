@@ -512,10 +512,7 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                             axvisor_api::task::yield_now();
                         }
                         #[cfg(target_arch = "aarch64")]
-                        if matches!(
-                            exit_reason,
-                            AxVCpuExitReason::ExternalInterrupt { vector: 26 }
-                        ) {
+                        if matches!(exit_reason, AxVCpuExitReason::ExternalInterrupt { .. }) {
                             axvisor_api::task::yield_now();
                         }
                     }

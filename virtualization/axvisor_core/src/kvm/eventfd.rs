@@ -21,7 +21,7 @@ use axvisor_api::{
     control as api_control,
     task::{self as api_task, TaskHandle, TaskOptions},
 };
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use kvm_uapi::KvmIrqLevel;
 use kvm_uapi::{KvmMsi, x86::decode_msi_route};
 #[cfg(target_arch = "x86_64")]
@@ -103,7 +103,7 @@ pub(in crate::kvm) fn set_irq_line(
     Ok(0)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn read_irq_level(arg: usize) -> AxResult<KvmIrqLevel> {
     let mut bytes = [0u8; abi::KVM_IRQ_LEVEL_SIZE as usize];
     api_control::copy_from_user(arg, &mut bytes)?;
@@ -113,7 +113,44 @@ fn read_irq_level(arg: usize) -> AxResult<KvmIrqLevel> {
     })
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn set_irq_line(
+    control_file: api_control::ControlFileId,
+    arg: usize,
+) -> AxResult<isize> {
+    use kvm_uapi::arm64::{
+        KVM_ARM_IRQ_NUM_MASK, KVM_ARM_IRQ_TYPE_MASK, KVM_ARM_IRQ_TYPE_SHIFT, KVM_ARM_IRQ_TYPE_SPI,
+    };
+
+    let irq_level = read_irq_level(arg)?;
+    let irq_type = (irq_level.irq >> KVM_ARM_IRQ_TYPE_SHIFT) & KVM_ARM_IRQ_TYPE_MASK;
+    let vector = irq_level.irq & KVM_ARM_IRQ_NUM_MASK;
+    if irq_level.level > 1 || irq_type != KVM_ARM_IRQ_TYPE_SPI || !(32..1020).contains(&vector) {
+        return ax_err!(InvalidInput);
+    }
+
+    let vm = {
+        let control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = control_files.get(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        if !vm.irqchip_created {
+            return ax_err!(InvalidInput);
+        }
+        vm.vm.clone()
+    };
+
+    if irq_level.level != 0 {
+        deliver_interrupt(InterruptRoute::new(
+            vm.id(),
+            0,
+            VirtualInterrupt::edge(vector as usize),
+        ));
+    }
+    Ok(0)
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(in crate::kvm) fn set_irq_line(
     _control_file: api_control::ControlFileId,
     _arg: usize,

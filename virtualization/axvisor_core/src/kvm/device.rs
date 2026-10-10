@@ -14,9 +14,7 @@
 
 use ax_errno::{AxError, AxResult, ax_err};
 use axvisor_api::control as api_control;
-use axvm::config::{
-    HOST_CONTROLLED_GIC_DIST_BASE, HOST_CONTROLLED_GIC_ITS_BASE, HOST_CONTROLLED_GIC_REDIST_BASE,
-};
+use axvm::config::{HOST_CONTROLLED_GIC_DIST_BASE, HOST_CONTROLLED_GIC_REDIST_SIZE};
 use kvm_uapi::arm64::*;
 
 use super::{
@@ -140,6 +138,7 @@ fn set_device_attr(control_file: api_control::ControlFileId, attr: KvmDeviceAttr
         return ax_err!(NotFound);
     };
     let vm_file = device.vm_file();
+    let mut redist_layout = None;
     let initialized = match device {
         DeviceFileState::VgicV3 {
             dist_configured,
@@ -152,9 +151,19 @@ fn set_device_attr(control_file: api_control::ControlFileId, attr: KvmDeviceAttr
                 *dist_configured = true;
                 false
             }
-            (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST)
-                if value == HOST_CONTROLLED_GIC_REDIST_BASE as u64 =>
-            {
+            (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST) => {
+                let redist_base = usize::try_from(value).map_err(|_| AxError::InvalidInput)?;
+                let redist_size = HOST_CONTROLLED_GIC_DIST_BASE
+                    .checked_sub(redist_base)
+                    .ok_or(AxError::InvalidInput)?;
+                if redist_size == 0 || redist_size % HOST_CONTROLLED_GIC_REDIST_SIZE != 0 {
+                    return ax_err!(InvalidInput);
+                }
+                let redist_count = redist_size / HOST_CONTROLLED_GIC_REDIST_SIZE;
+                if redist_count > abi::KVM_MAX_VCPUS {
+                    return ax_err!(InvalidInput);
+                }
+                redist_layout = Some((redist_base, redist_count));
                 *redist_configured = true;
                 false
             }
@@ -178,7 +187,7 @@ fn set_device_attr(control_file: api_control::ControlFileId, attr: KvmDeviceAttr
             addr_configured, ..
         } => match (attr.group, attr.attr) {
             (KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_ITS_ADDR_TYPE)
-                if value == HOST_CONTROLLED_GIC_ITS_BASE as u64 =>
+                if value.is_multiple_of(0x1_0000) =>
             {
                 *addr_configured = true;
                 false
@@ -193,6 +202,14 @@ fn set_device_attr(control_file: api_control::ControlFileId, attr: KvmDeviceAttr
             _ => return ax_err!(Unsupported),
         },
     };
+    if let Some((redist_base, redist_count)) = redist_layout {
+        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
+            return ax_err!(NotFound);
+        };
+        vm.vm
+            .get_devices()
+            .configure_gicv3(redist_base, redist_count)?;
+    }
     if initialized {
         let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
             return ax_err!(NotFound);

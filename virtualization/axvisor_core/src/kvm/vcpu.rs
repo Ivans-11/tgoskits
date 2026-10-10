@@ -163,7 +163,9 @@ pub(in crate::kvm) fn arm_vcpu_init(
     control_file: api_control::ControlFileId,
     arg: usize,
 ) -> AxResult<isize> {
-    use kvm_uapi::arm64::{KVM_ARM_TARGET_GENERIC_V8, KVM_ARM_VCPU_PSCI_0_2};
+    use kvm_uapi::arm64::{
+        KVM_ARM_TARGET_GENERIC_V8, KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2,
+    };
 
     let mut bytes = [0u8; abi::KVM_ARM_VCPU_INIT_SIZE as usize];
     api_control::copy_from_user(arg, &mut bytes)?;
@@ -174,7 +176,7 @@ pub(in crate::kvm) fn arm_vcpu_init(
         *feature = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
     }
 
-    let supported_features = 1u32 << KVM_ARM_VCPU_PSCI_0_2;
+    let supported_features = (1u32 << KVM_ARM_VCPU_POWER_OFF) | (1u32 << KVM_ARM_VCPU_PSCI_0_2);
     if target != KVM_ARM_TARGET_GENERIC_V8
         || features[0] & !supported_features != 0
         || features[1..].iter().any(|feature| *feature != 0)
