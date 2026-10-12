@@ -342,7 +342,8 @@ pub(crate) fn cleanup_vm_vcpus(vm_id: usize) {
             vm_id, task_count
         );
     } else {
-        warn!("VM[{}] VCpu resources not found in queue", vm_id);
+        // User-controlled vCPUs run on their callers and need no VMM task entry.
+        debug!("VM[{}] VCpu resources not found in queue", vm_id);
     }
 }
 

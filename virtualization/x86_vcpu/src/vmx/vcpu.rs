@@ -194,6 +194,8 @@ pub struct VmxVcpu {
     expose_kvm_hypervisor: bool,
     /// Userspace-configured CPUID results.
     cpuid: Vec<AxVCpuCpuidEntry>,
+    /// Stable vendor and maximum basic leaf for this virtual CPU's lifetime.
+    cpuid_leaf0: raw_cpuid::CpuIdResult,
     // /// Whether this VCPU is a host VCpu. Used in type 1.5 hypervisor.
     // is_host: bool, temporary removed because we don't care about type 1.5 now
 
@@ -261,6 +263,7 @@ impl VmxVcpu {
             vcpu_count: config.vcpu_count.max(1),
             expose_kvm_hypervisor: false,
             cpuid: Vec::new(),
+            cpuid_leaf0: raw_cpuid::cpuid!(0, 0),
             // is_host: false,
             vmcs: VmxRegion::new(vmcs_revision_id, false)?,
             vmcs_host_state: None,
@@ -2015,6 +2018,9 @@ impl VmxVcpu {
             }
         } else {
             match function {
+                // Leaf 0 is independent of ECX and guest execution state.
+                // Reusing it avoids a host CPUID exit under nested VMX.
+                0 => self.cpuid_leaf0,
                 LEAF_FEATURE_INFO => {
                     const FEATURE_VMX: u32 = 1 << 5;
                     const FEATURE_HYPERVISOR: u32 = 1 << 31;

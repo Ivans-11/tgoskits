@@ -285,9 +285,9 @@ fn handle_memory_slot_page_fault_inner(
     }
 
     // Once the faulting page is installed, opportunistically probe a bounded
-    // forward window. Force COW while pinning so the EPT mapping and the VMM's
-    // userspace mapping keep referring to the same page. The speculative EPT
-    // entries remain read-only and are upgraded by the normal write-fault path.
+    // forward window. A successful writable pin resolves COW and proves that
+    // the VMM mapping is writable, so the matching EPT entries can be writable
+    // immediately instead of faulting again only to upgrade their permissions.
     if result.is_ok() && !prefetched && write_fault {
         let slot_end = snapshot
             .guest_phys_addr
@@ -307,7 +307,10 @@ fn handle_memory_slot_page_fault_inner(
                     return result;
                 }
                 let group = PinnedPageGroup::new(batch.id, batch.pages.len());
-                let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
+                let flags = MappingFlags::READ
+                    | MappingFlags::WRITE
+                    | MappingFlags::EXECUTE
+                    | MappingFlags::USER;
                 let mut failed = 0usize;
                 let mut control_files = CONTROL_FILES.lock();
                 if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
@@ -336,7 +339,7 @@ fn handle_memory_slot_page_fault_inner(
                                     gpa.as_usize() as u64,
                                     MappedMemoryPage {
                                         pinned_pages: group.clone(),
-                                        writable: false,
+                                        writable: true,
                                     },
                                 );
                             }
