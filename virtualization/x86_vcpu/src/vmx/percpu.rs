@@ -103,7 +103,8 @@ impl AxArchPerCpu for VmxPerCpuState {
 
         // Get VMCS revision identifier in IA32_VMX_BASIC MSR.
         let vmx_basic = VmxBasic::read();
-        if vmx_basic.region_size as usize != PAGE_SIZE {
+        // A page-sized allocation also covers smaller hardware VMX regions.
+        if vmx_basic.region_size == 0 || vmx_basic.region_size as usize > PAGE_SIZE {
             return ax_err!(Unsupported);
         }
         if vmx_basic.mem_type != VmxBasic::VMX_MEMORY_TYPE_WRITE_BACK {
