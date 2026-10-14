@@ -33,14 +33,15 @@ mod vlapic;
 use core::cell::UnsafeCell;
 
 use ax_errno::AxResult;
-use ax_memory_addr::{AddrRange, PAGE_SIZE_4K};
+use ax_kspin::SpinNoIrq;
+use ax_memory_addr::AddrRange;
 use axaddrspace::{
-    GuestPhysAddr, HostPhysAddr, HostVirtAddr,
+    GuestPhysAddr, HostPhysAddr,
     device::{AccessWidth, SysRegAddr, SysRegAddrRange},
 };
 use axdevice_base::{BaseDeviceOps, EmuDeviceType};
 use axvisor_api::{
-    memory,
+    memory::PhysFrame,
     vmm::{VCpuId, VMId},
 };
 
@@ -49,10 +50,9 @@ use crate::{
     vlapic::VirtualApicRegs,
 };
 
-#[repr(align(4096))]
-struct APICAccessPage([u8; PAGE_SIZE_4K]);
-
-static VIRTUAL_APIC_ACCESS_PAGE: APICAccessPage = APICAccessPage([0; PAGE_SIZE_4K]);
+// Keep a physical frame for the lifetime of all VMs. Kernel static data need
+// not use the same mapping as frames returned by the host's allocator.
+static VIRTUAL_APIC_ACCESS_PAGE: SpinNoIrq<Option<PhysFrame>> = SpinNoIrq::new(None);
 
 /// A emulated local APIC device.
 pub struct EmulatedLocalApic {
@@ -101,9 +101,12 @@ impl EmulatedLocalApic {
     /// access to this page may cause VM exits or be virtualized by the processor.
     /// See Section 30.4.
     pub fn virtual_apic_access_addr() -> HostPhysAddr {
-        memory::virt_to_phys(HostVirtAddr::from_usize(
-            VIRTUAL_APIC_ACCESS_PAGE.0.as_ptr() as usize,
-        ))
+        VIRTUAL_APIC_ACCESS_PAGE
+            .lock()
+            .get_or_insert_with(|| {
+                PhysFrame::alloc_zero().expect("allocate APIC-access page failed")
+            })
+            .start_paddr()
     }
 
     /// Virtual-APIC address (64 bits).
