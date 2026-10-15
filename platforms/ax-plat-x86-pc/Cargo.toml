@@ -36,6 +36,7 @@ x2apic = "0.5"
 multiboot = "0.8"
 raw-cpuid = "11.5"
 uart_16550 = "0.5"
+font8x8 = { version = "0.2.7", default-features = false }
 x86_rtc = { version = "0.1", optional = true }
 
 [package.metadata.axplat]

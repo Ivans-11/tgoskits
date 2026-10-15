@@ -106,11 +106,11 @@ where
     /// Construct a cpumask from a raw `usize` value.
     /// The value must be less than `2^SIZE`, panick if the value is too large.
     pub fn from_raw_bits(value: usize) -> Self {
-        assert!(value >> SIZE == 0);
+        assert!(SIZE >= usize::BITS as usize || value >> SIZE == 0);
 
         let mut bit_map = Bitmap::new();
         let mut i = 0;
-        while i < SIZE {
+        while i < SIZE.min(usize::BITS as usize) {
             if value & (1 << i) != 0 {
                 bit_map.set(i, true);
             }

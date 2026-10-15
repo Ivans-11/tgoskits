@@ -10,12 +10,15 @@ extern crate ax_plat;
 
 mod apic;
 mod boot;
+mod bootinfo;
 mod console;
 mod drivers;
 mod init;
 mod mem;
 mod power;
+mod screen;
 mod time;
+mod topology;
 
 #[cfg(feature = "smp")]
 mod mp;
@@ -36,22 +39,18 @@ pub mod config {
     );
 }
 
-fn current_cpu_id() -> usize {
-    match raw_cpuid::CpuId::new().get_feature_info() {
-        Some(finfo) => finfo.initial_local_apic_id() as usize,
-        None => 0,
-    }
-}
-
 unsafe extern "C" fn rust_entry(magic: usize, mbi: usize) {
     if magic == self::boot::MULTIBOOT_BOOTLOADER_MAGIC {
-        ax_plat::call_main(current_cpu_id(), mbi);
+        ax_plat::call_main(0, mbi);
+    } else if magic == 0x36d76289 {
+        // Multiboot info pointers are aligned; preserve the protocol across BSS clearing.
+        ax_plat::call_main(0, mbi | 1);
     }
 }
 
 unsafe extern "C" fn rust_entry_secondary(_magic: usize) {
     #[cfg(feature = "smp")]
     if _magic == self::boot::MULTIBOOT_BOOTLOADER_MAGIC {
-        ax_plat::call_secondary_main(current_cpu_id());
+        ax_plat::call_secondary_main(topology::current_cpu_id());
     }
 }

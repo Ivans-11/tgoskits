@@ -20,6 +20,36 @@ multiboot_header:
     .int    _edata - {offset}                   # load_end
     .int    _ebss - {offset}                    # bss_end_addr
     .int    _start - {offset}                   # entry_addr
+    .int    0                                 # linear graphics mode
+    .int    0                                 # bootloader chooses width
+    .int    0                                 # bootloader chooses height
+    .int    32                                # bits per pixel
+
+.balign 8
+mb2_header:
+    .int 0xe85250d6
+    .int 0
+    .int mb2_end - mb2_header
+    .int -(0xe85250d6 + (mb2_end - mb2_header))
+    # Physical load addresses, as for the Multiboot1 header.
+    .short 2, 0
+    .int 24
+    .int mb2_header - {offset}
+    .int _skernel - {offset}
+    .int _edata - {offset}
+    .int _ebss - {offset}
+    .short 3, 0
+    .int 12
+    .int _start - {offset}
+    .balign 8
+    # Optional framebuffer request.
+    .short 5, 1
+    .int 20
+    .int 0, 0, 32
+    .balign 8
+    .short 0, 0
+    .int 8
+mb2_end:
 
 # Common code in 32-bit, prepare states to enter 64-bit.
 .macro ENTRY32_COMMON

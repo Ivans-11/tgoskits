@@ -11,8 +11,8 @@ use crate::config::plat::{BOOT_STACK_SIZE, PHYS_VIRT_OFFSET};
 
 /// Flags set in the ’flags’ member of the multiboot header.
 ///
-/// (bits 1, 16: memory information, address fields in header)
-const MULTIBOOT_HEADER_FLAGS: usize = 0x0001_0002;
+/// (bits 1, 2, 16: memory information, video mode, address fields in header)
+const MULTIBOOT_HEADER_FLAGS: usize = 0x0001_0006;
 
 /// The magic field should contain this.
 const MULTIBOOT_HEADER_MAGIC: usize = 0x1BADB002;

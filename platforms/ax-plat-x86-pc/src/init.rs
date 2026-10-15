@@ -11,9 +11,8 @@ impl InitIf for InitIfImpl {
     /// early console, clocking).
     fn init_early(_cpu_id: usize, mbi: usize) {
         ax_cpu::init::init_trap();
-        crate::console::init_early();
-        crate::time::init_early();
         crate::mem::init(mbi);
+        crate::time::init_early();
     }
 
     /// Initializes the platform at the early stage for secondary cores.

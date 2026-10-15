@@ -138,7 +138,7 @@ pub unsafe fn run_on_cpu_sync_raw(
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) {
     info!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
-    let cpu_num = ax_config::plat::MAX_CPU_NUM;
+    let cpu_num = ax_hal::cpu_num();
     let callback = callback.into();
 
     // Execute callback on current CPU immediately

@@ -15,7 +15,7 @@ impl PowerIf for PowerImpl {
     #[cfg(feature = "smp")]
     fn cpu_boot(cpu_id: usize, stack_top_paddr: usize) {
         use ax_plat::mem::pa;
-        crate::mp::start_secondary_cpu(cpu_id, pa!(stack_top_paddr))
+        crate::mp::start_secondary_cpu(crate::topology::apic_id(cpu_id), pa!(stack_top_paddr))
     }
 
     /// Shutdown the whole system (in QEMU).
@@ -44,6 +44,6 @@ impl PowerIf for PowerImpl {
 
     /// Get the number of CPU cores available on this platform.
     fn cpu_num() -> usize {
-        crate::config::plat::MAX_CPU_NUM
+        crate::topology::cpu_num()
     }
 }

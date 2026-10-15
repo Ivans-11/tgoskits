@@ -7,21 +7,85 @@ use multiboot::information::{MemoryManagement, MemoryType, Multiboot, PAddr};
 
 use crate::config::{devices::MMIO_RANGES, plat::PHYS_VIRT_OFFSET};
 
-const MAX_REGIONS: usize = 16;
+const MAX_REGIONS: usize = 128;
 
 static RAM_REGIONS: LazyInit<Vec<RawRange, MAX_REGIONS>> = LazyInit::new();
+static DEVICE_REGIONS: LazyInit<Vec<RawRange, MAX_REGIONS>> = LazyInit::new();
 
 pub fn init(multiboot_info_ptr: usize) {
     let mut mm = MemIfImpl;
-    let info = unsafe { Multiboot::from_ptr(multiboot_info_ptr as _, &mut mm).unwrap() };
+    let mut available = Vec::<RawRange, MAX_REGIONS>::new();
+    let mut framebuffer = None;
+    let mut rsdp = None;
+    if multiboot_info_ptr & 1 != 0 {
+        use crate::bootinfo::{tags, u32_at, u64_at};
+        for (kind, data) in tags(multiboot_info_ptr & !1) {
+            match kind {
+                6 if data.len() >= 8 => {
+                    let stride = u32_at(data, 0) as usize;
+                    assert!(stride >= 24, "invalid Multiboot2 memory map stride");
+                    for entry in data[8..].chunks_exact(stride) {
+                        if u32_at(entry, 16) == 1 {
+                            available
+                                .push((u64_at(entry, 0) as usize, u64_at(entry, 8) as usize))
+                                .unwrap();
+                        }
+                    }
+                }
+                8 if data.len() >= 30 && data[21] == 1 => {
+                    framebuffer = crate::screen::init_rgb(
+                        u64_at(data, 0),
+                        u32_at(data, 8),
+                        u32_at(data, 12),
+                        u32_at(data, 16),
+                        data[20],
+                    );
+                }
+                14 if rsdp.is_none() => rsdp = Some(data),
+                15 => rsdp = Some(data),
+                _ => {}
+            }
+        }
+    } else {
+        let info = unsafe { Multiboot::from_ptr(multiboot_info_ptr as _, &mut mm).unwrap() };
+        framebuffer = info.framebuffer_table().and_then(crate::screen::init);
+        for r in info.memory_regions().unwrap() {
+            if r.memory_type() == MemoryType::Available {
+                available
+                    .push((r.base_address() as usize, r.length() as usize))
+                    .unwrap();
+            }
+        }
+    }
+    crate::console::init_early();
+    crate::topology::init(rsdp);
+    let mut devices = Vec::<RawRange, MAX_REGIONS>::new();
+    devices.extend_from_slice(MMIO_RANGES).unwrap();
+    if let Some(range) = framebuffer {
+        devices.push(range).unwrap();
+    }
+    devices.sort_unstable_by_key(|range| range.0);
+    // The framebuffer may lie inside a preconfigured PCI MMIO window.
+    let mut merged = Vec::<RawRange, MAX_REGIONS>::new();
+    for (start, size) in devices {
+        if let Some((previous, length)) = merged.last_mut()
+            && start <= *previous + *length
+        {
+            *length = (*previous + *length).max(start + size) - *previous;
+            continue;
+        }
+        merged.push((start, size)).unwrap();
+    }
+    DEVICE_REGIONS.init_once(merged);
 
     let mut regions = Vec::new();
-    for r in info.memory_regions().unwrap() {
-        if r.memory_type() == MemoryType::Available {
-            regions
-                .push((r.base_address() as usize, r.length() as usize))
-                .unwrap();
-        }
+    for range in available {
+        let ram = [range];
+        // Some firmware includes the framebuffer in its available RAM map.
+        ax_plat::mem::ranges_difference(&ram, DEVICE_REGIONS.as_slice(), |range| {
+            regions.push(range).unwrap();
+        })
+        .unwrap();
     }
     RAM_REGIONS.init_once(regions);
 }
@@ -57,7 +121,7 @@ impl MemIf for MemIfImpl {
 
     /// Returns all device memory (MMIO) ranges on the platform.
     fn mmio_ranges() -> &'static [RawRange] {
-        &MMIO_RANGES
+        DEVICE_REGIONS.as_slice()
     }
 
     /// Translates a physical address to a virtual address.

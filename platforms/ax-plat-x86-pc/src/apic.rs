@@ -61,11 +61,12 @@ pub fn local_apic<'a>() -> &'a mut LocalApic {
 }
 
 #[cfg(any(feature = "smp", feature = "irq"))]
-pub fn raw_apic_id(id_u8: u8) -> u32 {
+pub fn raw_apic_id(id: u32) -> u32 {
     if unsafe { IS_X2APIC } {
-        id_u8 as u32
+        id
     } else {
-        (id_u8 as u32) << 24
+        assert!(id < 256, "APIC ID requires x2APIC");
+        id << 24
     }
 }
 
@@ -162,7 +163,7 @@ mod irq_impl {
                     };
                 }
                 IpiTarget::Other { cpu_id } => {
-                    let apic_id = super::raw_apic_id(cpu_id as u8);
+                    let apic_id = super::raw_apic_id(crate::topology::apic_id(cpu_id));
                     unsafe {
                         super::local_apic().send_ipi(irq_num as _, apic_id as _);
                     };
