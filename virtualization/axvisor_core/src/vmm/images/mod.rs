@@ -485,7 +485,11 @@ impl ImageLoader {
 
         let boot_params = self.build_x86_boot_params(header, layout, kernel)?;
         let boot_stub = self.build_x86_linux_boot_stub(&layout)?;
-        let mp_table = x86_mptable::build(self.config.base.cpu_num);
+        let mp_table = x86_mptable::build(
+            self.config.base.cpu_num,
+            &self.config.devices.pci_intx_routes,
+        )
+        .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid or oversized x86 MP table"))?;
         load_vm_image_from_memory(
             &boot_params,
             layout.boot_params.start.into(),

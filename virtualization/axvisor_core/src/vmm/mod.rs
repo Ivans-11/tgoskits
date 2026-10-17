@@ -54,12 +54,10 @@ static VMM: LazyInit<axvisor_api::sync::WaitQueue> = LazyInit::new();
 
 /// The number of running VMs. This is used to determine when to exit the VMM.
 static RUNNING_VM_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 /// Initialize the VMM.
 ///
 /// This function creates the VM structures and sets up the primary VCpu for each VM.
 pub fn init() {
-    info!("Initializing VMM...");
     VMM.init_once(axvisor_api::sync::WaitQueue::new());
     // Initialize guest VM according to config file.
     config::init_guest_vms();
@@ -73,13 +71,11 @@ pub fn init() {
 
 /// Start the VMM.
 pub fn start() {
-    info!("VMM starting, booting VMs...");
     for vm in vm_list::get_vm_list() {
         match vm.boot() {
             Ok(_) => {
                 vcpus::notify_primary_vcpu(vm.id());
                 RUNNING_VM_COUNT.fetch_add(1, Ordering::Release);
-                info!("VM[{}] boot success", vm.id())
             }
             Err(err) => warn!("VM[{}] boot failed, error {:?}", vm.id(), err),
         }

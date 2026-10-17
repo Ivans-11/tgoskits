@@ -185,25 +185,27 @@ pub fn enable_ioapic_irq_forwarding(vm: &VMRef, vcpu: &VCpuRef) {
         return;
     }
 
-    let mut registered = 0;
-    for vector in IOAPIC_VECTOR_BASE..IOAPIC_VECTOR_END {
-        let gsi = vector - IOAPIC_VECTOR_BASE;
-        if IOAPIC_IRQ_HANDLERS[gsi].load(Ordering::Acquire) {
+    let mut requested_mask = 0usize;
+    for route in vm.pci_intx_routes() {
+        let gsi = route[3] as usize;
+        if gsi < IOAPIC_GSI_COUNT {
+            requested_mask |= 1usize << gsi;
+        }
+    }
+    for (gsi, handler_registered) in IOAPIC_IRQ_HANDLERS.iter().enumerate() {
+        if requested_mask & (1usize << gsi) == 0 {
+            continue;
+        }
+        let vector = IOAPIC_VECTOR_BASE + gsi;
+        if handler_registered.load(Ordering::Acquire) {
             continue;
         }
         if axvisor_api::irq::register_irq_handler(vector, ioapic_irq_forwarding_handler) {
-            IOAPIC_IRQ_HANDLERS[gsi].store(true, Ordering::Release);
-            registered += 1;
+            handler_registered.store(true, Ordering::Release);
         } else {
             trace!("x86 IOAPIC host vector {vector:#x} already has a host handler");
         }
     }
-    info!(
-        "Enabled x86 IOAPIC IRQ forwarding for host vectors {:#x}..{:#x} ({} newly registered)",
-        IOAPIC_VECTOR_BASE,
-        IOAPIC_VECTOR_END - 1,
-        registered
-    );
 }
 
 fn ioapic_irq_handler_registered(vector: usize) -> bool {
@@ -243,11 +245,6 @@ fn forward_passthrough_irq(vm: &VMRef, current_vcpu_id: usize, vector: usize) ->
         return false;
     };
 
-    debug!(
-        "Forwarding x86 passthrough IRQ host GSI {host_gsi} vector {vector:#x} to guest vector \
-         {:#x}",
-        guest_irq.vector
-    );
     deliver_ioapic_interrupt(
         vm,
         current_vcpu_id,
@@ -296,6 +293,7 @@ fn ioapic_irq_forwarding_handler(vector: usize) {
         return;
     }
 
-    let bit = 1usize << (vector - IOAPIC_VECTOR_BASE);
+    let gsi = vector - IOAPIC_VECTOR_BASE;
+    let bit = 1usize << gsi;
     IOAPIC_IRQ_PENDING.fetch_or(bit, Ordering::AcqRel);
 }

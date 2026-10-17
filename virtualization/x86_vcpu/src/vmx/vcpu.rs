@@ -39,7 +39,10 @@ use x86::{
     dtables::{self, DescriptorTablePointer},
     segmentation::SegmentSelector,
 };
-use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags, EferFlags};
+use x86_64::{
+    instructions::port::{PortReadOnly, PortWriteOnly},
+    registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags, EferFlags},
+};
 use x86_vlapic::EmulatedLocalApic;
 
 use super::{
@@ -73,6 +76,8 @@ const X86_PIT_PORT_COUNT: u32 = 4;
 const X86_PIT_SPEAKER_PORT: u16 = 0x61;
 const X86_COM1_PORT_BASE: u16 = 0x3f8;
 const X86_COM1_PORT_COUNT: u32 = 8;
+const PCI_CONFIG_ADDRESS: u16 = 0xcf8;
+const PCI_CONFIG_DATA: u16 = 0xcfc;
 const IA32_TSC: u32 = 0x10;
 const IA32_TSC_ADJUST: u32 = 0x3b;
 const IA32_MISC_FEATURES_ENABLES: u32 = 0x140;
@@ -210,6 +215,9 @@ pub struct VmxVcpu {
     hlt_exiting: Option<bool>,
     /// The I/O bitmap for the VMCS.
     io_bitmap: IOBitmap,
+    pci_config_address: u32,
+    filter_pci_config: bool,
+    pci_config_max_bus: u8,
     /// The MSR bitmap for the VMCS.
     msr_bitmap: MsrBitmap,
     /// Guest/host syscall MSRs switched by VM-entry and VM-exit.
@@ -270,6 +278,9 @@ impl VmxVcpu {
             pending_fault_info: None,
             hlt_exiting: None,
             io_bitmap: IOBitmap::passthrough_all()?,
+            pci_config_address: 0,
+            filter_pci_config: false,
+            pci_config_max_bus: 0,
             msr_bitmap: MsrBitmap::passthrough_all()?,
             msr_switch: VmxMsrSwitch::new(SWITCHED_MSR_INDICES)?,
             msr_host_task: None,
@@ -616,6 +627,10 @@ impl VmxVcpu {
             self.io_bitmap.set_intercept_all();
             return Ok(());
         }
+        if config.filter_pci_config {
+            self.io_bitmap
+                .set_intercept_of_range(PCI_CONFIG_ADDRESS as u32, 8, true);
+        }
         // Static VMs intercept only AxVisor-owned emulated ports.
         // Todo: these should be combined with emulated pio device management,
         // in `modules/axvm/src/device/x86_64/mod.rs` somehow.
@@ -686,6 +701,8 @@ impl VmxVcpu {
         ept_root: HostPhysAddr,
         config: X86VCpuSetupConfig,
     ) -> AxResult {
+        self.filter_pci_config = config.filter_pci_config;
+        self.pci_config_max_bus = config.pci_config_max_bus;
         let paddr = self.vmcs.phys_addr().as_usize() as u64;
         unsafe {
             vmx::vmclear(paddr).map_err(as_axerr)?;
@@ -1685,11 +1702,7 @@ impl VmxVcpu {
                 for i in 0..width.size() {
                     data |= (self.read_guest_u8(imm_addr + i).ok()? as u64) << (i * 8);
                 }
-                Some(AxVCpuExitReason::MmioWrite {
-                    addr,
-                    width,
-                    data,
-                })
+                Some(AxVCpuExitReason::MmioWrite { addr, width, data })
             }
             // Firecracker's boot-timer guest init writes its magic byte with
             // `movb imm8, [absolute-mmio]` (opcode C6 /0).  Decode this form
@@ -1988,7 +2001,7 @@ impl VmxVcpu {
                     .find(|entry| entry.function == LEAF_FEATURE_INFO && entry.index == 0)
             })
             .flatten();
-        let res = if let Some(entry) = configured_feature_info {
+        let mut res = if let Some(entry) = configured_feature_info {
             match function {
                 LEAF_FEATURE_INFO => {
                     const FEATURE_VMX: u32 = 1 << 5;
@@ -2134,6 +2147,20 @@ impl VmxVcpu {
                 _ => cpuid!(regs_clone.rax, regs_clone.rcx),
             }
         };
+
+        // The backend does not maintain a guest MONITOR address or its wakeup
+        // state across VM exits. Expose the supported HLT idle path instead of
+        // inheriting the physical CPU's MONITOR/MWAIT capability.
+        if function == LEAF_FEATURE_INFO {
+            res.ecx &= !(1 << 3);
+        } else if function == 5 {
+            res = CpuIdResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            };
+        }
 
         trace!(
             "VM exit: CPUID({:#x}, {:#x}): {:?}",
@@ -2350,220 +2377,307 @@ impl AxArchVCpu for VmxVcpu {
             }
         }
         match inner_exit {
-            Some(exit_info) => Ok(if exit_info.entry_failure {
-                AxVCpuExitReason::FailEntry {
-                    hardware_entry_failure_reason: exit_info.full_exit_reason as u64,
-                }
-            } else {
-                match exit_info.exit_reason {
-                    VmxExitReason::TRIPLE_FAULT => AxVCpuExitReason::SystemDown,
-                    VmxExitReason::VMCALL => {
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        AxVCpuExitReason::Hypercall {
-                            nr: self.regs().rax,
-                            args: [
-                                self.regs().rdi,
-                                self.regs().rsi,
-                                self.regs().rdx,
-                                self.regs().rcx,
-                                self.regs().r8,
-                                self.regs().r9,
-                            ],
-                        }
+            Some(exit_info) => {
+                Ok(if exit_info.entry_failure {
+                    AxVCpuExitReason::FailEntry {
+                        hardware_entry_failure_reason: exit_info.full_exit_reason as u64,
                     }
-                    VmxExitReason::HLT => {
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        AxVCpuExitReason::Halt
-                    }
-                    VmxExitReason::IO_INSTRUCTION => {
-                        let io_info = self.io_exit_info().unwrap();
-                        let port = io_info.port;
-
-                        if io_info.is_string {
-                            let address_size = match VmcsReadOnly32::VMEXIT_INSTRUCTION_INFO
-                                .read()?
-                                .get_bits(7..10)
-                            {
-                                0 => 16,
-                                1 => 32,
-                                2 => 64,
-                                _ => return ax_err!(InvalidData, "invalid VMX I/O address size"),
-                            };
-                            let remaining = if io_info.is_repeat {
-                                truncate_string_register(self.regs().rcx, address_size)
-                            } else {
-                                1
-                            };
-                            let decrement = VmcsGuestNW::RFLAGS.read()? & (1 << 10) != 0;
-                            let gva =
-                                GuestVirtAddr::from(VmcsReadOnlyNW::GUEST_LINEAR_ADDR.read()?);
-                            let gpa = self.translate_guest_linear(gva)?;
-                            let next_rip = exit_info
-                                .guest_rip
-                                .wrapping_add(exit_info.exit_instruction_length as usize)
-                                as u64;
-                            if io_info.is_in {
-                                AxVCpuExitReason::IoStringRead {
-                                    port: Port(port),
-                                    width: AccessWidth::try_from(io_info.access_size as usize)
-                                        .map_err(|_| ax_err_type!(InvalidData))?,
-                                    addr: gpa,
-                                    repeat: io_info.is_repeat,
-                                    remaining,
-                                    next_rip,
-                                    address_size,
-                                    decrement,
-                                }
-                            } else {
-                                let width = AccessWidth::try_from(io_info.access_size as usize)
-                                    .map_err(|_| ax_err_type!(InvalidData))?;
-                                let mut data = 0u64;
-                                for offset in 0..width.size() {
-                                    data |=
-                                        (self.read_guest_u8(gva + offset)? as u64) << (offset * 8);
-                                }
-                                self.complete_string_io_write(
-                                    address_size,
-                                    width,
-                                    io_info.is_repeat,
-                                    remaining,
-                                    next_rip,
-                                    decrement,
-                                )?;
-                                AxVCpuExitReason::IoWrite {
-                                    port: Port(port),
-                                    width,
-                                    data,
-                                }
-                            }
-                        } else {
+                } else {
+                    match exit_info.exit_reason {
+                        VmxExitReason::TRIPLE_FAULT => AxVCpuExitReason::SystemDown,
+                        VmxExitReason::VMCALL => {
                             self.advance_rip(exit_info.exit_instruction_length as _)?;
-                            let width = match AccessWidth::try_from(io_info.access_size as usize) {
-                                Ok(width) => width,
-                                Err(_) => {
-                                    warn!("VMX invalid IO-Exit: {io_info:#x?} of {exit_info:#x?}");
-                                    warn!("VCpu {self:#x?}");
-                                    return Ok(AxVCpuExitReason::Halt);
-                                }
-                            };
+                            AxVCpuExitReason::Hypercall {
+                                nr: self.regs().rax,
+                                args: [
+                                    self.regs().rdi,
+                                    self.regs().rsi,
+                                    self.regs().rdx,
+                                    self.regs().rcx,
+                                    self.regs().r8,
+                                    self.regs().r9,
+                                ],
+                            }
+                        }
+                        VmxExitReason::HLT => {
+                            self.advance_rip(exit_info.exit_instruction_length as _)?;
+                            AxVCpuExitReason::Halt
+                        }
+                        VmxExitReason::IO_INSTRUCTION => {
+                            let io_info = self.io_exit_info().unwrap();
+                            let port = io_info.port;
 
-                            if io_info.is_in
-                                && (HOST_QEMU_EXIT_PORT
+                            if io_info.is_string {
+                                let address_size = match VmcsReadOnly32::VMEXIT_INSTRUCTION_INFO
+                                    .read()?
+                                    .get_bits(7..10)
+                                {
+                                    0 => 16,
+                                    1 => 32,
+                                    2 => 64,
+                                    _ => {
+                                        return ax_err!(
+                                            InvalidData,
+                                            "invalid VMX I/O address size"
+                                        );
+                                    }
+                                };
+                                let remaining = if io_info.is_repeat {
+                                    truncate_string_register(self.regs().rcx, address_size)
+                                } else {
+                                    1
+                                };
+                                let decrement = VmcsGuestNW::RFLAGS.read()? & (1 << 10) != 0;
+                                let gva =
+                                    GuestVirtAddr::from(VmcsReadOnlyNW::GUEST_LINEAR_ADDR.read()?);
+                                let gpa = self.translate_guest_linear(gva)?;
+                                let next_rip = exit_info
+                                    .guest_rip
+                                    .wrapping_add(exit_info.exit_instruction_length as usize)
+                                    as u64;
+                                if io_info.is_in {
+                                    AxVCpuExitReason::IoStringRead {
+                                        port: Port(port),
+                                        width: AccessWidth::try_from(io_info.access_size as usize)
+                                            .map_err(|_| ax_err_type!(InvalidData))?,
+                                        addr: gpa,
+                                        repeat: io_info.is_repeat,
+                                        remaining,
+                                        next_rip,
+                                        address_size,
+                                        decrement,
+                                    }
+                                } else {
+                                    let width = AccessWidth::try_from(io_info.access_size as usize)
+                                        .map_err(|_| ax_err_type!(InvalidData))?;
+                                    let mut data = 0u64;
+                                    for offset in 0..width.size() {
+                                        data |= (self.read_guest_u8(gva + offset)? as u64)
+                                            << (offset * 8);
+                                    }
+                                    self.complete_string_io_write(
+                                        address_size,
+                                        width,
+                                        io_info.is_repeat,
+                                        remaining,
+                                        next_rip,
+                                        decrement,
+                                    )?;
+                                    AxVCpuExitReason::IoWrite {
+                                        port: Port(port),
+                                        width,
+                                        data,
+                                    }
+                                }
+                            } else {
+                                self.advance_rip(exit_info.exit_instruction_length as _)?;
+                                let width =
+                                    match AccessWidth::try_from(io_info.access_size as usize) {
+                                        Ok(width) => width,
+                                        Err(_) => {
+                                            warn!(
+                                                "VMX invalid IO-Exit: {io_info:#x?} of \
+                                                 {exit_info:#x?}"
+                                            );
+                                            warn!("VCpu {self:#x?}");
+                                            return Ok(AxVCpuExitReason::Halt);
+                                        }
+                                    };
+
+                                if self.filter_pci_config
+                                    && (PCI_CONFIG_ADDRESS..PCI_CONFIG_DATA + 4).contains(&port)
+                                {
+                                    let value = self.regs().rax;
+                                    if port == PCI_CONFIG_ADDRESS {
+                                        if io_info.is_in {
+                                            let mask = if width.size() == 8 {
+                                                u64::MAX
+                                            } else {
+                                                (1u64 << (width.size() * 8)) - 1
+                                            };
+                                            self.regs_mut().rax = (self.regs().rax & !mask)
+                                                | (self.pci_config_address as u64 & mask);
+                                        } else {
+                                            let bits = width.size() * 8;
+                                            let mask = if bits == 32 {
+                                                u32::MAX
+                                            } else {
+                                                (1u32 << bits) - 1
+                                            };
+                                            let shift = ((port - PCI_CONFIG_ADDRESS) * 8) as u32;
+                                            self.pci_config_address = (self.pci_config_address
+                                                & !(mask << shift))
+                                                | (((value as u32) & mask) << shift);
+                                            unsafe {
+                                                PortWriteOnly::<u32>::new(PCI_CONFIG_ADDRESS)
+                                                    .write(self.pci_config_address);
+                                            }
+                                        }
+                                    } else {
+                                        let bus = ((self.pci_config_address >> 16) & 0xff) as u8;
+                                        let result = if bus <= self.pci_config_max_bus {
+                                            if io_info.is_in {
+                                                match width {
+                                                    AccessWidth::Byte => unsafe {
+                                                        PortReadOnly::<u8>::new(port).read() as u64
+                                                    },
+                                                    AccessWidth::Word => unsafe {
+                                                        PortReadOnly::<u16>::new(port).read() as u64
+                                                    },
+                                                    AccessWidth::Dword => unsafe {
+                                                        PortReadOnly::<u32>::new(port).read() as u64
+                                                    },
+                                                    AccessWidth::Qword => u64::MAX,
+                                                }
+                                            } else {
+                                                match width {
+                                                    AccessWidth::Byte => unsafe {
+                                                        PortWriteOnly::<u8>::new(port)
+                                                            .write(value as u8)
+                                                    },
+                                                    AccessWidth::Word => unsafe {
+                                                        PortWriteOnly::<u16>::new(port)
+                                                            .write(value as u16)
+                                                    },
+                                                    AccessWidth::Dword => unsafe {
+                                                        PortWriteOnly::<u32>::new(port)
+                                                            .write(value as u32)
+                                                    },
+                                                    AccessWidth::Qword => {}
+                                                }
+                                                0
+                                            }
+                                        } else if io_info.is_in {
+                                            match width {
+                                                AccessWidth::Byte => u8::MAX as u64,
+                                                AccessWidth::Word => u16::MAX as u64,
+                                                AccessWidth::Dword => u32::MAX as u64,
+                                                AccessWidth::Qword => u64::MAX,
+                                            }
+                                        } else {
+                                            0
+                                        };
+                                        if io_info.is_in {
+                                            let mask = if width.size() == 8 {
+                                                u64::MAX
+                                            } else {
+                                                (1u64 << (width.size() * 8)) - 1
+                                            };
+                                            self.regs_mut().rax =
+                                                (self.regs().rax & !mask) | result;
+                                        }
+                                    }
+                                    return Ok(AxVCpuExitReason::Nothing);
+                                }
+
+                                if io_info.is_in
+                                    && (HOST_QEMU_EXIT_PORT
+                                        ..HOST_QEMU_EXIT_PORT + HOST_QEMU_EXIT_PORT_COUNT)
+                                        .contains(&port)
+                                {
+                                    self.regs_mut().rax |= match width {
+                                        AccessWidth::Byte => u8::MAX as u64,
+                                        AccessWidth::Word => u16::MAX as u64,
+                                        AccessWidth::Dword => u32::MAX as u64,
+                                        AccessWidth::Qword => u64::MAX,
+                                    };
+                                    AxVCpuExitReason::Nothing
+                                } else if io_info.is_in {
+                                    AxVCpuExitReason::IoRead {
+                                        port: Port(port),
+                                        width,
+                                    }
+                                } else if (HOST_QEMU_EXIT_PORT
                                     ..HOST_QEMU_EXIT_PORT + HOST_QEMU_EXIT_PORT_COUNT)
                                     .contains(&port)
-                            {
-                                self.regs_mut().rax |= match width {
-                                    AccessWidth::Byte => u8::MAX as u64,
-                                    AccessWidth::Word => u16::MAX as u64,
-                                    AccessWidth::Dword => u32::MAX as u64,
-                                    AccessWidth::Qword => u64::MAX,
-                                };
-                                AxVCpuExitReason::Nothing
-                            } else if io_info.is_in {
-                                AxVCpuExitReason::IoRead {
-                                    port: Port(port),
-                                    width,
-                                }
-                            } else if (HOST_QEMU_EXIT_PORT
-                                ..HOST_QEMU_EXIT_PORT + HOST_QEMU_EXIT_PORT_COUNT)
-                                .contains(&port)
-                            {
-                                AxVCpuExitReason::Nothing
-                            } else if port == QEMU_EXIT_PORT
-                                && width == AccessWidth::Word
-                                && self.regs().rax == QEMU_EXIT_MAGIC
-                            {
-                                AxVCpuExitReason::SystemDown
-                            } else {
-                                AxVCpuExitReason::IoWrite {
-                                    port: Port(port),
-                                    width,
-                                    data: self.regs().rax.get_bits(width.bits_range()),
+                                {
+                                    AxVCpuExitReason::Nothing
+                                } else if port == QEMU_EXIT_PORT
+                                    && width == AccessWidth::Word
+                                    && self.regs().rax == QEMU_EXIT_MAGIC
+                                {
+                                    AxVCpuExitReason::SystemDown
+                                } else {
+                                    AxVCpuExitReason::IoWrite {
+                                        port: Port(port),
+                                        width,
+                                        data: self.regs().rax.get_bits(width.bits_range()),
+                                    }
                                 }
                             }
                         }
-                    }
-                    VmxExitReason::EXTERNAL_INTERRUPT => {
-                        let int_info = self.interrupt_exit_info()?;
-                        assert!(int_info.valid);
-                        AxVCpuExitReason::ExternalInterrupt {
-                            vector: int_info.vector as _,
+                        VmxExitReason::EXTERNAL_INTERRUPT => {
+                            let int_info = self.interrupt_exit_info()?;
+                            assert!(int_info.valid);
+                            AxVCpuExitReason::ExternalInterrupt {
+                                vector: int_info.vector as _,
+                            }
                         }
-                    }
-                    VmxExitReason::PREEMPTION_TIMER => {
-                        self.handle_vmx_preemption_timer()?;
-                        AxVCpuExitReason::PreemptionTimer
-                    }
-                    VmxExitReason::VIRTUALIZED_EOI => AxVCpuExitReason::InterruptEnd {
-                        vector: self.vlapic.handle_eoi(),
-                    },
-                    VmxExitReason::APIC_WRITE => {
-                        let offset = self.apic_access_exit_info()?.offset as usize;
-                        if offset == 0xb0 {
-                            let vector = self.vlapic.handle_eoi();
-                            AxVCpuExitReason::InterruptEnd { vector }
-                        } else if offset == 0x300 {
-                            let addr = GuestPhysAddr::from(X86_APIC_ACCESS_GPA + offset);
-                            let value = <EmulatedLocalApic as BaseDeviceOps<
-                                AddrRange<GuestPhysAddr>,
-                            >>::handle_read(
-                                &self.vlapic, addr, AccessWidth::Dword
-                            )?;
-                            <EmulatedLocalApic as BaseDeviceOps<AddrRange<GuestPhysAddr>>>::handle_write(
-                                &self.vlapic,
-                                addr,
-                                AccessWidth::Dword,
+                        VmxExitReason::PREEMPTION_TIMER => {
+                            self.handle_vmx_preemption_timer()?;
+                            AxVCpuExitReason::PreemptionTimer
+                        }
+                        VmxExitReason::VIRTUALIZED_EOI => AxVCpuExitReason::InterruptEnd {
+                            vector: self.vlapic.handle_eoi(),
+                        },
+                        VmxExitReason::APIC_WRITE => {
+                            // Trap-like exit: hardware has stored the value and
+                            // advanced RIP, but software device side effects
+                            // (including starting the APIC timer) remain ours.
+                            let offset = VmcsReadOnlyNW::EXIT_QUALIFICATION.read()? & 0xff0;
+                            if offset == 0xb0 {
+                                let vector = self.vlapic.handle_eoi();
+                                AxVCpuExitReason::InterruptEnd { vector }
+                            } else {
+                                self.vlapic.handle_apic_write(offset)?;
+                                self.take_pending_cpu_up_exit()
+                                    .unwrap_or(AxVCpuExitReason::Nothing)
+                            }
+                        }
+                        VmxExitReason::APIC_ACCESS => {
+                            self.advance_rip(exit_info.exit_instruction_length as _)?;
+                            AxVCpuExitReason::InterruptEnd {
+                                vector: self.vlapic.handle_eoi(),
+                            }
+                        }
+                        VmxExitReason::EPT_VIOLATION => {
+                            let info = self.nested_page_fault_info()?;
+                            AxVCpuExitReason::NestedPageFault {
+                                addr: info.fault_guest_paddr,
+                                access_flags: info.access_flags,
+                            }
+                        }
+                        VmxExitReason::MSR_READ => {
+                            self.advance_rip(exit_info.exit_instruction_length as _)?;
+                            // `reg` is unused here.
+                            AxVCpuExitReason::SysRegRead {
+                                addr: SysRegAddr::new(self.regs().rcx as _),
+                                reg: 0,
+                            }
+                        }
+                        VmxExitReason::MSR_WRITE if self.regs().rcx as u32 == 0x80b => {
+                            self.advance_rip(exit_info.exit_instruction_length as _)?;
+                            AxVCpuExitReason::InterruptEnd {
+                                vector: self.vlapic.handle_eoi(),
+                            }
+                        }
+                        VmxExitReason::MSR_WRITE => {
+                            self.advance_rip(exit_info.exit_instruction_length as _)?;
+                            let value = (self.regs().rax & 0xffff_ffff)
+                                | ((self.regs().rdx & 0xffff_ffff) << 32);
+                            AxVCpuExitReason::SysRegWrite {
+                                addr: SysRegAddr::new(self.regs().rcx as _),
                                 value,
-                            )?;
-                            self.take_pending_cpu_up_exit()
-                                .unwrap_or(AxVCpuExitReason::Nothing)
-                        } else {
-                            AxVCpuExitReason::Nothing
+                            }
+                        }
+                        _ => {
+                            warn!("VMX unsupported VM-Exit: {exit_info:#x?}");
+                            warn!("VCpu {self:#x?}");
+                            AxVCpuExitReason::Halt
                         }
                     }
-                    VmxExitReason::APIC_ACCESS => {
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        AxVCpuExitReason::InterruptEnd {
-                            vector: self.vlapic.handle_eoi(),
-                        }
-                    }
-                    VmxExitReason::EPT_VIOLATION => {
-                        let info = self.nested_page_fault_info()?;
-                        AxVCpuExitReason::NestedPageFault {
-                            addr: info.fault_guest_paddr,
-                            access_flags: info.access_flags,
-                        }
-                    }
-                    VmxExitReason::MSR_READ => {
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        // `reg` is unused here.
-                        AxVCpuExitReason::SysRegRead {
-                            addr: SysRegAddr::new(self.regs().rcx as _),
-                            reg: 0,
-                        }
-                    }
-                    VmxExitReason::MSR_WRITE if self.regs().rcx as u32 == 0x80b => {
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        AxVCpuExitReason::InterruptEnd {
-                            vector: self.vlapic.handle_eoi(),
-                        }
-                    }
-                    VmxExitReason::MSR_WRITE => {
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        let value = (self.regs().rax & 0xffff_ffff)
-                            | ((self.regs().rdx & 0xffff_ffff) << 32);
-                        AxVCpuExitReason::SysRegWrite {
-                            addr: SysRegAddr::new(self.regs().rcx as _),
-                            value,
-                        }
-                    }
-                    _ => {
-                        warn!("VMX unsupported VM-Exit: {exit_info:#x?}");
-                        warn!("VCpu {self:#x?}");
-                        AxVCpuExitReason::Halt
-                    }
-                }
-            }),
+                })
+            }
             None => Ok(self
                 .take_pending_cpu_up_exit()
                 .unwrap_or(AxVCpuExitReason::Nothing)),

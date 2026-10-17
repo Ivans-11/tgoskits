@@ -28,19 +28,33 @@ pub const fn reserved_range() -> X86LinuxRange {
 }
 
 /// Builds a minimal MP floating pointer and MP config table.
-pub fn build(cpu_count: usize) -> [u8; MP_TABLE_SIZE] {
+pub fn build(cpu_count: usize, pci_routes: &[[u8; 4]]) -> Option<[u8; MP_TABLE_SIZE]> {
     let mut image = [0u8; MP_TABLE_SIZE];
     let cpu_count = cpu_count.max(1);
-    assert!(cpu_count <= IO_APIC_ID as usize);
+    if cpu_count > IO_APIC_ID as usize
+        || pci_routes.iter().any(|&[bus, dev, pin, gsi]| {
+            bus == u8::MAX || dev > 31 || !(1..=4).contains(&pin) || gsi >= 24
+        })
+        || pci_routes.iter().enumerate().any(|(index, route)| {
+            pci_routes[..index]
+                .iter()
+                .any(|other| other[..3] == route[..3])
+        })
+    {
+        return None;
+    }
 
-    let config = build_config_table(cpu_count);
+    let config = build_config_table(cpu_count, pci_routes);
+    if config.len() > MP_FLOATING_POINTER_OFFSET {
+        return None;
+    }
     image[..config.len()].copy_from_slice(&config);
 
     let floating = build_floating_pointer();
     image[MP_FLOATING_POINTER_OFFSET..MP_FLOATING_POINTER_OFFSET + floating.len()]
         .copy_from_slice(&floating);
 
-    image
+    Some(image)
 }
 
 fn build_floating_pointer() -> [u8; 16] {
@@ -53,8 +67,8 @@ fn build_floating_pointer() -> [u8; 16] {
     data
 }
 
-fn build_config_table(cpu_count: usize) -> Vec<u8> {
-    let entries = config_entries(cpu_count);
+fn build_config_table(cpu_count: usize, pci_routes: &[[u8; 4]]) -> Vec<u8> {
+    let entries = config_entries(cpu_count, pci_routes);
     let entries_len: usize = entries.iter().map(Vec::len).sum();
 
     let mut table = Vec::with_capacity(44 + entries_len);
@@ -81,18 +95,37 @@ fn build_config_table(cpu_count: usize) -> Vec<u8> {
     table
 }
 
-fn config_entries(cpu_count: usize) -> Vec<Vec<u8>> {
+fn config_entries(cpu_count: usize, pci_routes: &[[u8; 4]]) -> Vec<Vec<u8>> {
     let mut entries = Vec::new();
     for apic_id in 0..cpu_count {
         entries.push(processor_entry(apic_id as u8));
     }
+    // Keep the ISA bus separate from every explicitly described PCI bus.
+    // Linux accepts the MP table's 8-bit bus number; using 0xff here avoids
+    // colliding with the passthrough device's bus 1.
+    let isa_bus = if pci_routes.is_empty() {
+        BUS_ID_ISA
+    } else {
+        u8::MAX
+    };
     entries.extend([
         bus_entry(BUS_ID_PCI, b"PCI   "),
-        bus_entry(BUS_ID_ISA, b"ISA   "),
+        bus_entry(isa_bus, b"ISA   "),
         io_apic_entry(),
     ]);
-    push_isa_interrupt_entries(&mut entries);
-    push_pci_interrupt_entries(&mut entries);
+    push_isa_interrupt_entries(&mut entries, isa_bus);
+    if pci_routes.is_empty() {
+        push_pci_interrupt_entries(&mut entries);
+    } else {
+        let mut buses = alloc::vec![BUS_ID_PCI];
+        for &[bus, dev, pin, gsi] in pci_routes {
+            if !buses.contains(&bus) {
+                entries.push(bus_entry(bus, b"PCI   "));
+                buses.push(bus);
+            }
+            entries.push(interrupt_entry(0, bus, (dev << 2) | (pin - 1), gsi));
+        }
+    }
     entries
 }
 
@@ -127,11 +160,11 @@ fn io_apic_entry() -> Vec<u8> {
     entry
 }
 
-fn push_isa_interrupt_entries(entries: &mut Vec<Vec<u8>>) {
+fn push_isa_interrupt_entries(entries: &mut Vec<Vec<u8>>, isa_bus: u8) {
     // Keep legacy ISA IRQs identity-routed to the IOAPIC. IRQ0 is timer and
     // IRQ4 is COM1; both are useful during early Linux bring-up diagnostics.
     for irq in 0u8..16 {
-        entries.push(interrupt_entry(0, BUS_ID_ISA, irq, irq));
+        entries.push(interrupt_entry(0, isa_bus, irq, irq));
     }
 }
 
@@ -186,7 +219,7 @@ mod tests {
 
     #[test]
     fn builds_valid_mp_table_checksums() {
-        let image = build(2);
+        let image = build(2, &[]).unwrap();
         let config_len = u16::from_le_bytes([image[4], image[5]]) as usize;
         assert_eq!(&image[..4], b"PCMP");
         assert_eq!(
@@ -209,5 +242,30 @@ mod tests {
     fn routes_static_virtio_devices_to_q35_intx_lines() {
         assert_eq!(pci_intx_gsi(3, 0), 11);
         assert_eq!(pci_intx_gsi(4, 0), 10);
+    }
+
+    #[test]
+    fn keeps_isa_bus_separate_from_downstream_pci_bus() {
+        let entries = config_entries(1, &[[1, 0, 1, 16]]);
+        assert!(entries.contains(&bus_entry(1, b"PCI   ")));
+        assert!(entries.contains(&bus_entry(u8::MAX, b"ISA   ")));
+        assert!(entries.contains(&interrupt_entry(0, u8::MAX, 0, 0)));
+        assert!(entries.contains(&interrupt_entry(0, 1, 0, 16)));
+        assert!(build(1, &[[1, 0, 1, 16]]).is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_and_oversized_routes() {
+        for route in [
+            [255, 0, 1, 16],
+            [1, 32, 1, 16],
+            [1, 0, 0, 16],
+            [1, 0, 1, 24],
+        ] {
+            assert!(build(1, &[route]).is_none());
+        }
+        assert!(build(1, &[[1, 0, 1, 16], [1, 0, 1, 17]]).is_none());
+        let routes: Vec<_> = (0..128).map(|bus| [bus, 0, 1, 16]).collect();
+        assert!(build(1, &routes).is_none());
     }
 }

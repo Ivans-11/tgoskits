@@ -1444,6 +1444,7 @@ dependencies = [
  "ax-plat",
  "axklib",
  "bitflags 2.11.1",
+ "font8x8",
  "heapless 0.9.3",
  "log",
  "multiboot",
@@ -3943,6 +3944,12 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "font8x8"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e63201c624b8c8883921b1a1accc8916c4fa9dbfb15d122b26e4dde945b86bbf"
 
 [[package]]
 name = "form_urlencoded"

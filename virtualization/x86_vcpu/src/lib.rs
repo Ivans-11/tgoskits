@@ -36,6 +36,10 @@ pub struct X86VCpuSetupConfig {
     pub intercept_all_io: bool,
     /// Intercept COM1 PIO ports so the VMM path can emulate or forward them.
     pub intercept_com1: bool,
+    /// Filter legacy PCI configuration accesses for a static passthrough VM.
+    pub filter_pci_config: bool,
+    /// Highest PCI bus visible through legacy configuration space.
+    pub pci_config_max_bus: u8,
     /// Expose KVM-compatible hypervisor CPUID leaves to the guest.
     pub expose_kvm_hypervisor: bool,
 }

@@ -26,8 +26,6 @@ use axvisor_api::{
     sync::WaitQueue,
     task::{TaskHandle, TaskOptions},
 };
-#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
-use axvm::config::VMInterruptMode;
 
 use crate::vmm::{
     VCpuRef, VMRef,
@@ -461,7 +459,6 @@ pub fn with_vcpu_task<T, F: FnOnce(&TaskHandle) -> T>(
 /// * The task is created in blocked state and added to the wait queue directly,
 ///   instead of being added to the ready queue. It will be woken up by notify_primary_vcpu().
 fn alloc_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> (TaskHandle, alloc::string::String) {
-    info!("Spawning task for VM[{}] VCpu[{}]", vm.id(), vcpu.id());
     let vm_id = vm.id();
     let vcpu_id = vcpu.id();
     let task_name = alloc::format!("VM[{vm_id}]-VCpu[{vcpu_id}]");
@@ -473,7 +470,6 @@ fn alloc_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> (TaskHandle, alloc::string::Str
         },
         move || vcpu_run(vm_id, vcpu_id),
     );
-    info!("VCpu task {} created", task_name);
     (task, task_name)
 }
 
@@ -488,11 +484,10 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
     let (vm, vcpu) = super::with_vm_and_vcpu(vm_id, vcpu_id, |vm, vcpu| (vm, vcpu))
         .expect("current vCPU task is not bound to a live VM/vCPU");
 
-    info!("VM[{}] VCpu[{}] waiting for running", vm.id(), vcpu.id());
+    debug!("VM[{}] VCpu[{}] waiting for running", vm.id(), vcpu.id());
     let vm_for_wait = vm.clone();
     wait_for(vm_id, move || vm_for_wait.running());
 
-    info!("VM[{}] VCpu[{}] running...", vm.id(), vcpu.id());
     #[cfg(target_arch = "x86_64")]
     super::devices::x86::enable_ioapic_irq_forwarding(&vm, &vcpu);
     mark_vcpu_running(vm_id);
@@ -503,12 +498,11 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
         super::devices::x86::drain_pending_ioapic_irqs(&vm, &vcpu);
         #[cfg(target_arch = "riscv64")]
         rearm_vcpu_timeslice();
-        #[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
-        rearm_passthrough_poll_timer(&vm);
         match vm.run_vcpu(vcpu_id) {
             Ok(exit_reason) => {
                 match exit_reason {
                     exit_reason if handle_internal_exit(&vm, &vcpu, &exit_reason) => {
+                        #[cfg(not(target_arch = "x86_64"))]
                         if matches!(exit_reason, AxVCpuExitReason::PreemptionTimer) {
                             axvisor_api::task::yield_now();
                         }
@@ -548,7 +542,15 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                     AxVCpuExitReason::Halt => {
                         debug!("VM[{vm_id}] run VCpu[{vcpu_id}] Halt");
                         #[cfg(target_arch = "x86_64")]
-                        super::devices::x86::inject_pending_serial_irq(&vm, &vcpu);
+                        {
+                            // A halted guest is waiting for its emulated timer
+                            // (or another device IRQ).  Keep the PIT path active
+                            // here as well as on VM exits; otherwise a guest
+                            // sleeping in the 8250 IRQ probe can stop receiving
+                            // IRQ0 forever.
+                            super::devices::x86::inject_due_pit_irq0(&vm, &vcpu);
+                            super::devices::x86::inject_pending_serial_irq(&vm, &vcpu);
+                        }
                         #[cfg(target_arch = "x86_64")]
                         continue;
                         #[cfg(not(target_arch = "x86_64"))]
@@ -662,7 +664,7 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
 
         // Check if the VM is stopping.
         if vm.stopping() {
-            warn!(
+            debug!(
                 "VM[{}] VCpu[{}] stopping because of VM stopping",
                 vm_id, vcpu_id
             );
@@ -677,7 +679,6 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                 // Transition from Stopping to Stopped
                 vm.set_vm_status(axvm::VMStatus::Stopped);
                 info!("VM[{}] state changed to Stopped", vm_id);
-
                 #[cfg(target_arch = "x86_64")]
                 super::devices::x86::disable_ioapic_irq_forwarding_for_vm(vm_id);
 
@@ -689,18 +690,7 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
         }
     }
 
-    info!("VM[{}] VCpu[{}] exiting...", vm_id, vcpu_id);
-}
-
-#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
-fn rearm_passthrough_poll_timer(vm: &VMRef) {
-    if vm.interrupt_mode() != VMInterruptMode::Passthrough {
-        return;
-    }
-    const POLL_INTERVAL_NANOS: u64 = 1_000_000;
-    let deadline = axvisor_api::time::current_time()
-        .saturating_add(core::time::Duration::from_nanos(POLL_INTERVAL_NANOS));
-    axvisor_api::time::set_oneshot_timer(deadline);
+    debug!("VM[{}] VCpu[{}] exiting...", vm_id, vcpu_id);
 }
 
 #[cfg(target_arch = "riscv64")]

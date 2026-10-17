@@ -20,7 +20,10 @@ use axvisor_api::{
 use bit_field::BitField;
 use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
 use x86::controlregs::Xcr0;
-use x86_64::registers::control::{Cr0Flags, Cr4Flags, EferFlags};
+use x86_64::{
+    instructions::port::{PortReadOnly, PortWriteOnly},
+    registers::control::{Cr0Flags, Cr4Flags, EferFlags},
+};
 use x86_vlapic::EmulatedLocalApic;
 
 use super::{
@@ -42,6 +45,8 @@ const X86_PIT_PORT_COUNT: u32 = 4;
 const X86_PIT_SPEAKER_PORT: u16 = 0x61;
 const X86_COM1_PORT_BASE: u16 = 0x3f8;
 const X86_COM1_PORT_COUNT: u32 = 8;
+const PCI_CONFIG_ADDRESS: u16 = 0xcf8;
+const PCI_CONFIG_DATA: u16 = 0xcfc;
 const IA32_TSC: u32 = 0x10;
 const IA32_TSC_ADJUST: u32 = 0x3b;
 const IA32_MISC_FEATURES_ENABLES: u32 = 0x140;
@@ -225,6 +230,9 @@ pub struct SvmVcpu {
     load_save_states: VmLoadSaveStates,
     /// The I/O permission map used by SVM I/O intercepts.
     iopm: IOPm,
+    pci_config_address: u32,
+    filter_pci_config: bool,
+    pci_config_max_bus: u8,
     /// The MSR permission map used by SVM MSR intercepts.
     msrpm: MSRPm,
     /// Pending events to be injected to the guest.
@@ -264,6 +272,9 @@ impl SvmVcpu {
             vmcb: VmcbFrame::new()?,
             load_save_states: VmLoadSaveStates::new()?,
             iopm: IOPm::passthrough_all()?,
+            pci_config_address: 0,
+            filter_pci_config: false,
+            pci_config_max_bus: 0,
             msrpm: MSRPm::passthrough_all()?,
             pending_events: VecDeque::with_capacity(8),
             vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
@@ -285,6 +296,8 @@ impl SvmVcpu {
         npt_root: HostPhysAddr,
         config: X86VCpuSetupConfig,
     ) -> AxResult {
+        self.filter_pci_config = config.filter_pci_config;
+        self.pci_config_max_bus = config.pci_config_max_bus;
         self.expose_kvm_hypervisor = config.expose_kvm_hypervisor;
         self.setup_io_bitmap(config)?;
         self.setup_msr_bitmap()?;
@@ -437,6 +450,10 @@ impl SvmVcpu {
         if config.intercept_all_io {
             self.iopm.set_intercept_all();
             return Ok(());
+        }
+        if config.filter_pci_config {
+            self.iopm
+                .set_intercept_of_range(PCI_CONFIG_ADDRESS as u32, 8, true);
         }
         // This port is part of the x86 QEMU test contract: 0x604 reports test completion.
         self.iopm
@@ -1302,13 +1319,14 @@ impl SvmVcpu {
         let mut rip = start;
         let mut rex = 0u8;
         let mut address_override = false;
-        let operand_override = match self.skip_simple_prefixes(&mut rip, &mut rex, &mut address_override) {
-            Ok(value) => value,
-            Err(err) => {
-                debug!("failed to decode SVM NPF MMIO prefixes: {err:?}");
-                return Ok(None);
-            }
-        };
+        let operand_override =
+            match self.skip_simple_prefixes(&mut rip, &mut rex, &mut address_override) {
+                Ok(value) => value,
+                Err(err) => {
+                    debug!("failed to decode SVM NPF MMIO prefixes: {err:?}");
+                    return Ok(None);
+                }
+            };
 
         let opcode = self.read_guest_u8(rip)?;
         rip += 1;
@@ -1318,7 +1336,11 @@ impl SvmVcpu {
             let exit = if write {
                 self.handle_decoded_npt_mmio_write(
                     addr,
-                    if operand_override { self.guest_regs.rax as u16 as u64 } else { self.guest_regs.rax as u32 as u64 },
+                    if operand_override {
+                        self.guest_regs.rax as u16 as u64
+                    } else {
+                        self.guest_regs.rax as u32 as u64
+                    },
                     local_apic,
                 )?
             } else if local_apic {
@@ -1333,7 +1355,11 @@ impl SvmVcpu {
             } else {
                 AxVCpuExitReason::MmioRead {
                     addr,
-                    width: if operand_override { AccessWidth::Word } else { AccessWidth::Dword },
+                    width: if operand_override {
+                        AccessWidth::Word
+                    } else {
+                        AccessWidth::Dword
+                    },
                     reg: 0,
                     reg_width: AccessWidth::Dword,
                     signed_ext: false,
@@ -1393,7 +1419,11 @@ impl SvmVcpu {
             }
             (true, 0xc7, None) if (modrm >> 3) & 0x7 == 0 => {
                 let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex)?;
-                let width = if operand_override { AccessWidth::Word } else { AccessWidth::Dword };
+                let width = if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
                 let mut data = 0u64;
                 for i in 0..width.size() {
                     data |= (self.read_guest_u8(imm_addr + i)? as u64) << (i * 8);
@@ -1421,8 +1451,7 @@ impl SvmVcpu {
                             addr,
                             width,
                         )?;
-                    self.regs_mut()
-                        .set_reg_of_index(reg as u8, val as u64);
+                    self.regs_mut().set_reg_of_index(reg as u8, val as u64);
                     AxVCpuExitReason::Nothing
                 } else {
                     AxVCpuExitReason::MmioRead {
@@ -1916,6 +1945,68 @@ impl AxArchVCpu for SvmVcpu {
                             );
                             AxVCpuExitReason::IoWrite { port, width, data }
                         }
+                    } else if self.filter_pci_config
+                        && (PCI_CONFIG_ADDRESS..PCI_CONFIG_DATA + 4).contains(&port.0)
+                    {
+                        self.set_rip(exit_info.exit_info_2);
+                        let value = self.regs().rax;
+                        let bits = width.size() * 8;
+                        if is_in {
+                            let result = if port == Port(PCI_CONFIG_ADDRESS) {
+                                self.pci_config_address as u64
+                            } else if ((self.pci_config_address >> 16) & 0xff) as u8
+                                <= self.pci_config_max_bus
+                            {
+                                match width {
+                                    AccessWidth::Byte => unsafe {
+                                        PortReadOnly::<u8>::new(port.0).read() as u64
+                                    },
+                                    AccessWidth::Word => unsafe {
+                                        PortReadOnly::<u16>::new(port.0).read() as u64
+                                    },
+                                    AccessWidth::Dword => unsafe {
+                                        PortReadOnly::<u32>::new(port.0).read() as u64
+                                    },
+                                    AccessWidth::Qword => u64::MAX,
+                                }
+                            } else {
+                                u64::MAX
+                            };
+                            let mask = if bits == 64 {
+                                u64::MAX
+                            } else {
+                                (1u64 << bits) - 1
+                            };
+                            self.regs_mut().rax = (self.regs().rax & !mask) | (result & mask);
+                        } else if port == Port(PCI_CONFIG_ADDRESS) {
+                            let mask = if bits == 32 {
+                                u32::MAX
+                            } else {
+                                (1u32 << bits) - 1
+                            };
+                            self.pci_config_address =
+                                (self.pci_config_address & !mask) | ((value as u32) & mask);
+                            unsafe {
+                                PortWriteOnly::<u32>::new(PCI_CONFIG_ADDRESS)
+                                    .write(self.pci_config_address);
+                            }
+                        } else if ((self.pci_config_address >> 16) & 0xff) as u8
+                            <= self.pci_config_max_bus
+                        {
+                            match width {
+                                AccessWidth::Byte => unsafe {
+                                    PortWriteOnly::<u8>::new(port.0).write(value as u8)
+                                },
+                                AccessWidth::Word => unsafe {
+                                    PortWriteOnly::<u16>::new(port.0).write(value as u16)
+                                },
+                                AccessWidth::Dword => unsafe {
+                                    PortWriteOnly::<u32>::new(port.0).write(value as u32)
+                                },
+                                AccessWidth::Qword => {}
+                            }
+                        }
+                        AxVCpuExitReason::Nothing
                     } else if is_in {
                         self.set_rip(exit_info.exit_info_2);
                         AxVCpuExitReason::IoRead { port, width }

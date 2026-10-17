@@ -91,6 +91,8 @@ pub struct AxVMConfig {
     pass_through_devices: Vec<PassThroughDeviceConfig>,
     excluded_devices: Vec<Vec<String>>,
     pass_through_addresses: Vec<PassThroughAddressConfig>,
+    /// PCI INTx routes also identify the guest-visible passthrough buses.
+    pci_intx_routes: Vec<[u8; 4]>,
     // TODO: improve interrupt passthrough
     spi_list: Vec<u32>,
     interrupt_mode: VMInterruptMode,
@@ -128,6 +130,7 @@ impl From<AxVMCrateConfig> for AxVMConfig {
             pass_through_devices: cfg.devices.passthrough_devices,
             excluded_devices: cfg.devices.excluded_devices,
             pass_through_addresses: cfg.devices.passthrough_addresses,
+            pci_intx_routes: cfg.devices.pci_intx_routes,
             spi_list: Vec::new(),
             interrupt_mode: cfg.devices.interrupt_mode,
         }
@@ -188,6 +191,7 @@ impl AxVMConfig {
             pass_through_devices: Vec::new(),
             excluded_devices: Vec::new(),
             pass_through_addresses: host_controlled_passthrough_addresses(),
+            pci_intx_routes: Vec::new(),
             spi_list: Vec::new(),
             interrupt_mode: VMInterruptMode::NoIrq,
         }
@@ -248,6 +252,11 @@ impl AxVMConfig {
     /// Returns the list of passthrough address configurations.
     pub fn pass_through_addresses(&self) -> &Vec<PassThroughAddressConfig> {
         &self.pass_through_addresses
+    }
+
+    /// Returns PCI INTx routes declared for this VM.
+    pub fn pci_intx_routes(&self) -> &Vec<[u8; 4]> {
+        &self.pci_intx_routes
     }
     // /// Returns configurations related to VM memory regions.
     // pub fn memory_regions(&self) -> Vec<VmMemConfig> {

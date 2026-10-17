@@ -550,6 +550,10 @@ pub struct VMDevicesConfig {
     /// we would like to pass through address
     #[serde(default)]
     pub passthrough_addresses: Vec<PassThroughAddressConfig>,
+    /// x86 MP-table PCI INTx routes: [bus, device, pin (1..=4), guest GSI].
+    /// An empty list preserves the default virtual-platform routing.
+    #[serde(default)]
+    pub pci_intx_routes: Vec<[u8; 4]>,
 }
 
 /// The configuration structure for the guest VM serialized from a toml file provided by user,

@@ -147,6 +147,30 @@ impl VirtualApicRegs {
         self.apic_page.start_paddr()
     }
 
+    /// Complete the side effects of a write already stored by VMX in the APIC page.
+    pub fn handle_apic_write(&mut self, offset: usize) -> AxResult<usize> {
+        if offset >= 0x400 || offset & 0xf != 0 {
+            return Err(ax_err_type!(InvalidInput, "invalid APIC-write offset"));
+        }
+        // SAFETY: The offset is aligned and lies within the owned 4 KiB APIC
+        // page. The vCPU has exited, so hardware no longer writes this page.
+        let value = unsafe {
+            self.virtual_lapic
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<u32>()
+                .read_volatile()
+        } as usize;
+        let register = crate::consts::xapic::xapic_mmio_access_reg_offset(
+            axaddrspace::GuestPhysAddr::from(DEFAULT_APIC_BASE + offset),
+        );
+        // A normal emulated read may return a software shadow (notably LVT),
+        // so use the value hardware wrote, then reuse normal write semantics.
+        self.handle_write(register, value, AccessWidth::Dword)?;
+        Ok(value)
+    }
+
     /// Gets the APIC base MSR value.
     #[allow(dead_code)]
     pub fn apic_base(&self) -> u64 {

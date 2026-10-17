@@ -251,6 +251,15 @@ impl AxVM {
         self.inner_mut.lock().config.interrupt_mode()
     }
 
+    /// Returns the guest PCI INTx routes declared for passthrough devices.
+    ///
+    /// The host IRQ forwarding layer uses these routes to enable only the
+    /// physical IOAPIC inputs that belong to assigned devices. Enabling every
+    /// IOAPIC input would unmask unrelated board interrupts on bare metal.
+    pub fn pci_intx_routes(&self) -> Vec<[u8; 4]> {
+        self.inner_mut.lock().config.pci_intx_routes().clone()
+    }
+
     /// Sets up the VM before booting.
     pub fn init(&self) -> AxResult {
         let mut inner_mut = self.inner_mut.lock();
@@ -464,6 +473,15 @@ impl AxVM {
                     .emu_devices()
                     .iter()
                     .any(|dev| dev.emu_type == axvmconfig::EmulatedDeviceType::Console),
+                filter_pci_config: !inner_mut.config.host_controlled()
+                    && !inner_mut.config.pci_intx_routes().is_empty(),
+                pci_config_max_bus: inner_mut
+                    .config
+                    .pci_intx_routes()
+                    .iter()
+                    .map(|route| route[0])
+                    .max()
+                    .unwrap_or(0),
                 expose_kvm_hypervisor: inner_mut.config.host_controlled(),
             };
 
@@ -786,7 +804,21 @@ impl AxVM {
                         reg_width,
                         signed_ext,
                     } => {
-                        let raw = self.get_devices().handle_mmio_read(addr, width)?;
+                        let raw = if self.get_devices().find_mmio_dev(addr).is_some() {
+                            self.get_devices().handle_mmio_read(addr, width)?
+                        } else if cfg!(target_arch = "x86_64")
+                            && self.interrupt_mode() == VMInterruptMode::Passthrough
+                        {
+                            // A static passthrough guest can still probe MMIO
+                            // windows belonging to unrelated PCI functions that
+                            // remain visible through legacy config space. Treat
+                            // an absent device as an empty PCI resource instead
+                            // of panicking the host; assigned BARs are still
+                            // backed by their configured passthrough mapping.
+                            width_mask(width)
+                        } else {
+                            self.get_devices().handle_mmio_read(addr, width)?
+                        };
                         let masked = raw & width_mask(width);
                         let val = if signed_ext {
                             sign_extend_value(masked, width)
@@ -797,8 +829,16 @@ impl AxVM {
                         continue;
                     }
                     AxVCpuExitReason::MmioWrite { addr, width, data } => {
-                        self.get_devices()
-                            .handle_mmio_write(addr, width, data as usize)?;
+                        if self.get_devices().find_mmio_dev(addr).is_some() {
+                            self.get_devices()
+                                .handle_mmio_write(addr, width, data as usize)?;
+                        } else if cfg!(target_arch = "x86_64")
+                            && self.interrupt_mode() == VMInterruptMode::Passthrough
+                        {
+                        } else {
+                            self.get_devices()
+                                .handle_mmio_write(addr, width, data as usize)?;
+                        }
                         continue;
                     }
                     AxVCpuExitReason::IoRead { port, width } => {

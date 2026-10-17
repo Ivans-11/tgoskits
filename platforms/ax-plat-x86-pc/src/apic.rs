@@ -1,12 +1,14 @@
 //! Advanced Programmable Interrupt Controller (APIC) support.
 
 use core::mem::MaybeUninit;
+#[cfg(feature = "irq")]
+use core::sync::atomic::AtomicUsize;
 
 use ax_kspin::SpinNoIrq;
 use ax_lazyinit::LazyInit;
 use ax_plat::mem::{PhysAddr, pa, phys_to_virt};
 use x2apic::{
-    ioapic::{IoApic, IrqFlags},
+    ioapic::{IoApic, IrqFlags, RedirectionTableEntry},
     lapic::{LocalApic, LocalApicBuilder, xapic_base},
 };
 use x86_64::instructions::port::Port;
@@ -25,6 +27,8 @@ const IO_APIC_VECTOR_OFFSET: u8 = 0x20;
 static mut LOCAL_APIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
 static mut IS_X2APIC: bool = false;
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
+#[cfg(feature = "irq")]
+static UNHANDLED_IRQ_COUNTS: [AtomicUsize; 256] = [const { AtomicUsize::new(0) }; 256];
 
 /// Enables or disables the given IRQ.
 #[cfg(feature = "irq")]
@@ -37,6 +41,13 @@ pub fn set_enable(vector: usize, enabled: bool) {
                 return;
             }
             if enabled {
+                // PCI INTx is an active-low, level-triggered signal.  The
+                // forwarding registrations used by the passthrough path
+                // represent physical IOAPIC inputs, so do not leave the
+                // entry in x2APIC's edge/high reset state.
+                let mut entry = io_apic.table_entry(irq);
+                entry.set_flags(entry.flags() | IrqFlags::LEVEL_TRIGGERED | IrqFlags::LOW_ACTIVE);
+                io_apic.set_table_entry(irq, entry);
                 io_apic.enable_irq(irq);
             } else {
                 io_apic.disable_irq(irq);
@@ -111,11 +122,14 @@ pub fn init_primary() {
     info!("Initialize IO APIC...");
     let mut io_apic = unsafe { IoApic::new(phys_to_virt(IO_APIC_BASE).as_usize() as u64) };
     unsafe {
-        io_apic.init(IO_APIC_VECTOR_OFFSET);
         let max_entry = io_apic.max_table_entry();
         for irq in 0..=max_entry {
-            let mut entry = io_apic.table_entry(irq);
-            entry.set_flags(entry.flags() | IrqFlags::MASKED);
+            // x2apic 0.5's init() ORs the vector into the old entry. Firmware
+            // may leave nonzero vectors and delivery modes behind, so replace
+            // the complete route and keep it masked until a handler is ready.
+            let mut entry = RedirectionTableEntry::default();
+            entry.set_vector(IO_APIC_VECTOR_OFFSET.checked_add(irq).unwrap());
+            entry.set_flags(IrqFlags::MASKED);
             io_apic.set_table_entry(irq, entry);
         }
         debug!(
@@ -147,8 +161,11 @@ mod irq_impl {
         /// Handles the IRQ.
         fn handle(vector: usize) -> Option<usize> {
             trace!("IRQ {}", vector);
-            if !dispatch_irq(vector).handled {
-                warn!("Unhandled IRQ {vector}");
+            if !dispatch_irq(vector).handled
+                && let Some(count) = super::UNHANDLED_IRQ_COUNTS.get(vector)
+                && count.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 0
+            {
+                warn!("Unhandled IRQ {vector}; further messages suppressed");
             }
             unsafe { super::local_apic().end_of_interrupt() };
             Some(vector)
