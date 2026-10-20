@@ -167,7 +167,7 @@ impl VmxVcpu {
                 limit: VmcsGuest32::IDTR_LIMIT.read()? as u16,
             },
             cr0: self.cr(0) as u64,
-            cr2: 0,
+            cr2: self.guest_cr2,
             cr3: self.cr(3) as u64,
             cr4: self.cr(4) as u64,
             cr8: 0,
@@ -181,6 +181,7 @@ impl VmxVcpu {
 
     pub(super) fn decode_kvm_sregs(&mut self, buf: &[u8]) -> AxResult {
         let sregs = KvmSregs::decode(buf).map_err(map_kvm_uapi_error)?;
+        self.guest_cr2 = sregs.cr2;
         write_segment(
             VmcsGuest16::CS_SELECTOR,
             VmcsGuestNW::CS_BASE,

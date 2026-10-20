@@ -122,6 +122,7 @@ fn switched_msr_slot(index: u32) -> Option<usize> {
 }
 pub const X86_APIC_ACCESS_GPA: usize = 0xfee0_0000;
 
+mod fp_state;
 mod kvm_regs;
 
 #[derive(PartialEq, Eq, Debug)]
@@ -179,6 +180,9 @@ pub struct VmxVcpu {
     host_stack_top: u64,
     /// Host RFLAGS captured immediately before VM entry.
     host_rflags: u64,
+    /// CR2 is not part of the VMCS and must survive host faults and scheduling.
+    guest_cr2: u64,
+    host_cr2: u64,
 
     // The order of the following fields is not mandatory.
 
@@ -248,6 +252,7 @@ pub struct VmxVcpu {
     // Extra states
     /// The XState of the VCpu. Both host and guest.
     xstate: XState,
+    fp_state: fp_state::FpState,
 
     // Tracing-related fields
     #[cfg(feature = "tracing")]
@@ -263,6 +268,8 @@ impl VmxVcpu {
             guest_regs: GeneralRegisters::default(),
             host_stack_top: 0,
             host_rflags: 0,
+            guest_cr2: 0,
+            host_cr2: 0,
             launched: false,
             entry: None,
             entry_dirty: false,
@@ -294,6 +301,7 @@ impl VmxVcpu {
             guest_dr6: 0xffff_0ff0,
             host_dr6: 0,
             xstate: XState::new(),
+            fp_state: fp_state::FpState::new(),
             #[cfg(feature = "tracing")]
             guest_regs_exiting: GeneralRegisters::default(),
         };
@@ -369,13 +377,16 @@ impl VmxVcpu {
     }
 
     /// Run the guest. It returns when a vm-exit happens and returns the vm-exit if it cannot be handled by this [`VmxVcpu`] itself.
-    pub fn inner_run(&mut self) -> Option<VmxExitInfo> {
+    fn inner_run(&mut self, first_entry: bool) -> Option<VmxExitInfo> {
         self.inject_pending_events().unwrap();
 
         // Run guest. Host syscall MSRs are prepared by `run()` once for the
         // whole bounded internal-exit batch; callers of this low-level helper
         // must not rely on it to refresh host state independently.
         self.load_guest_xstate();
+        if first_entry {
+            self.fp_state.restore_guest();
+        }
 
         #[cfg(feature = "tracing")]
         {
@@ -938,7 +949,11 @@ impl VmxVcpu {
             0,
         )?;
 
-        // Switch to 64-bit host, acknowledge interrupt info, switch IA32_PAT/IA32_EFER on VM exit.
+        // Preserve the preemption timer's remaining count across ordinary
+        // exits. Otherwise frequent exits reload the initial budget at every
+        // entry and can indefinitely postpone the timer-processing poll point.
+        // Only the preemption-timer exit handler replenishes that budget.
+        // Also switch to 64-bit host, acknowledge IRQs and switch PAT/EFER.
         use ExitControls as ExitCtrl;
         vmcs::set_control(
             VmcsControl32::VMEXIT_CONTROLS,
@@ -949,7 +964,8 @@ impl VmxVcpu {
                 | ExitCtrl::SAVE_IA32_PAT
                 | ExitCtrl::LOAD_IA32_PAT
                 | ExitCtrl::SAVE_IA32_EFER
-                | ExitCtrl::LOAD_IA32_EFER)
+                | ExitCtrl::LOAD_IA32_EFER
+                | ExitCtrl::SAVE_VMX_PREEMPTION_TIMER)
                 .bits(),
             0,
         )?;
@@ -1112,12 +1128,21 @@ macro_rules! vmx_entry_with {
             "cli",
             save_regs_to_stack!(),                      // save host status
             "mov    [rdi + {host_stack_size}], rsp",    // save current RSP to Vcpu::host_stack_top
+            "mov    rax, cr2",
+            "mov    [rdi + {host_cr2}], rax",
+            "cmp    rax, [rdi + {guest_cr2}]",
+            "je     2f",
+            "mov    rax, [rdi + {guest_cr2}]",
+            "mov    cr2, rax",
+            "2:",
             "mov    rsp, rdi",                          // set RSP to guest regs area
             restore_regs_from_stack!(),                 // restore guest status
             $instr,                                     // let's go!
             "jmp    {failed}",
             host_stack_size = const size_of::<GeneralRegisters>(),
             host_rflags = const size_of::<GeneralRegisters>() + size_of::<u64>(),
+            guest_cr2 = const core::mem::offset_of!(VmxVcpu, guest_cr2),
+            host_cr2 = const core::mem::offset_of!(VmxVcpu, host_cr2),
             failed = sym Self::vmx_entry_failed,
             // options(noreturn),
         )
@@ -1156,10 +1181,19 @@ impl VmxVcpu {
         naked_asm!(
             "cli",                                  // keep host IRQs off until host xstate is restored
             save_regs_to_stack!(),                  // save guest status, after this, rsp points to the `VmxVcpu`
+            "mov    rax, cr2",
+            "mov    [rsp + {guest_cr2}], rax",
+            "cmp    rax, [rsp + {host_cr2}]",
+            "je     2f",
+            "mov    rax, [rsp + {host_cr2}]",
+            "mov    cr2, rax",
+            "2:",
             "mov    rsp, [rsp + {host_stack_top}]", // set RSP to Vcpu::host_stack_top
             restore_regs_from_stack!(),             // restore host status
             "ret",
             host_stack_top = const size_of::<GeneralRegisters>(),
+            guest_cr2 = const core::mem::offset_of!(VmxVcpu, guest_cr2),
+            host_cr2 = const core::mem::offset_of!(VmxVcpu, host_cr2),
         );
     }
 
@@ -2366,15 +2400,29 @@ impl AxArchVCpu for VmxVcpu {
         // be switched while this batch executes. Reading these MSRs for every
         // internally handled exit is therefore redundant and expensive.
         self.prepare_msr_switch();
+        // Keep guest FP registers live throughout the IRQ-disabled batch.
+        // The internal handlers must not use SIMD/FPU instructions. Restore
+        // host state before any upper-layer handling or scheduling is possible.
+        self.fp_state.save_host();
         let mut inner_exit = None;
-        for _ in 0..MAX_BUILTIN_EXITS_PER_RUN {
-            inner_exit = self.inner_run();
+        let mut cpu_up_exit = None;
+        for entry in 0..MAX_BUILTIN_EXITS_PER_RUN {
+            inner_exit = self.inner_run(entry == 0);
             if inner_exit.is_some() {
                 break;
             }
             if let Some(exit) = self.take_pending_cpu_up_exit() {
-                return Ok(exit);
+                cpu_up_exit = Some(exit);
+                break;
             }
+        }
+        // XSAVE must use the guest's XCR0, which may have changed in the batch.
+        self.xstate.switch_to_guest();
+        self.fp_state.save_guest();
+        self.xstate.switch_to_host();
+        self.fp_state.restore_host();
+        if let Some(exit) = cpu_up_exit {
+            return Ok(exit);
         }
         match inner_exit {
             Some(exit_info) => {
