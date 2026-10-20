@@ -30,7 +30,8 @@ use self::vectors::*;
 pub(super) mod vectors {
     pub const APIC_TIMER_VECTOR: u8 = 0xf0;
     pub const APIC_SPURIOUS_VECTOR: u8 = 0xf1;
-    pub const APIC_ERROR_VECTOR: u8 = 0xf2;
+    // Keep 0xf2 available for posted-interrupt notifications.
+    pub const APIC_ERROR_VECTOR: u8 = 0xf4;
 }
 
 const IO_APIC_BASE: PhysAddr = pa!(0xFEC0_0000);
