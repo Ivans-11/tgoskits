@@ -370,13 +370,8 @@ pub(in crate::kvm) fn get_lapic(
     control_file: api_control::ControlFileId,
     arg: usize,
 ) -> AxResult<isize> {
-    let lapic = {
-        let control_files = CONTROL_FILES.lock();
-        let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
-            return ax_err!(NotFound);
-        };
-        vcpu.lapic.clone()
-    };
+    let mut lapic = [0u8; abi::KVM_X86_LAPIC_STATE_SIZE as usize];
+    get_vcpu(control_file)?.get_kvm_lapic(&mut lapic)?;
     api_control::copy_to_user(arg, &lapic)?;
     Ok(0)
 }
@@ -385,13 +380,9 @@ pub(in crate::kvm) fn set_lapic(
     control_file: api_control::ControlFileId,
     arg: usize,
 ) -> AxResult<isize> {
-    let mut bytes = vec![0u8; abi::KVM_X86_LAPIC_STATE_SIZE as usize];
+    let mut bytes = [0u8; abi::KVM_X86_LAPIC_STATE_SIZE as usize];
     api_control::copy_from_user(arg, &mut bytes)?;
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    vcpu.lapic = bytes;
+    get_vcpu(control_file)?.set_kvm_lapic(&bytes)?;
     Ok(0)
 }
 

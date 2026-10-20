@@ -130,7 +130,6 @@ pub(in crate::kvm) fn create_vcpu_file(
                 xsave: vec![0; abi::KVM_X86_XSAVE_SIZE as usize],
                 xcrs: default_xcrs(),
                 signal_mask: Vec::new(),
-                lapic: vec![0; abi::KVM_X86_LAPIC_STATE_SIZE as usize],
                 vapic_addr: None,
                 operation_lock: VcpuOperationLock::new(),
                 #[cfg(target_arch = "aarch64")]

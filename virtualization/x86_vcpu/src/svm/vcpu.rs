@@ -2209,6 +2209,14 @@ impl AxArchVCpu for SvmVcpu {
         self.encode_kvm_regs(buf)
     }
 
+    fn get_kvm_lapic(&self, buf: &mut [u8]) -> AxResult {
+        self.vlapic.get_state(buf)
+    }
+
+    fn set_kvm_lapic(&mut self, buf: &[u8]) -> AxResult {
+        self.vlapic.set_state(buf)
+    }
+
     fn set_kvm_regs(&mut self, buf: &[u8]) -> AxResult {
         self.decode_kvm_regs(buf)
     }

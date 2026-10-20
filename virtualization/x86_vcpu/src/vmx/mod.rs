@@ -15,12 +15,16 @@
 mod definitions;
 mod instructions;
 mod percpu;
+#[cfg(feature = "posted-interrupt")]
+mod posted_interrupt;
 mod structs;
 mod vcpu;
 mod vmcs;
 
 use ax_errno::ax_err_type;
 use axaddrspace::HostPhysAddr;
+#[cfg(feature = "posted-interrupt")]
+pub use posted_interrupt::try_post_interrupt;
 use x86::vmx::vmcs::control::{PrimaryControls, SecondaryControls};
 use x86_vlapic::EmulatedLocalApic;
 

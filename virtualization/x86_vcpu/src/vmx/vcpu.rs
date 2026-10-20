@@ -232,6 +232,10 @@ pub struct VmxVcpu {
     // Interrupt-related fields
     /// Pending events to be injected to the guest.
     pending_events: VecDeque<PendingEvent>,
+    #[cfg(feature = "posted-interrupt")]
+    posted_interrupt: Option<alloc::sync::Arc<super::posted_interrupt::PostedInterrupt>>,
+    #[cfg(feature = "posted-interrupt")]
+    vm_id: VMId,
     /// Emulated Local APIC.
     vlapic: EmulatedLocalApic,
     /// Guest-visible IA32_TSC_ADJUST value.
@@ -292,6 +296,10 @@ impl VmxVcpu {
             msr_switch: VmxMsrSwitch::new(SWITCHED_MSR_INDICES)?,
             msr_host_task: None,
             pending_events: VecDeque::with_capacity(8),
+            #[cfg(feature = "posted-interrupt")]
+            posted_interrupt: None,
+            #[cfg(feature = "posted-interrupt")]
+            vm_id,
             vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
             tsc_adjust: 0,
             misc_enable: 1,
@@ -400,6 +408,10 @@ impl VmxVcpu {
             }
         }
 
+        #[cfg(feature = "posted-interrupt")]
+        if let Some(pi) = &self.posted_interrupt {
+            pi.enter(self.vlapic.posted_edge_masks());
+        }
         unsafe {
             if self.launched {
                 self.vmx_resume();
@@ -410,6 +422,20 @@ impl VmxVcpu {
                     .unwrap();
 
                 self.vmx_launch();
+            }
+        }
+        #[cfg(feature = "posted-interrupt")]
+        if let Some(pi) = &self.posted_interrupt
+            && let Some(pending) = pi.exit()
+        {
+            self.vlapic.sync_hardware_isr();
+            pi.finish_sync(VmcsGuest16::INTERRUPT_STATUS.read().unwrap());
+            for (word, mut bits) in pending.into_iter().enumerate() {
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    self.queue_event((word * 64 + bit) as u8, None);
+                    bits &= bits - 1;
+                }
             }
         }
         self.msr_switch.sync_guest_values_after_exit();
@@ -877,14 +903,33 @@ impl VmxVcpu {
         let vid_supported = apic_register_virtualization_supported
             && (secondary_allowed1 & SecondaryControls::VIRTUAL_INTERRUPT_DELIVERY.bits()) != 0;
 
+        #[cfg(feature = "posted-interrupt")]
+        if vid_supported && super::posted_interrupt::available() && self.posted_interrupt.is_none()
+        {
+            self.posted_interrupt = Some(super::posted_interrupt::PostedInterrupt::new(
+                self.vm_id,
+                self.vcpu_id,
+            )?);
+        }
+        let pin_set = (PinCtrl::NMI_EXITING
+            | PinCtrl::EXTERNAL_INTERRUPT_EXITING
+            | PinCtrl::VMX_PREEMPTION_TIMER)
+            .bits();
+        #[cfg(feature = "posted-interrupt")]
+        let pin_set = if let Some(pi) = &self.posted_interrupt {
+            super::vmcs::VmcsControl16::POSTED_INTERRUPT_NOTIFICATION_VECTOR
+                .write(super::posted_interrupt::NOTIFICATION_VECTOR as u16)?;
+            VmcsControl64::POSTED_INTERRUPT_DESC_ADDR.write(pi.paddr())?;
+            pin_set | (1 << 7)
+        } else {
+            pin_set
+        };
+
         vmcs::set_control(
             VmcsControl32::PINBASED_EXEC_CONTROLS,
             Msr::IA32_VMX_TRUE_PINBASED_CTLS,
             Msr::IA32_VMX_PINBASED_CTLS.read() as u32,
-            (PinCtrl::NMI_EXITING
-                | PinCtrl::EXTERNAL_INTERRUPT_EXITING
-                | PinCtrl::VMX_PREEMPTION_TIMER)
-                .bits(),
+            pin_set,
             0,
         )?;
 
@@ -1232,6 +1277,12 @@ impl VmxVcpu {
                 if event.vector >= 32 {
                     self.vlapic
                         .accept_interrupt(event.vector, event.level_triggered);
+                    #[cfg(feature = "posted-interrupt")]
+                    if self.posted_interrupt.is_some() {
+                        let svi = self.vlapic.sync_hardware_isr() as u16;
+                        let status = VmcsGuest16::INTERRUPT_STATUS.read()?;
+                        VmcsGuest16::INTERRUPT_STATUS.write((status & 0xff) | (svi << 8))?;
+                    }
                 }
                 self.pending_events.pop_front();
             } else {
@@ -2665,9 +2716,20 @@ impl AxArchVCpu for VmxVcpu {
                             self.handle_vmx_preemption_timer()?;
                             AxVCpuExitReason::PreemptionTimer
                         }
-                        VmxExitReason::VIRTUALIZED_EOI => AxVCpuExitReason::InterruptEnd {
-                            vector: self.vlapic.handle_eoi(),
-                        },
+                        VmxExitReason::VIRTUALIZED_EOI => {
+                            #[cfg(feature = "posted-interrupt")]
+                            if self.posted_interrupt.is_some() {
+                                // Hardware already cleared VISR and updated SVI.
+                                // Replaying a software EOI would clear another ISR bit.
+                                self.vlapic.sync_hardware_isr();
+                                return Ok(AxVCpuExitReason::InterruptEnd {
+                                    vector: Some(VmcsReadOnlyNW::EXIT_QUALIFICATION.read()? as u8),
+                                });
+                            }
+                            AxVCpuExitReason::InterruptEnd {
+                                vector: self.vlapic.handle_eoi(),
+                            }
+                        }
                         VmxExitReason::APIC_WRITE => {
                             // Trap-like exit: hardware has stored the value and
                             // advanced RIP, but software device side effects
@@ -2861,6 +2923,14 @@ impl AxArchVCpu for VmxVcpu {
 
     fn get_kvm_regs(&self, buf: &mut [u8]) -> AxResult {
         self.encode_kvm_regs(buf)
+    }
+
+    fn get_kvm_lapic(&self, buf: &mut [u8]) -> AxResult {
+        self.vlapic.get_state(buf)
+    }
+
+    fn set_kvm_lapic(&mut self, buf: &[u8]) -> AxResult {
+        self.vlapic.set_state(buf)
     }
 
     fn set_kvm_regs(&mut self, buf: &[u8]) -> AxResult {

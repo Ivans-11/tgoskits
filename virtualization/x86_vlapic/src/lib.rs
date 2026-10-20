@@ -65,6 +65,16 @@ pub use vioapic::{EmulatedIoApic, IoApicInterrupt};
 pub use vlapic::VlapicCpuUp;
 
 impl EmulatedLocalApic {
+    /// Read the KVM-compatible 1024-byte local APIC register image.
+    pub fn get_state(&self, buf: &mut [u8]) -> AxResult {
+        self.get_vlapic_regs().get_state(buf)
+    }
+
+    /// Restore a register image while the owning vCPU is stopped and locked.
+    pub fn set_state(&self, buf: &[u8]) -> AxResult {
+        self.get_mut_vlapic_regs().set_state(buf)
+    }
+
     /// Create a new `EmulatedLocalApic`.
     pub fn new(vm_id: VMId, vcpu_id: VCpuId) -> Self {
         EmulatedLocalApic {
@@ -136,6 +146,16 @@ impl EmulatedLocalApic {
     /// Process a guest EOI and return the vector that needs an IO APIC EOI broadcast.
     pub fn handle_eoi(&self) -> Option<u8> {
         self.get_mut_vlapic_regs().handle_eoi()
+    }
+
+    /// Refresh the software ISR priority after hardware APICv updates.
+    pub fn sync_hardware_isr(&self) -> u8 {
+        self.get_mut_vlapic_regs().sync_hardware_isr()
+    }
+
+    /// Return edge vectors eligible for posting in the current LAPIC state.
+    pub fn posted_edge_masks(&self) -> [u64; 4] {
+        self.get_vlapic_regs().posted_edge_masks()
     }
 
     /// Apply the side effects of a hardware-assisted APIC write after VM exit.

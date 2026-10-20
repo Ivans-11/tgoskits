@@ -23,6 +23,9 @@ extern crate log;
 
 extern crate alloc;
 
+#[cfg(feature = "posted-interrupt")]
+pub use vmx::try_post_interrupt;
+
 #[cfg(all(feature = "vmx", feature = "svm"))]
 compile_error!("features `vmx` and `svm` are mutually exclusive");
 

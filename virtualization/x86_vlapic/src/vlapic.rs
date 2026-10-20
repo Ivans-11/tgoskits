@@ -98,6 +98,74 @@ pub struct VlapicCpuUp {
 }
 
 impl VirtualApicRegs {
+    pub fn get_state(&self, buf: &mut [u8]) -> AxResult {
+        if buf.len() != 1024 {
+            return Err(AxError::InvalidInput);
+        }
+        buf.fill(0);
+        for offset in (0..1024).step_by(16) {
+            // Each APIC register occupies the first DWORD of a 16-byte slot.
+            // The caller holds the stopped vCPU; hardware cannot update it.
+            let value = unsafe {
+                self.virtual_lapic
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset)
+                    .cast::<u32>()
+                    .read_volatile()
+            };
+            buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        buf[0x390..0x394].copy_from_slice(&self.virtual_timer.read_ccr().to_le_bytes());
+        Ok(())
+    }
+
+    pub fn set_state(&mut self, buf: &[u8]) -> AxResult {
+        if buf.len() != 1024 {
+            return Err(AxError::InvalidInput);
+        }
+        self.virtual_timer.stop_timer()?;
+        for offset in (0..1024).step_by(16) {
+            let value = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+            // Restore storage directly: restoring ICR/EOI must not send IPIs
+            // or acknowledge interrupts as an emulated MMIO write would.
+            unsafe {
+                self.virtual_lapic
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset)
+                    .cast::<u32>()
+                    .write_volatile(value);
+            }
+        }
+        self.svr_last = self.regs().SVR.extract();
+        self.esr_pending.set(0);
+        self.sync_hardware_isr();
+        self.write_ldr();
+        self.write_dfr();
+        for offset in [
+            ApicRegOffset::LvtTimer,
+            ApicRegOffset::LvtThermal,
+            ApicRegOffset::LvtPmc,
+            ApicRegOffset::LvtLint0,
+            ApicRegOffset::LvtLint1,
+            ApicRegOffset::LvtErr,
+            ApicRegOffset::LvtCMCI,
+        ] {
+            self.write_lvt(offset)?;
+        }
+        self.write_dcr()?;
+        self.write_icrtmr()?;
+        if !self
+            .regs()
+            .SVR
+            .is_set(SPURIOUS_INTERRUPT_VECTOR::APICSoftwareEnableDisable)
+        {
+            self.virtual_timer.stop_timer()?;
+        }
+        Ok(())
+    }
+
     /// Create new virtual-APIC registers by allocating a 4-KByte page for the virtual-APIC page.
     pub fn new(vm_id: VMId, vcpu_id: VCpuId) -> Self {
         let apic_frame = PhysFrame::alloc_zero().expect("allocate virtual-APIC page failed");
@@ -431,6 +499,29 @@ impl VirtualApicRegs {
         });
         self.isrv = self.find_isrv();
         self.update_ppr();
+    }
+
+    /// Refresh software priority state after hardware updates the virtual ISR.
+    pub fn sync_hardware_isr(&mut self) -> u8 {
+        self.isrv = self.find_isrv();
+        self.update_ppr();
+        self.isrv as u8
+    }
+
+    /// Edge vectors eligible for hardware posting in the current LAPIC state.
+    pub fn posted_edge_masks(&self) -> [u64; 4] {
+        if !self.is_xapic_enabled()
+            || !self
+                .regs()
+                .SVR
+                .is_set(SPURIOUS_INTERRUPT_VECTOR::APICSoftwareEnableDisable)
+        {
+            return [0; 4];
+        }
+        core::array::from_fn(|i| {
+            !((self.regs().TMR[i * 2].get() as u64)
+                | ((self.regs().TMR[i * 2 + 1].get() as u64) << 32))
+        })
     }
 
     /// Takes the most recent startup IPI request, if any.

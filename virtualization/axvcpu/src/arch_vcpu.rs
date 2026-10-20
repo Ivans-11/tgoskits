@@ -161,6 +161,16 @@ pub trait AxArchVCpu: Sized {
         Err(AxError::Unsupported)
     }
 
+    /// Writes the x86 local APIC register image into `buf`.
+    fn get_kvm_lapic(&self, _buf: &mut [u8]) -> AxResult {
+        Err(AxError::Unsupported)
+    }
+
+    /// Restores the x86 local APIC register image from `buf`.
+    fn set_kvm_lapic(&mut self, _buf: &[u8]) -> AxResult {
+        Err(AxError::Unsupported)
+    }
+
     /// Writes the KVM-compatible general register state into `buf`.
     fn get_kvm_regs(&self, _buf: &mut [u8]) -> AxResult {
         Err(AxError::Unsupported)

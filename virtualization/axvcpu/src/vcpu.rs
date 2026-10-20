@@ -364,6 +364,16 @@ impl<A: AxArchVCpu> AxVCpu<A> {
         self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_debugregs(buf))
     }
 
+    /// Reads the local APIC while holding the bound vCPU exclusively.
+    pub fn get_kvm_lapic(&self, buf: &mut [u8]) -> AxResult {
+        self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_lapic(buf))
+    }
+
+    /// Restores the local APIC while holding the bound vCPU exclusively.
+    pub fn set_kvm_lapic(&self, buf: &[u8]) -> AxResult {
+        self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_lapic(buf))
+    }
+
     /// Writes the KVM-compatible general register state into `buf`.
     pub fn get_kvm_regs(&self, buf: &mut [u8]) -> AxResult {
         self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_regs(buf))

@@ -110,6 +110,13 @@ fn target_matches(target: VcpuInterruptTarget, vm: &VMRef, vcpu_id: usize) -> bo
 /// immediately. Otherwise it is queued to the static vCPU task model, falling
 /// back to the KVM host-control vCPU fd model when the VM is control-owned.
 pub(crate) fn deliver_interrupt(route: InterruptRoute) {
+    #[cfg(all(target_arch = "x86_64", feature = "posted-interrupt"))]
+    if route.interrupt.level == InterruptLineLevel::Assert
+        && route.interrupt.trigger == InterruptTriggerMode::EdgeTriggered
+        && axvm::try_post_interrupt(route.vm_id, route.vcpu_id, route.interrupt.vector)
+    {
+        return;
+    }
     if let Some(context) = crate::context::try_current_vcpu_context()
         && context.vm_id == route.vm_id
         && context.vcpu_id == route.vcpu_id

@@ -131,7 +131,6 @@ pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) xsave: Vec<u8>,
     pub(in crate::kvm) xcrs: Vec<u8>,
     pub(in crate::kvm) signal_mask: Vec<u8>,
-    pub(in crate::kvm) lapic: Vec<u8>,
     pub(in crate::kvm) vapic_addr: Option<u64>,
     pub(in crate::kvm) operation_lock: Arc<VcpuOperationLock>,
     #[cfg(target_arch = "aarch64")]
