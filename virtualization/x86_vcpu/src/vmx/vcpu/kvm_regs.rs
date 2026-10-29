@@ -20,10 +20,7 @@ use crate::{
         KVM_DEBUGREGS_SIZE, KVM_REGS_SIZE, KVM_SREGS_SIZE, KvmDebugregs, KvmDtable, KvmRegs,
         KvmSegment, KvmSregs, map_kvm_uapi_error,
     },
-    vmx::{
-        vmcs,
-        vmcs::{VmcsGuest16, VmcsGuest32, VmcsGuest64, VmcsGuestNW},
-    },
+    vmx::vmcs::{VmcsGuest16, VmcsGuest32, VmcsGuest64, VmcsGuestNW},
 };
 
 impl VmxVcpu {
@@ -74,7 +71,7 @@ impl VmxVcpu {
             r13: regs.r13,
             r14: regs.r14,
             r15: regs.r15,
-            rip: VmcsGuestNW::RIP.read()? as u64,
+            rip: self.rip() as u64,
             rflags: VmcsGuestNW::RFLAGS.read()? as u64,
         }
         .encode(buf)
@@ -100,7 +97,7 @@ impl VmxVcpu {
         regs.r14 = kvm_regs.r14;
         regs.r15 = kvm_regs.r15;
         self.set_stack_pointer(kvm_regs.rsp as usize);
-        VmcsGuestNW::RIP.write(kvm_regs.rip as usize)?;
+        self.set_rip(kvm_regs.rip as usize)?;
         VmcsGuestNW::RFLAGS.write(kvm_regs.rflags as usize)?;
         Ok(())
     }
@@ -253,7 +250,7 @@ impl VmxVcpu {
         self.set_cr(3, sregs.cr3);
         self.set_cr(4, sregs.cr4);
         VmcsGuest64::IA32_EFER.write(sregs.efer)?;
-        vmcs::update_efer()?;
+        self.update_guest_efer()?;
         Ok(())
     }
 }

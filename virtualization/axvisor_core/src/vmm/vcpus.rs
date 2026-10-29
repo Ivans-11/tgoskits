@@ -16,7 +16,7 @@ use alloc::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ax_errno::{AxError, AxResult, ax_err_type};
 use ax_kspin::SpinNoIrq as Mutex;
@@ -43,6 +43,11 @@ const RISCV_S_EXT_VECTOR: usize = (1usize << (usize::BITS - 1)) + 9;
 /// A global map that holds the vCPU task state for each VM.
 static VM_VCPU_TASKS: Mutex<BTreeMap<usize, Arc<VMVCpus>>> = Mutex::new(BTreeMap::new());
 
+struct HaltWakeup {
+    pending: AtomicBool,
+    wait_queue: WaitQueue,
+}
+
 fn get_vm_vcpus(vm_id: usize) -> Option<Arc<VMVCpus>> {
     VM_VCPU_TASKS.lock().get(&vm_id).cloned()
 }
@@ -61,6 +66,7 @@ pub struct VMVCpus {
     // vCPU immediately before entering the guest, so architecture backends do
     // not need to be mutated from a foreign execution context.
     pending_interrupts: Mutex<BTreeMap<usize, VecDeque<InterruptRoute>>>,
+    pending_wakeups: Mutex<BTreeMap<usize, Arc<HaltWakeup>>>,
     /// The number of currently running or halting VCpus. Used to track when the VM is fully
     /// shutdown.
     ///
@@ -86,6 +92,7 @@ impl VMVCpus {
             vcpu_task_list: Mutex::new(BTreeMap::new()),
             vcpu_task_names: Mutex::new(BTreeMap::new()),
             pending_interrupts: Mutex::new(BTreeMap::new()),
+            pending_wakeups: Mutex::new(BTreeMap::new()),
             running_halting_vcpu_count: AtomicUsize::new(0),
         }
     }
@@ -104,6 +111,15 @@ impl VMVCpus {
         self.vcpu_task_list.lock().insert(vcpu_id, vcpu_task);
         self.vcpu_task_names.lock().insert(vcpu_id, task_name);
         self.pending_interrupts.lock().entry(vcpu_id).or_default();
+        if cfg!(target_arch = "x86_64") {
+            self.pending_wakeups.lock().insert(
+                vcpu_id,
+                Arc::new(HaltWakeup {
+                    pending: AtomicBool::new(false),
+                    wait_queue: WaitQueue::new(),
+                }),
+            );
+        }
     }
 
     fn queue_interrupt(&self, route: InterruptRoute) -> AxResult {
@@ -111,6 +127,48 @@ impl VMVCpus {
         let queue = pending.get_mut(&route.vcpu_id).ok_or(AxError::NotFound)?;
         queue.push_back(route);
         Ok(())
+    }
+
+    fn notify_vcpu_wakeup(&self, vcpu_id: usize) {
+        let wakeup = self.pending_wakeups.lock().get(&vcpu_id).cloned();
+        if let Some(wakeup) = wakeup {
+            wakeup.pending.store(true, Ordering::Release);
+            wakeup.wait_queue.wake_one();
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn wait_for_vcpu_wakeup(&self, vcpu_id: usize, poll_ns: &mut u64) {
+        let wakeup = self.pending_wakeups.lock().get(&vcpu_id).cloned();
+        if let Some(wakeup) = wakeup {
+            // Match KVM's bounded, adaptive halt polling: short idle intervals
+            // grow the budget, while long sleeps shrink it back toward zero.
+            const MAX_POLL_NS: u64 = 200_000;
+            const GROW_START_NS: u64 = 10_000;
+            let start = axvisor_api::time::current_time_nanos();
+            while !wakeup.pending.load(Ordering::Acquire)
+                && axvisor_api::time::current_time_nanos().wrapping_sub(start) < *poll_ns
+            {
+                core::hint::spin_loop();
+            }
+            let condition = wakeup.clone();
+            wakeup
+                .wait_queue
+                .wait_until(move || condition.pending.load(Ordering::Acquire));
+            // The wait predicate is non-destructive: a host may evaluate it
+            // repeatedly while enrolling a waiter. Queued IRQs remain durable
+            // until the owning vCPU drains them on its next run-loop iteration.
+            wakeup.pending.store(false, Ordering::Release);
+            let elapsed = axvisor_api::time::current_time_nanos().wrapping_sub(start);
+            if elapsed > MAX_POLL_NS {
+                *poll_ns /= 2;
+                if *poll_ns < GROW_START_NS {
+                    *poll_ns = 0;
+                }
+            } else if elapsed > *poll_ns {
+                *poll_ns = (*poll_ns * 2).clamp(GROW_START_NS, MAX_POLL_NS);
+            }
+        }
     }
 
     fn drain_interrupts(&self, vcpu_id: usize, f: impl FnMut(InterruptRoute)) {
@@ -143,6 +201,10 @@ impl VMVCpus {
     /// Notify all waiting vCPU threads to wake up.
     /// This is useful when shutting down a VM to ensure all vCPUs can check the shutdown flag.
     fn notify_all(&self) {
+        for wakeup in self.pending_wakeups.lock().values() {
+            wakeup.pending.store(true, Ordering::Release);
+            wakeup.wait_queue.wake_one();
+        }
         self.wait_queue.wake_all();
     }
 
@@ -226,10 +288,27 @@ pub(crate) fn notify_all_vcpus(vm_id: usize) {
     }
 }
 
+pub(crate) fn notify_vcpu_wakeup(vm_id: usize, vcpu_id: usize) {
+    if let Some(vm_vcpus) = get_vm_vcpus(vm_id) {
+        vm_vcpus.notify_vcpu_wakeup(vcpu_id);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn wait_for_vcpu_wakeup(vm_id: usize, vcpu_id: usize, poll_ns: &mut u64) {
+    if let Some(vm_vcpus) = get_vm_vcpus(vm_id) {
+        vm_vcpus.wait_for_vcpu_wakeup(vcpu_id, poll_ns);
+    }
+}
+
 pub(crate) fn queue_vcpu_interrupt(route: InterruptRoute) -> AxResult {
     let vm_vcpus = get_vm_vcpus(route.vm_id).ok_or(AxError::NotFound)?;
     vm_vcpus.queue_interrupt(route)?;
-    vm_vcpus.notify_all();
+    if cfg!(target_arch = "x86_64") {
+        vm_vcpus.notify_vcpu_wakeup(route.vcpu_id);
+    } else {
+        vm_vcpus.notify_all();
+    }
     Ok(())
 }
 
@@ -492,6 +571,8 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
     super::devices::x86::enable_ioapic_irq_forwarding(&vm, &vcpu);
     mark_vcpu_running(vm_id);
 
+    #[cfg(target_arch = "x86_64")]
+    let mut halt_poll_ns = 0;
     loop {
         drain_vcpu_interrupts(&vm, &vcpu);
         #[cfg(target_arch = "x86_64")]
@@ -552,7 +633,14 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                             super::devices::x86::inject_pending_serial_irq(&vm, &vcpu);
                         }
                         #[cfg(target_arch = "x86_64")]
-                        continue;
+                        {
+                            // An interrupt can already be latched by the
+                            // backend when HLT exits. Consume it before sleeping.
+                            if !vcpu.has_pending_event() {
+                                wait_for_vcpu_wakeup(vm_id, vcpu_id, &mut halt_poll_ns);
+                            }
+                            continue;
+                        }
                         #[cfg(not(target_arch = "x86_64"))]
                         wait(vm_id)
                     }

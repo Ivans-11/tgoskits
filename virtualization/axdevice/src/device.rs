@@ -676,6 +676,17 @@ impl AxVmDevices {
 
             return emu_dev.handle_read(port, width);
         }
+        // Static x86 VMs intercept unassigned ISA UARTs instead of exposing
+        // the host's Super I/O. An absent UART has a floating (all-ones) bus.
+        #[cfg(target_arch = "x86_64")]
+        if matches!(port.0 & !7, 0x3f8 | 0x2f8 | 0x3e8 | 0x2e8) {
+            return Ok(match width {
+                AccessWidth::Byte => u8::MAX as usize,
+                AccessWidth::Word => u16::MAX as usize,
+                AccessWidth::Dword => u32::MAX as usize,
+                AccessWidth::Qword => usize::MAX,
+            });
+        }
         panic_device_not_found("port", port, true, width);
     }
 
@@ -685,6 +696,10 @@ impl AxVmDevices {
             log_device_io("port", port.0, emu_dev.address_range(), false, width);
 
             return emu_dev.handle_write(port, width, val);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if matches!(port.0 & !7, 0x3f8 | 0x2f8 | 0x3e8 | 0x2e8) {
+            return Ok(());
         }
         panic_device_not_found("port", port, false, width);
     }

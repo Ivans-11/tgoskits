@@ -135,17 +135,20 @@ struct VmxMsrEntry {
 #[derive(Debug)]
 pub struct VmxMsrSwitch<const N: usize> {
     frame: PhysFrame,
+    store_count: usize,
 }
 
 impl<const N: usize> VmxMsrSwitch<N> {
     const ENTRY_LOAD_OFFSET: usize = 0;
-    const EXIT_STORE_OFFSET: usize = N * core::mem::size_of::<VmxMsrEntry>();
-    const EXIT_LOAD_OFFSET: usize = Self::EXIT_STORE_OFFSET * 2;
+    // Hardware writes guest MSRs directly into the next entry's load image.
+    const EXIT_LOAD_OFFSET: usize = N * core::mem::size_of::<VmxMsrEntry>();
 
-    pub fn new(indices: [u32; N]) -> AxResult<Self> {
+    pub fn new(indices: [u32; N], store_count: usize) -> AxResult<Self> {
+        assert!(store_count <= N);
         assert!(Self::EXIT_LOAD_OFFSET + N * core::mem::size_of::<VmxMsrEntry>() <= PAGE_SIZE);
         let switch = Self {
             frame: PhysFrame::alloc_zero()?,
+            store_count,
         };
         for (slot, index) in indices.into_iter().enumerate() {
             let entry = VmxMsrEntry {
@@ -154,14 +157,13 @@ impl<const N: usize> VmxMsrSwitch<N> {
                 value: 0,
             };
             switch.write_entry(Self::ENTRY_LOAD_OFFSET, slot, entry);
-            switch.write_entry(Self::EXIT_STORE_OFFSET, slot, entry);
             switch.write_entry(Self::EXIT_LOAD_OFFSET, slot, entry);
         }
         Ok(switch)
     }
 
-    pub const fn count(&self) -> usize {
-        N
+    pub const fn store_count(&self) -> usize {
+        self.store_count
     }
 
     pub fn entry_load_addr(&self) -> HostPhysAddr {
@@ -169,7 +171,7 @@ impl<const N: usize> VmxMsrSwitch<N> {
     }
 
     pub fn exit_store_addr(&self) -> HostPhysAddr {
-        self.frame.start_paddr() + Self::EXIT_STORE_OFFSET
+        self.entry_load_addr()
     }
 
     pub fn exit_load_addr(&self) -> HostPhysAddr {
@@ -192,11 +194,8 @@ impl<const N: usize> VmxMsrSwitch<N> {
         self.write_entry(Self::EXIT_LOAD_OFFSET, slot, entry);
     }
 
-    pub fn sync_guest_values_after_exit(&self) {
-        for slot in 0..N {
-            let value = self.read_entry(Self::EXIT_STORE_OFFSET, slot).value;
-            self.set_guest_value(slot, value);
-        }
+    pub fn host_value(&self, slot: usize) -> u64 {
+        self.read_entry(Self::EXIT_LOAD_OFFSET, slot).value
     }
 
     fn read_entry(&self, offset: usize, slot: usize) -> VmxMsrEntry {

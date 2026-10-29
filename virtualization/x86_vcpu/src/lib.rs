@@ -39,6 +39,8 @@ pub struct X86VCpuSetupConfig {
     pub intercept_all_io: bool,
     /// Intercept COM1 PIO ports so the VMM path can emulate or forward them.
     pub intercept_com1: bool,
+    /// Intercept the unassigned legacy COM1-COM4 PIO ranges in static VMs.
+    pub intercept_legacy_serial: bool,
     /// Filter legacy PCI configuration accesses for a static passthrough VM.
     pub filter_pci_config: bool,
     /// Highest PCI bus visible through legacy configuration space.
@@ -46,6 +48,10 @@ pub struct X86VCpuSetupConfig {
     /// Expose KVM-compatible hypervisor CPUID leaves to the guest.
     pub expose_kvm_hypervisor: bool,
 }
+
+/// Standard ISA UART bases in COM1 through COM4 order.
+#[cfg(any(feature = "vmx", feature = "svm"))]
+const LEGACY_SERIAL_PORTS: [u16; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
 
 /// x86 vCPU creation configuration.
 #[derive(Clone, Copy, Debug)]

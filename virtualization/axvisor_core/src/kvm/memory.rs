@@ -421,11 +421,10 @@ fn map_pinned_user_memory(
             abi::PAGE_SIZE_USIZE,
             flags,
         ) {
-            for rollback_index in 0..mapped_pages {
-                let rollback_gpa =
-                    region.guest_phys_addr as usize + rollback_index * abi::PAGE_SIZE_USIZE;
-                let _ = vm.unmap_region(GuestPhysAddr::from(rollback_gpa), abi::PAGE_SIZE_USIZE);
-            }
+            let _ = vm.unmap_region(
+                GuestPhysAddr::from(region.guest_phys_addr as usize),
+                mapped_pages * abi::PAGE_SIZE_USIZE,
+            );
             return Err(err);
         }
     }
@@ -435,11 +434,13 @@ fn map_pinned_user_memory(
 
 pub(in crate::kvm) fn unmap_memory_slot(vm: &AxVMRef, slot: MemorySlot) {
     if slot.pinned_pages != 0 {
-        let page_count = slot.memory_size as usize / abi::PAGE_SIZE_USIZE;
-        for page_index in 0..page_count {
-            let page_gpa = slot.guest_phys_addr as usize + page_index * abi::PAGE_SIZE_USIZE;
-            let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa), abi::PAGE_SIZE_USIZE);
-        }
+        // Eagerly pinned slots cover one contiguous GPA range even when the
+        // backing pages are scattered. Unmap it in one pass: MemorySet::unmap
+        // scans its areas, so calling it for every page makes teardown O(n^2).
+        let _ = vm.unmap_region(
+            GuestPhysAddr::from(slot.guest_phys_addr as usize),
+            slot.memory_size as usize,
+        );
         let _ = api_control::release_pinned_user_pages(slot.pinned_pages);
         if slot.user_address_space != 0 {
             let _ = api_control::release_user_address_space(slot.user_address_space);

@@ -9,7 +9,7 @@ impl HostIf for HostImpl {
     }
 
     fn init_percpu() {
-        // ArceOS initializes host per-CPU runtime state before AxVisor starts.
+        super::impl_time::init_percpu();
     }
 
     #[cfg(feature = "shell")]

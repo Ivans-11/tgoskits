@@ -142,30 +142,16 @@ pub fn drain_pending_ioapic_irqs(vm: &VMRef, vcpu: &VCpuRef) {
         return;
     }
 
-    loop {
-        let pending = IOAPIC_IRQ_PENDING.swap(0, Ordering::AcqRel);
-        if pending == 0 {
-            break;
-        }
-
-        let mut deferred = 0;
-        for gsi in 0..IOAPIC_GSI_COUNT {
-            if pending & (1usize << gsi) != 0 {
-                match vm.get_devices().x86_ioapic_target_vcpu_for_gsi(gsi) {
-                    Some(target_vcpu) if target_vcpu == vcpu.id() => {
-                        forward_passthrough_irq(vm, vcpu.id(), IOAPIC_VECTOR_BASE + gsi);
-                    }
-                    Some(_) => {
-                        deferred |= 1usize << gsi;
-                    }
-                    None => {}
-                }
+    let pending = IOAPIC_IRQ_PENDING.load(Ordering::Acquire);
+    for gsi in 0..IOAPIC_GSI_COUNT {
+        let bit = 1usize << gsi;
+        if pending & bit != 0 && ioapic_gsi_targets_current_vcpu(vm, vcpu, gsi) {
+            // Leave other vCPUs' bits published. Temporarily taking the whole
+            // bitmap lets a woken target miss its IRQ and go back to sleep
+            // before the non-owner puts that bit back.
+            if IOAPIC_IRQ_PENDING.fetch_and(!bit, Ordering::AcqRel) & bit != 0 {
+                forward_passthrough_irq(vm, vcpu.id(), IOAPIC_VECTOR_BASE + gsi);
             }
-        }
-
-        if deferred != 0 {
-            IOAPIC_IRQ_PENDING.fetch_or(deferred, Ordering::AcqRel);
-            break;
         }
     }
 }
@@ -287,13 +273,20 @@ fn ioapic_irq_forwarding_handler(vector: usize) {
         return;
     }
 
-    if IOAPIC_IRQ_FORWARD_VM_ID.load(Ordering::Acquire) == usize::MAX
-        || IOAPIC_IRQ_FORWARD_VCPU_ID.load(Ordering::Acquire) == usize::MAX
-    {
+    let vm_id = IOAPIC_IRQ_FORWARD_VM_ID.load(Ordering::Acquire);
+    if vm_id == usize::MAX || IOAPIC_IRQ_FORWARD_VCPU_ID.load(Ordering::Acquire) == usize::MAX {
         return;
     }
 
     let gsi = vector - IOAPIC_VECTOR_BASE;
     let bit = 1usize << gsi;
     IOAPIC_IRQ_PENDING.fetch_or(bit, Ordering::AcqRel);
+    // HLT can block the target task. Publishing the IRQ alone is insufficient:
+    // the target must resume its run loop to drain it. Do not touch a remote
+    // vCPU backend from the host IRQ handler.
+    crate::vmm::with_vm(vm_id, |vm| {
+        if let Some(target) = vm.get_devices().x86_ioapic_target_vcpu_for_gsi(gsi) {
+            crate::vmm::vcpus::notify_vcpu_wakeup(vm_id, target);
+        }
+    });
 }

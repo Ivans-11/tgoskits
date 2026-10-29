@@ -101,18 +101,19 @@ const MSR_KVM_SYSTEM_TIME: u32 = 0x12;
 const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
 const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
 const SWITCHED_MSR_INDICES: [u32; 5] = [
+    // SWAPGS changes this without WRMSR; only this slot needs exit-store.
+    IA32_KERNEL_GS_BASE,
     IA32_STAR,
     IA32_LSTAR,
     IA32_CSTAR,
     IA32_FMASK,
-    IA32_KERNEL_GS_BASE,
 ];
 const SWITCHED_HOST_MSRS: [Msr; 5] = [
+    Msr::IA32_KERNEL_GSBASE,
     Msr::IA32_STAR,
     Msr::IA32_LSTAR,
     Msr::IA32_CSTAR,
     Msr::IA32_FMASK,
-    Msr::IA32_KERNEL_GSBASE,
 ];
 
 fn switched_msr_slot(index: u32) -> Option<usize> {
@@ -205,6 +206,8 @@ pub struct VmxVcpu {
     cpuid: Vec<AxVCpuCpuidEntry>,
     /// Stable vendor and maximum basic leaf for this virtual CPU's lifetime.
     cpuid_leaf0: raw_cpuid::CpuIdResult,
+    cpuid_cache: super::cpuid::CpuidCache,
+    cpuid_results: super::cpuid::GuestCpuidCache,
     // /// Whether this VCPU is a host VCpu. Used in type 1.5 hypervisor.
     // is_host: bool, temporary removed because we don't care about type 1.5 now
 
@@ -213,6 +216,11 @@ pub struct VmxVcpu {
     vmcs: VmxRegion,
     /// Software shadow of host fields; never used to skip sampling the host.
     vmcs_host_state: Option<VmcsHostState>,
+    host_state_dirty: bool,
+    primary_controls: Option<u32>,
+    /// Exit fields remain valid until the next entry. RIP is write-through.
+    cached_exit: Option<VmxExitInfo>,
+    cached_rip: Option<usize>,
     /// Fault address/access captured during the VM-exit decode.
     pending_fault_info: Option<NestedPageFaultInfo>,
     /// Last successfully applied HLT-exit policy. VMCLEAR preserves controls.
@@ -226,8 +234,6 @@ pub struct VmxVcpu {
     msr_bitmap: MsrBitmap,
     /// Guest/host syscall MSRs switched by VM-entry and VM-exit.
     msr_switch: VmxMsrSwitch<5>,
-    /// Host task whose syscall MSRs are currently in the VMCS switch list.
-    msr_host_task: Option<axvisor_api::task::TaskHandle>,
 
     // Interrupt-related fields
     /// Pending events to be injected to the guest.
@@ -252,6 +258,7 @@ pub struct VmxVcpu {
     /// Guest and host DR6 values, which are not switched by VMX.
     guest_dr6: u64,
     host_dr6: u64,
+    transition_msrs_dirty: bool,
 
     // Extra states
     /// The XState of the VCpu. Both host and guest.
@@ -283,9 +290,15 @@ impl VmxVcpu {
             expose_kvm_hypervisor: false,
             cpuid: Vec::new(),
             cpuid_leaf0: raw_cpuid::cpuid!(0, 0),
+            cpuid_cache: super::cpuid::CpuidCache::new(),
+            cpuid_results: super::cpuid::GuestCpuidCache::new(),
             // is_host: false,
             vmcs: VmxRegion::new(vmcs_revision_id, false)?,
             vmcs_host_state: None,
+            host_state_dirty: true,
+            primary_controls: None,
+            cached_exit: None,
+            cached_rip: None,
             pending_fault_info: None,
             hlt_exiting: None,
             io_bitmap: IOBitmap::passthrough_all()?,
@@ -293,8 +306,7 @@ impl VmxVcpu {
             filter_pci_config: false,
             pci_config_max_bus: 0,
             msr_bitmap: MsrBitmap::passthrough_all()?,
-            msr_switch: VmxMsrSwitch::new(SWITCHED_MSR_INDICES)?,
-            msr_host_task: None,
+            msr_switch: VmxMsrSwitch::new(SWITCHED_MSR_INDICES, 1)?,
             pending_events: VecDeque::with_capacity(8),
             #[cfg(feature = "posted-interrupt")]
             posted_interrupt: None,
@@ -308,6 +320,7 @@ impl VmxVcpu {
             debugregs: crate::debugregs::DebugRegisterState::new(),
             guest_dr6: 0xffff_0ff0,
             host_dr6: 0,
+            transition_msrs_dirty: true,
             xstate: XState::new(),
             fp_state: fp_state::FpState::new(),
             #[cfg(feature = "tracing")]
@@ -337,7 +350,9 @@ impl VmxVcpu {
         unsafe {
             vmx::vmptrld(self.vmcs.phys_addr().as_usize() as u64).map_err(as_axerr)?;
         }
-        self.setup_vmcs_host()?;
+        // Register ioctls also bind a VMCS. Sample host state only if this
+        // binding actually enters the guest, on the CPU that will run it.
+        self.host_state_dirty = true;
         Ok(())
     }
 
@@ -386,6 +401,9 @@ impl VmxVcpu {
 
     /// Run the guest. It returns when a vm-exit happens and returns the vm-exit if it cannot be handled by this [`VmxVcpu`] itself.
     fn inner_run(&mut self, first_entry: bool) -> Option<VmxExitInfo> {
+        if self.transition_msrs_dirty {
+            self.update_transition_msrs().unwrap();
+        }
         self.inject_pending_events().unwrap();
 
         // Run guest. Host syscall MSRs are prepared by `run()` once for the
@@ -412,6 +430,8 @@ impl VmxVcpu {
         if let Some(pi) = &self.posted_interrupt {
             pi.enter(self.vlapic.posted_edge_masks());
         }
+        self.cached_exit = None;
+        self.cached_rip = None;
         unsafe {
             if self.launched {
                 self.vmx_resume();
@@ -438,7 +458,6 @@ impl VmxVcpu {
                 }
             }
         }
-        self.msr_switch.sync_guest_values_after_exit();
         self.load_host_xstate();
         restore_host_interrupt_flag(self.host_rflags);
 
@@ -449,6 +468,8 @@ impl VmxVcpu {
 
         // Handle vm-exits
         let exit_info = self.exit_info().unwrap();
+        self.cached_exit = Some(exit_info);
+        self.cached_rip = Some(exit_info.guest_rip);
         if exit_info.exit_reason == VmxExitReason::EPT_VIOLATION {
             self.pending_fault_info = self.nested_page_fault_info().ok();
         } else {
@@ -473,7 +494,12 @@ impl VmxVcpu {
 
     /// Basic information about VM exits.
     pub fn exit_info(&self) -> AxResult<vmcs::VmxExitInfo> {
-        vmcs::exit_info()
+        if let Some(mut info) = self.cached_exit {
+            info.guest_rip = self.rip();
+            Ok(info)
+        } else {
+            vmcs::exit_info()
+        }
     }
 
     /// Raw information for VM Exits Due to Vectored Events, See SDM 25.9.2
@@ -581,7 +607,14 @@ impl VmxVcpu {
 
     /// Guest rip. (`RIP`)
     pub fn rip(&self) -> usize {
-        VmcsGuestNW::RIP.read().unwrap()
+        self.cached_rip
+            .unwrap_or_else(|| VmcsGuestNW::RIP.read().unwrap())
+    }
+
+    fn set_rip(&mut self, rip: usize) -> AxResult {
+        VmcsGuestNW::RIP.write(rip)?;
+        self.cached_rip = Some(rip);
+        Ok(())
     }
 
     /// Guest cs. (`cs`)
@@ -591,7 +624,7 @@ impl VmxVcpu {
 
     /// Advance guest `RIP` by `instr_len` bytes.
     pub fn advance_rip(&mut self, instr_len: u8) -> AxResult {
-        VmcsGuestNW::RIP.write(VmcsGuestNW::RIP.read()? + instr_len as usize)
+        self.set_rip(self.rip().wrapping_add(instr_len as usize))
     }
 
     /// Add a virtual interrupt or exception to the pending events list,
@@ -632,15 +665,23 @@ impl VmxVcpu {
     /// `RFLAGS.IF` = 1 and there are no other blocking of interrupts.
     /// (see SDM, Vol. 3C, Section 24.4.2)
     pub fn set_interrupt_window(&mut self, enable: bool) -> AxResult {
-        let mut ctrl = VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.read()?;
+        let ctrl = self.primary_controls()?;
         let bits = vmcs::controls::PrimaryControls::INTERRUPT_WINDOW_EXITING.bits();
-        if enable {
-            ctrl |= bits
-        } else {
-            ctrl &= !bits
+        let updated = if enable { ctrl | bits } else { ctrl & !bits };
+        if updated != ctrl {
+            VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.write(updated)?;
+            self.primary_controls = Some(updated);
         }
-        VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.write(ctrl)?;
         Ok(())
+    }
+
+    fn primary_controls(&mut self) -> AxResult<u32> {
+        if let Some(value) = self.primary_controls {
+            return Ok(value);
+        }
+        let value = VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.read()?;
+        self.primary_controls = Some(value);
+        Ok(value)
     }
 
     /// Set I/O intercept by modifying I/O bitmap.
@@ -687,7 +728,12 @@ impl VmxVcpu {
             .set_intercept_of_range(X86_PIT_PORT_BASE as u32, X86_PIT_PORT_COUNT, true);
         self.io_bitmap
             .set_intercept(X86_PIT_SPEAKER_PORT as u32, true);
-        if config.intercept_com1 {
+        if config.intercept_legacy_serial {
+            for base in crate::LEGACY_SERIAL_PORTS {
+                self.io_bitmap
+                    .set_intercept_of_range(base as u32, X86_COM1_PORT_COUNT, true);
+            }
+        } else if config.intercept_com1 {
             self.io_bitmap.set_intercept_of_range(
                 X86_COM1_PORT_BASE as u32,
                 X86_COM1_PORT_COUNT,
@@ -699,6 +745,15 @@ impl VmxVcpu {
 
     #[allow(dead_code)]
     fn setup_msr_bitmap(&mut self) -> AxResult {
+        // Writes are reflected in the software entry image. Unlike
+        // KERNEL_GS_BASE, these MSRs have no implicit hardware writers.
+        for index in &SWITCHED_MSR_INDICES[1..] {
+            self.msr_bitmap.set_write_intercept(*index, true);
+        }
+        for index in [IA32_PAT, IA32_EFER] {
+            self.msr_bitmap.set_read_intercept(index, true);
+            self.msr_bitmap.set_write_intercept(index, true);
+        }
         // Never let a guest change the physical TSC used by the host kernel.
         self.msr_bitmap.set_read_intercept(IA32_TSC, true);
         self.msr_bitmap.set_write_intercept(IA32_TSC, true);
@@ -745,6 +800,7 @@ impl VmxVcpu {
             vmx::vmclear(paddr).map_err(as_axerr)?;
         }
         self.expose_kvm_hypervisor = config.expose_kvm_hypervisor;
+        self.cpuid_results.clear();
         self.bind_to_current_processor()?;
         self.setup_msr_bitmap()?;
         self.setup_vmcs_guest(entry)?;
@@ -783,6 +839,9 @@ impl VmxVcpu {
         // Invalidate before writing so a partial failure forces a full refresh
         // on the next bind. VM entry/exit never changes the host-state fields.
         let previous = self.vmcs_host_state.take();
+        if previous.is_none_or(|old| old.pat != current.pat || old.efer != current.efer) {
+            self.transition_msrs_dirty = true;
+        }
         macro_rules! update {
             ($field:ident, $vmcs:expr) => {
                 if previous.is_none_or(|old| old.$field != current.$field) {
@@ -862,7 +921,7 @@ impl VmxVcpu {
         VmcsGuestNW::CR3.write(0)?;
         VmcsGuestNW::DR7.write(0x400)?;
         VmcsGuestNW::RSP.write(0)?;
-        VmcsGuestNW::RIP.write(entry_state.rip)?;
+        self.set_rip(entry_state.rip)?;
         VmcsGuestNW::RFLAGS.write(0x2)?;
         VmcsGuestNW::PENDING_DBG_EXCEPTIONS.write(0)?;
         VmcsGuestNW::IA32_SYSENTER_ESP.write(0)?;
@@ -881,7 +940,7 @@ impl VmxVcpu {
         // KVM userspace may previously have configured this vCPU for long
         // mode. A SIPI resets EFER, so the VM-entry IA-32e guest-mode control
         // must be updated as part of the same state transition.
-        vmcs::update_efer()?;
+        self.update_guest_efer()?;
         Ok(())
     }
 
@@ -955,6 +1014,7 @@ impl VmxVcpu {
         )?;
         // The complete primary-control setup supersedes any previous policy.
         self.hlt_exiting = None;
+        self.primary_controls = None;
 
         // Enable EPT, RDTSCP, INVPCID, and unrestricted guest.
         use SecondaryControls as CpuCtrl2;
@@ -1042,8 +1102,8 @@ impl VmxVcpu {
             .write(self.msr_switch.exit_store_addr().as_usize() as u64)?;
         VmcsControl64::VMEXIT_MSR_LOAD_ADDR
             .write(self.msr_switch.exit_load_addr().as_usize() as u64)?;
-        let switched_msr_count = self.msr_switch.count() as u32;
-        VmcsControl32::VMEXIT_MSR_STORE_COUNT.write(switched_msr_count)?;
+        let switched_msr_count = self.msr_switch.store_count() as u32;
+        VmcsControl32::VMEXIT_MSR_STORE_COUNT.write(self.msr_switch.store_count() as u32)?;
         VmcsControl32::VMEXIT_MSR_LOAD_COUNT.write(switched_msr_count)?;
         VmcsControl32::VMENTRY_MSR_LOAD_COUNT.write(switched_msr_count)?;
 
@@ -1119,17 +1179,25 @@ impl VmxVcpu {
                         & !(Cr0Flags::PAGING | Cr0Flags::PROTECTED_MODE_ENABLE).bits();
                     VmcsGuestNW::CR0.write(((val & must0) | must1) as _)?;
                     VmcsControlNW::CR0_READ_SHADOW.write(val as _)?;
-                    VmcsControlNW::CR0_GUEST_HOST_MASK.write((must1 | !must0) as _)?;
+                    // Paging transitions change EFER.LMA. Trap them so the
+                    // conditional EFER switch policy stays synchronized even
+                    // when VM-exit EFER saving is disabled.
+                    VmcsControlNW::CR0_GUEST_HOST_MASK
+                        .write((must1 | !must0 | Cr0Flags::PAGING.bits()) as _)?;
                 }
                 3 => VmcsGuestNW::CR3.write(val as _)?,
                 4 => {
+                    self.cpuid_results.clear();
                     // Retrieve/validate restrictions on CR4
                     let must0 = Msr::IA32_VMX_CR4_FIXED1.read();
                     let must1 = Msr::IA32_VMX_CR4_FIXED0.read();
                     let val = val | Cr4Flags::VIRTUAL_MACHINE_EXTENSIONS.bits();
                     VmcsGuestNW::CR4.write(((val & must0) | must1) as _)?;
                     VmcsControlNW::CR4_READ_SHADOW.write(val as _)?;
-                    VmcsControlNW::CR4_GUEST_HOST_MASK.write((must1 | !must0) as _)?;
+                    // OSXSAVE/PKE affect guest CPUID. Trap their changes so
+                    // cached final results never outlive their input state.
+                    VmcsControlNW::CR4_GUEST_HOST_MASK
+                        .write((must1 | !must0 | (1 << 18) | (1 << 22)) as _)?;
                 }
                 _ => unreachable!(),
             };
@@ -1256,6 +1324,9 @@ impl VmxVcpu {
 
     /// Try to inject a pending event before next VM entry.
     fn inject_pending_events(&mut self) -> AxResult {
+        if self.pending_events.is_empty() {
+            return Ok(());
+        }
         // An interrupt-window exit can program an event and return through the
         // outer vCPU loop before the next VM entry. Do not overwrite that
         // already-programmed event if another interrupt arrives meanwhile.
@@ -1330,6 +1401,12 @@ impl VmxVcpu {
             VmxExitReason::XSETBV => Some(self.handle_xsetbv()),
             VmxExitReason::CR_ACCESS => Some(self.handle_cr()),
             VmxExitReason::CPUID => Some(self.handle_cpuid()),
+            msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE)
+                if matches!(self.regs().rcx as u32, IA32_PAT | IA32_EFER)
+                    || switched_msr_slot(self.regs().rcx as u32).is_some() =>
+            {
+                Some(self.handle_state_msr(msr_rw == VmxExitReason::MSR_WRITE))
+            }
             msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE)
                 if self.regs().rcx as u32 == IA32_TSC =>
             {
@@ -2015,8 +2092,6 @@ impl VmxVcpu {
 
     #[allow(clippy::single_match)]
     fn handle_cr(&mut self) -> AxResult {
-        const VM_EXIT_INSTR_LEN_MV_TO_CR: u8 = 3;
-
         let cr_access_info = vmcs::cr_access_info()?;
 
         let reg = cr_access_info.gpr;
@@ -2031,12 +2106,12 @@ impl VmxVcpu {
                     self.guest_regs.get_reg_of_index(reg)
                 };
                 if cr == 0 || cr == 4 {
-                    self.advance_rip(VM_EXIT_INSTR_LEN_MV_TO_CR)?;
+                    self.advance_rip(self.exit_info()?.exit_instruction_length as u8)?;
                     // TODO: check for #GP reasons
                     self.set_cr(cr as usize, val);
 
-                    if cr == 0 && Cr0Flags::from_bits_truncate(val).contains(Cr0Flags::PAGING) {
-                        vmcs::update_efer()?;
+                    if cr == 0 {
+                        self.update_guest_efer()?;
                     }
                     return Ok(());
                 }
@@ -2051,7 +2126,7 @@ impl VmxVcpu {
     }
 
     fn handle_cpuid(&mut self) -> AxResult {
-        use raw_cpuid::{CpuIdResult, cpuid};
+        use raw_cpuid::CpuIdResult;
 
         const VM_EXIT_INSTR_LEN_CPUID: u8 = 2;
         const LEAF_FEATURE_INFO: u32 = 0x1;
@@ -2062,6 +2137,16 @@ impl VmxVcpu {
         const LEAF_FREQUENCY_INFO: u32 = 0x16;
         const LEAF_V2_EXTENDED_TOPOLOGY: u32 = 0x1f;
         const FALLBACK_TSC_FREQUENCY_MHZ: u32 = 3_000;
+        let function = self.guest_regs.rax as u32;
+        let index = self.guest_regs.rcx as u32;
+        if let Some(res) = self.cpuid_results.get(function, index) {
+            self.guest_regs.rax = res.eax.into();
+            self.guest_regs.rbx = res.ebx.into();
+            self.guest_regs.rcx = res.ecx.into();
+            self.guest_regs.rdx = res.edx.into();
+            self.advance_rip(VM_EXIT_INSTR_LEN_CPUID)?;
+            return Ok(());
+        }
         let backend_vcpu_capacity = self.vcpu_count.min(0xff) as u32;
         let virtual_logical_processors = self
             .cpuid
@@ -2074,163 +2159,129 @@ impl VmxVcpu {
             u32::BITS - virtual_logical_processors.saturating_sub(1).leading_zeros();
 
         let regs_clone = *self.regs_mut();
-        let function = regs_clone.rax as u32;
-        // Allow userspace to disable guest-managed extended-state features and
-        // select how many of the preallocated backend vCPUs are guest-visible.
-        // The backend still owns topology shape, APIC identity, timing, and
-        // instruction semantics.
-        let configured_feature_info = (function == LEAF_FEATURE_INFO)
-            .then(|| {
-                self.cpuid
-                    .iter()
-                    .find(|entry| entry.function == LEAF_FEATURE_INFO && entry.index == 0)
-            })
-            .flatten();
-        let mut res = if let Some(entry) = configured_feature_info {
-            match function {
-                LEAF_FEATURE_INFO => {
-                    const FEATURE_VMX: u32 = 1 << 5;
-                    const FEATURE_HYPERVISOR: u32 = 1 << 31;
-                    const FEATURE_MCE: u32 = 1 << 7;
-                    const FEATURE_MTRR: u32 = 1 << 12;
-                    const FEATURE_MCA: u32 = 1 << 14;
-                    const FEATURE_X2APIC: u32 = 1 << 21;
-                    const FEATURE_TSC_DEADLINE: u32 = 1 << 24;
-                    const FEATURE_APIC: u32 = 1 << 9;
-                    const MAX_LOGICAL_PROCESSORS_MASK: u32 = 0xff << 16;
-                    const INITIAL_APIC_ID_MASK: u32 = 0xff << 24;
-                    const USER_RESTRICTABLE_ECX: u32 = (1 << 26) | (1 << 27) | (1 << 28);
-                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-
-                    res.ecx &= entry.ecx | !USER_RESTRICTABLE_ECX;
-                    res.ecx &= !(FEATURE_VMX | FEATURE_TSC_DEADLINE);
-                    res.ecx |= FEATURE_X2APIC | FEATURE_HYPERVISOR;
-                    res.edx &= !(FEATURE_MCE | FEATURE_MTRR | FEATURE_MCA);
-                    res.edx |= FEATURE_APIC;
-                    res.ebx &= !(MAX_LOGICAL_PROCESSORS_MASK | INITIAL_APIC_ID_MASK);
-                    res.ebx |= virtual_logical_processors << 16;
-                    res.ebx |= (self.vcpu_id as u32 & 0xff) << 24;
-                    res
-                }
-                _ => unreachable!(),
+        let mut res = match function {
+            // Leaf 0 is independent of ECX and guest execution state.
+            // Reusing it avoids a host CPUID exit under nested VMX.
+            0 if self.cpuid.is_empty() => self.cpuid_leaf0,
+            // Linux derives its LAPIC rate from the crystal in leaf 0x15.
+            // Match the emulated 1 GHz timer, preserving the physical TSC ratio.
+            0x15 => super::timer_cpuid::virtual_timer_leaf(self.cpuid_cache.host(0x15, 0)),
+            LEAF_FEATURE_INFO => {
+                const FEATURE_VMX: u32 = 1 << 5;
+                const FEATURE_HYPERVISOR: u32 = 1 << 31;
+                const FEATURE_MCE: u32 = 1 << 7;
+                const FEATURE_MTRR: u32 = 1 << 12;
+                const FEATURE_MCA: u32 = 1 << 14;
+                const FEATURE_X2APIC: u32 = 1 << 21;
+                const FEATURE_TSC_DEADLINE: u32 = 1 << 24;
+                const FEATURE_APIC: u32 = 1 << 9;
+                const MAX_LOGICAL_PROCESSORS_MASK: u32 = 0xff << 16;
+                const INITIAL_APIC_ID_MASK: u32 = 0xff << 24;
+                let mut res = self.cpuid_cache.query(&self.cpuid, function, index);
+                res.ecx &= !FEATURE_VMX;
+                res.ecx |= FEATURE_X2APIC;
+                res.ecx &= !FEATURE_TSC_DEADLINE;
+                res.ecx |= FEATURE_HYPERVISOR;
+                res.edx &= !(FEATURE_MCE | FEATURE_MTRR | FEATURE_MCA);
+                res.edx |= FEATURE_APIC;
+                res.edx.set_bit(28, virtual_logical_processors > 1);
+                let cr4_mask = VmcsControlNW::CR4_GUEST_HOST_MASK.read()?;
+                let cr4 = (VmcsControlNW::CR4_READ_SHADOW.read()? & cr4_mask)
+                    | (VmcsGuestNW::CR4.read()? & !cr4_mask);
+                res.ecx
+                    .set_bit(27, res.ecx & (1 << 26) != 0 && cr4 & (1 << 18) != 0);
+                res.ebx &= !(MAX_LOGICAL_PROCESSORS_MASK | INITIAL_APIC_ID_MASK);
+                res.ebx |= virtual_logical_processors << 16;
+                res.ebx |= (self.vcpu_id as u32 & 0xff) << 24;
+                res
             }
-        } else {
-            match function {
-                // Leaf 0 is independent of ECX and guest execution state.
-                // Reusing it avoids a host CPUID exit under nested VMX.
-                0 => self.cpuid_leaf0,
-                LEAF_FEATURE_INFO => {
-                    const FEATURE_VMX: u32 = 1 << 5;
-                    const FEATURE_HYPERVISOR: u32 = 1 << 31;
-                    const FEATURE_MCE: u32 = 1 << 7;
-                    const FEATURE_MTRR: u32 = 1 << 12;
-                    const FEATURE_MCA: u32 = 1 << 14;
-                    const FEATURE_X2APIC: u32 = 1 << 21;
-                    const FEATURE_TSC_DEADLINE: u32 = 1 << 24;
-                    const FEATURE_APIC: u32 = 1 << 9;
-                    const MAX_LOGICAL_PROCESSORS_MASK: u32 = 0xff << 16;
-                    const INITIAL_APIC_ID_MASK: u32 = 0xff << 24;
-                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                    res.ecx &= !FEATURE_VMX;
-                    res.ecx |= FEATURE_X2APIC;
-                    res.ecx &= !FEATURE_TSC_DEADLINE;
-                    res.ecx |= FEATURE_HYPERVISOR;
-                    res.edx &= !(FEATURE_MCE | FEATURE_MTRR | FEATURE_MCA);
-                    res.edx |= FEATURE_APIC;
-                    res.ebx &= !(MAX_LOGICAL_PROCESSORS_MASK | INITIAL_APIC_ID_MASK);
-                    res.ebx |= virtual_logical_processors << 16;
-                    res.ebx |= (self.vcpu_id as u32 & 0xff) << 24;
-                    res
+            LEAF_EXTENDED_TOPOLOGY | LEAF_V2_EXTENDED_TOPOLOGY => {
+                let level = regs_clone.rcx as u32;
+                match level {
+                    // One hardware thread per core.
+                    0 => CpuIdResult {
+                        eax: 0,
+                        ebx: 1,
+                        ecx: 1 << 8,
+                        edx: self.vcpu_id as u32,
+                    },
+                    // All virtual CPUs belong to one package.
+                    1 => CpuIdResult {
+                        eax: topology_shift,
+                        ebx: virtual_logical_processors,
+                        ecx: (2 << 8) | 1,
+                        edx: self.vcpu_id as u32,
+                    },
+                    _ => CpuIdResult {
+                        eax: 0,
+                        ebx: 0,
+                        ecx: level,
+                        edx: self.vcpu_id as u32,
+                    },
                 }
-                LEAF_EXTENDED_TOPOLOGY | LEAF_V2_EXTENDED_TOPOLOGY => {
-                    let level = regs_clone.rcx as u32;
-                    match level {
-                        // One hardware thread per core.
-                        0 => CpuIdResult {
-                            eax: 0,
-                            ebx: 1,
-                            ecx: 1 << 8,
-                            edx: self.vcpu_id as u32,
-                        },
-                        // All virtual CPUs belong to one package.
-                        1 => CpuIdResult {
-                            eax: topology_shift,
-                            ebx: virtual_logical_processors,
-                            ecx: (2 << 8) | 1,
-                            edx: self.vcpu_id as u32,
-                        },
-                        _ => CpuIdResult {
-                            eax: 0,
-                            ebx: 0,
-                            ecx: level,
-                            edx: self.vcpu_id as u32,
-                        },
-                    }
-                }
-                // Performance-counter MSRs are not virtualized. Reporting a
-                // zero PMU version prevents guests from programming host PMU
-                // state that cannot be preserved across VM entry and exit.
-                LEAF_ARCHITECTURAL_PERFORMANCE_MONITORING => CpuIdResult {
-                    eax: 0,
-                    ebx: 0,
-                    ecx: 0,
-                    edx: 0,
-                },
-                // See SDM Table 3-8. Information Returned by CPUID Instruction (Contd.)
-                LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
-                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                    if regs_clone.rcx == 0 {
-                        // AMX tile state is not represented by the x86 crate's
-                        // Xcr0 bitflags and cannot be switched safely here.
-                        // Hide AMX consistently so guests do not issue XSETBV
-                        // with the unsupported bits 17/18.
-                        const FEATURE_AMX_BF16: u32 = 1 << 22;
-                        const FEATURE_AMX_TILE: u32 = 1 << 24;
-                        const FEATURE_AMX_INT8: u32 = 1 << 25;
-                        res.edx &= !(FEATURE_AMX_BF16 | FEATURE_AMX_TILE | FEATURE_AMX_INT8);
-                        // Bit 05: WAITPKG.
-                        res.ecx.set_bit(5, false); // clear waitpkg
-                        // Bit 16: LA57. Supports 57-bit linear addresses and five-level paging if 1.
-                        res.ecx.set_bit(16, false); // clear LA57
-                    }
-
-                    res
-                }
-                LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => {
-                    self.load_guest_xstate();
-                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                    if regs_clone.rcx == 0 {
-                        // XCR0 bits 17/18 (XTILECFG/XTILEDATA) are not
-                        // supported by the x86 crate's Xcr0 representation.
-                        res.eax &= !((1 << 17) | (1 << 18));
-                    }
-                    self.load_host_xstate();
-
-                    res
-                }
-                crate::kvm::KVM_HYPERVISOR_INFO_LEAF | crate::kvm::KVM_HYPERVISOR_FEATURE_LEAF => {
-                    if self.expose_kvm_hypervisor {
-                        crate::kvm::kvm_hypervisor_cpuid(function).expect("known KVM CPUID leaf")
-                    } else {
-                        crate::kvm::rustvisor_hypervisor_cpuid(function)
-                            .expect("known hypervisor CPUID leaf")
-                    }
-                }
-                LEAF_FREQUENCY_INFO => {
-                    let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
-                    if res.eax == 0 {
-                        let frequency_mhz =
-                            crate::host_tsc_frequency_mhz().unwrap_or(FALLBACK_TSC_FREQUENCY_MHZ);
-                        warn!(
-                            "handle_cpuid: Failed to get TSC frequency by CPUID, default to \
-                             {frequency_mhz} MHz"
-                        );
-                        res.eax = frequency_mhz;
-                    }
-                    res
-                }
-                _ => cpuid!(regs_clone.rax, regs_clone.rcx),
             }
+            // Performance-counter MSRs are not virtualized. Reporting a
+            // zero PMU version prevents guests from programming host PMU
+            // state that cannot be preserved across VM entry and exit.
+            LEAF_ARCHITECTURAL_PERFORMANCE_MONITORING => CpuIdResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            // See SDM Table 3-8. Information Returned by CPUID Instruction (Contd.)
+            LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
+                let mut res = self.cpuid_cache.query(&self.cpuid, function, index);
+                if regs_clone.rcx == 0 {
+                    // AMX tile state is not represented by the x86 crate's
+                    // Xcr0 bitflags and cannot be switched safely here.
+                    // Hide AMX consistently so guests do not issue XSETBV
+                    // with the unsupported bits 17/18.
+                    const FEATURE_AMX_BF16: u32 = 1 << 22;
+                    const FEATURE_AMX_TILE: u32 = 1 << 24;
+                    const FEATURE_AMX_INT8: u32 = 1 << 25;
+                    res.edx &= !(FEATURE_AMX_BF16 | FEATURE_AMX_TILE | FEATURE_AMX_INT8);
+                    // Bit 05: WAITPKG.
+                    res.ecx.set_bit(5, false); // clear waitpkg
+                    // Bit 16: LA57. Supports 57-bit linear addresses and five-level paging if 1.
+                    res.ecx.set_bit(16, false); // clear LA57
+                    let cr4_mask = VmcsControlNW::CR4_GUEST_HOST_MASK.read()?;
+                    let cr4 = (VmcsControlNW::CR4_READ_SHADOW.read()? & cr4_mask)
+                        | (VmcsGuestNW::CR4.read()? & !cr4_mask);
+                    res.ecx
+                        .set_bit(4, res.ecx & (1 << 3) != 0 && cr4 & (1 << 22) != 0);
+                }
+
+                res
+            }
+            LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => self.cpuid_cache.xsave(
+                &self.cpuid,
+                index,
+                self.xstate.guest_xcr0,
+                self.xstate.guest_xss(),
+            ),
+            crate::kvm::KVM_HYPERVISOR_INFO_LEAF | crate::kvm::KVM_HYPERVISOR_FEATURE_LEAF => {
+                if self.expose_kvm_hypervisor {
+                    crate::kvm::kvm_hypervisor_cpuid(function).expect("known KVM CPUID leaf")
+                } else {
+                    crate::kvm::rustvisor_hypervisor_cpuid(function)
+                        .expect("known hypervisor CPUID leaf")
+                }
+            }
+            LEAF_FREQUENCY_INFO => {
+                let mut res = self.cpuid_cache.query(&self.cpuid, function, index);
+                if res.eax == 0 {
+                    let frequency_mhz =
+                        crate::host_tsc_frequency_mhz().unwrap_or(FALLBACK_TSC_FREQUENCY_MHZ);
+                    warn!(
+                        "handle_cpuid: Failed to get TSC frequency by CPUID, default to \
+                         {frequency_mhz} MHz"
+                    );
+                    res.eax = frequency_mhz;
+                }
+                res
+            }
+            _ => self.cpuid_cache.query(&self.cpuid, function, index),
         };
 
         // The backend does not maintain a guest MONITOR address or its wakeup
@@ -2247,6 +2298,7 @@ impl VmxVcpu {
             };
         }
 
+        self.cpuid_results.insert(function, index, res);
         trace!(
             "VM exit: CPUID({:#x}, {:#x}): {:?}",
             regs_clone.rax, regs_clone.rcx, res
@@ -2257,7 +2309,6 @@ impl VmxVcpu {
         regs.rcx = res.ecx as _;
         regs.rdx = res.edx as _;
         self.advance_rip(VM_EXIT_INSTR_LEN_CPUID)?;
-
         Ok(())
     }
 
@@ -2302,7 +2353,8 @@ impl VmxVcpu {
                 })
                 .ok_or_else(|| ax_err_type!(InvalidInput))
                 .and_then(|x| {
-                    self.xstate.guest_xcr0 = x.bits();
+                    self.xstate.set_guest_xcr0(x.bits());
+                    self.cpuid_results.clear();
                     self.advance_rip(VM_EXIT_INSTR_LEN_XSETBV)
                 })
         } else {
@@ -2311,29 +2363,109 @@ impl VmxVcpu {
         }
     }
 
+    fn handle_state_msr(&mut self, write: bool) -> AxResult {
+        let index = self.regs().rcx as u32;
+        if write {
+            self.set_kvm_msr(index, self.read_edx_eax())?;
+            // Syscall MSRs stay guest-owned until the batch ends. WRMSR is
+            // intercepted, so apply the new value before re-entering guest.
+            if let Some(slot) = SWITCHED_MSR_INDICES.iter().position(|&msr| msr == index)
+                && slot != 0
+            {
+                unsafe { SWITCHED_HOST_MSRS[slot].write(self.msr_switch.guest_value(slot)) };
+            }
+        } else {
+            self.write_edx_eax(self.get_kvm_msr(index)?);
+        }
+        self.advance_rip(2)
+    }
+
+    fn update_guest_efer(&mut self) -> AxResult {
+        vmcs::update_efer()?;
+        self.transition_msrs_dirty = true;
+        Ok(())
+    }
+
+    fn update_transition_msrs(&mut self) -> AxResult {
+        use super::vmcs::controls::{EntryControls as Entry, ExitControls as Exit};
+        let host = self.vmcs_host_state.as_ref().expect("bound VMCS");
+        let pat_differs = VmcsGuest64::IA32_PAT.read()? != host.pat;
+        let efer_differs = VmcsGuest64::IA32_EFER.read()? != host.efer;
+        let entry_mask = (Entry::LOAD_IA32_PAT | Entry::LOAD_IA32_EFER).bits();
+        let exit_mask = (Exit::LOAD_IA32_PAT
+            | Exit::LOAD_IA32_EFER
+            | Exit::SAVE_IA32_PAT
+            | Exit::SAVE_IA32_EFER)
+            .bits();
+        let entry_set = if pat_differs {
+            Entry::LOAD_IA32_PAT.bits()
+        } else {
+            0
+        } | if efer_differs {
+            Entry::LOAD_IA32_EFER.bits()
+        } else {
+            0
+        };
+        let exit_set = if pat_differs {
+            Exit::LOAD_IA32_PAT.bits()
+        } else {
+            0
+        } | if efer_differs {
+            Exit::LOAD_IA32_EFER.bits()
+        } else {
+            0
+        };
+        // All guest writes are intercepted; CR0 transitions update EFER.LMA
+        // in software. The VMCS guest values therefore need no exit-store.
+        vmcs::set_control(
+            VmcsControl32::VMENTRY_CONTROLS,
+            Msr::IA32_VMX_TRUE_ENTRY_CTLS,
+            VmcsControl32::VMENTRY_CONTROLS.read()?,
+            entry_set,
+            entry_mask & !entry_set,
+        )?;
+        vmcs::set_control(
+            VmcsControl32::VMEXIT_CONTROLS,
+            Msr::IA32_VMX_TRUE_EXIT_CTLS,
+            VmcsControl32::VMEXIT_CONTROLS.read()?,
+            exit_set,
+            exit_mask & !exit_set,
+        )?;
+        self.transition_msrs_dirty = false;
+        Ok(())
+    }
+
     fn load_guest_xstate(&mut self) {
         self.debugregs.switch_to_guest();
-        self.host_dr6 = crate::debugregs::read_dr6();
-        crate::debugregs::write_dr6(self.guest_dr6);
         self.xstate.switch_to_guest();
     }
 
     fn load_host_xstate(&mut self) {
         self.xstate.switch_to_host();
-        self.guest_dr6 = crate::debugregs::read_dr6();
-        crate::debugregs::write_dr6(self.host_dr6);
         self.debugregs.switch_to_host();
     }
 
     fn prepare_msr_switch(&mut self) {
-        let task = axvisor_api::task::current_task();
-        if task.is_some() && self.msr_host_task == task {
-            return;
-        }
+        // Sample on the current CPU at every batch boundary: the same task
+        // can migrate or have host state updated between calls to run().
         for (slot, msr) in SWITCHED_HOST_MSRS.into_iter().enumerate() {
             self.msr_switch.set_host_value(slot, msr.read());
         }
-        self.msr_host_task = task;
+        self.switch_syscall_msrs(true);
+    }
+
+    fn switch_syscall_msrs(&self, guest: bool) {
+        // IRQ-disabled internal exits cannot return to host userspace. Keep
+        // syscall entry MSRs live across them, like KVM's user-return MSRs,
+        // but restore before leaving this bounded batch on every path.
+        // KERNEL_GS_BASE remains in hardware lists for SWAPGS/NMI safety.
+        for (slot, msr) in SWITCHED_HOST_MSRS.into_iter().enumerate().skip(1) {
+            let guest_value = self.msr_switch.guest_value(slot);
+            let host_value = self.msr_switch.host_value(slot);
+            if guest_value != host_value {
+                unsafe { msr.write(if guest { guest_value } else { host_value }) };
+            }
+        }
     }
 
     fn complete_string_io_write(
@@ -2353,7 +2485,7 @@ impl VmxVcpu {
                 update_string_register(self.guest_regs.rcx, 1, address_size, true);
         }
         if !repeat || remaining <= 1 {
-            VmcsGuestNW::RIP.write(next_rip as usize)?;
+            self.set_rip(next_rip as usize)?;
         }
         Ok(())
     }
@@ -2432,16 +2564,23 @@ impl AxArchVCpu for VmxVcpu {
     }
 
     fn set_cpuid(&mut self, entries: &[AxVCpuCpuidEntry]) -> AxResult {
+        self.cpuid_results.clear();
         self.cpuid.clear();
         self.cpuid.extend_from_slice(entries);
         Ok(())
     }
 
     fn has_pending_event(&self) -> bool {
-        !self.pending_events.is_empty()
+        // PI may already have moved an interrupt from PIR into virtual IRR.
+        // It no longer appears in pending_events, but must prevent HLT sleep.
+        !self.pending_events.is_empty() || self.vlapic.has_pending_interrupt()
     }
 
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
+        if self.host_state_dirty {
+            self.setup_vmcs_host()?;
+            self.host_state_dirty = false;
+        }
         // Both static and control callers bind this vCPU with host IRQs saved.
         // An exit handled entirely here needs neither a new binding nor a new
         // VMLAUNCH. Keep the VMCS current and use VMRESUME for the next entry.
@@ -2451,10 +2590,16 @@ impl AxArchVCpu for VmxVcpu {
         // be switched while this batch executes. Reading these MSRs for every
         // internally handled exit is therefore redundant and expensive.
         self.prepare_msr_switch();
+        self.xstate.refresh_host();
         // Keep guest FP registers live throughout the IRQ-disabled batch.
         // The internal handlers must not use SIMD/FPU instructions. Restore
         // host state before any upper-layer handling or scheduling is possible.
         self.fp_state.save_host();
+        // Like FP state, DR6 can stay guest-owned across internal exits.
+        // Keep capturing it even without breakpoints: guest single stepping
+        // can also modify DR6. Restore the host before leaving this batch.
+        self.host_dr6 = crate::debugregs::read_dr6();
+        crate::debugregs::write_dr6(self.guest_dr6);
         let mut inner_exit = None;
         let mut cpu_up_exit = None;
         for entry in 0..MAX_BUILTIN_EXITS_PER_RUN {
@@ -2467,6 +2612,9 @@ impl AxArchVCpu for VmxVcpu {
                 break;
             }
         }
+        self.switch_syscall_msrs(false);
+        self.guest_dr6 = crate::debugregs::read_dr6();
+        crate::debugregs::write_dr6(self.host_dr6);
         // XSAVE must use the guest's XCR0, which may have changed in the batch.
         self.xstate.switch_to_guest();
         self.fp_state.save_guest();
@@ -2833,13 +2981,15 @@ impl AxArchVCpu for VmxVcpu {
         }
         use super::vmcs::controls::PrimaryControls as CpuCtrl;
         let hlt_exiting = CpuCtrl::HLT_EXITING.bits();
+        let primary = self.primary_controls()?;
         vmcs::set_control(
             VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS,
             Msr::IA32_VMX_TRUE_PROCBASED_CTLS,
-            VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.read()?,
+            primary,
             if enabled { hlt_exiting } else { 0 },
             if enabled { 0 } else { hlt_exiting },
         )?;
+        self.primary_controls = None;
         self.hlt_exiting = Some(enabled);
         Ok(())
     }
@@ -2902,10 +3052,14 @@ impl AxArchVCpu for VmxVcpu {
             IA32_SYSENTER_CS => VmcsGuest32::IA32_SYSENTER_CS.write(value as u32),
             IA32_SYSENTER_ESP => VmcsGuestNW::IA32_SYSENTER_ESP.write(value as usize),
             IA32_SYSENTER_EIP => VmcsGuestNW::IA32_SYSENTER_EIP.write(value as usize),
-            IA32_PAT => VmcsGuest64::IA32_PAT.write(value),
+            IA32_PAT => {
+                VmcsGuest64::IA32_PAT.write(value)?;
+                self.transition_msrs_dirty = true;
+                Ok(())
+            }
             IA32_EFER => {
                 VmcsGuest64::IA32_EFER.write(value)?;
-                vmcs::update_efer()
+                self.update_guest_efer()
             }
             IA32_FS_BASE => VmcsGuestNW::FS_BASE.write(value as usize),
             IA32_GS_BASE => VmcsGuestNW::GS_BASE.write(value as usize),

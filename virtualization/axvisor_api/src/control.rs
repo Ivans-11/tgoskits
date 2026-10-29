@@ -106,8 +106,10 @@ pub trait ControlIf {
 
     /// Reads raw bytes from a previously retained userspace fd.
     ///
-    /// The host must not block indefinitely. If the fd is not currently
-    /// readable, it should return [`ax_errno::AxErrorKind::WouldBlock`].
+    /// If the fd is not currently readable, the host may wait for a readable
+    /// event or return [`ax_errno::AxErrorKind::WouldBlock`]. The caller must
+    /// arrange to wake a waiting reader when cancelling it, and wait for the
+    /// read to finish before releasing the retained fd.
     fn read_user_fd_ref(user_fd_ref: UserFdRefId, buf: &mut [u8]) -> AxResult<usize>;
 
     /// Releases a previously retained userspace fd.

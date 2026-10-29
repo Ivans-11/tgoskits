@@ -54,23 +54,29 @@ impl XState {
         }
     }
 
-    pub fn switch_to_guest(&mut self) {
+    /// Capture the host state once at the outer vCPU run boundary. VMX may
+    /// handle many exits without returning to the host, so doing this inside
+    /// every entry/exit needlessly executes XGETBV and RDMSR.
+    pub fn refresh_host(&mut self) {
         unsafe {
             if self.xsave_available {
                 self.host_xcr0 = read_xcr0();
-                // Like KVM, avoid a serializing write (and a possible nested
-                // VM exit) when the hardware already has the required value.
-                // Still sample every switch: host state can change between
-                // runs, and all XCR0 bits, including AMX, must be preserved.
+                if self.xsaves_available {
+                    self.host_xss = Msr::IA32_XSS.read();
+                }
+            }
+        }
+    }
+
+    pub fn switch_to_guest(&mut self) {
+        unsafe {
+            if self.xsave_available {
                 if self.host_xcr0 != self.guest_xcr0 {
                     xcr0_write(Xcr0::from_bits_unchecked(self.guest_xcr0));
                 }
 
-                if self.xsaves_available {
-                    self.host_xss = Msr::IA32_XSS.read();
-                    if self.host_xss != self.guest_xss {
-                        Msr::IA32_XSS.write(self.guest_xss);
-                    }
+                if self.xsaves_available && self.host_xss != self.guest_xss {
+                    Msr::IA32_XSS.write(self.guest_xss);
                 }
             }
         }
@@ -79,19 +85,25 @@ impl XState {
     pub fn switch_to_host(&mut self) {
         unsafe {
             if self.xsave_available {
-                self.guest_xcr0 = read_xcr0();
                 if self.guest_xcr0 != self.host_xcr0 {
                     xcr0_write(Xcr0::from_bits_unchecked(self.host_xcr0));
                 }
 
-                if self.xsaves_available {
-                    self.guest_xss = Msr::IA32_XSS.read();
-                    if self.guest_xss != self.host_xss {
-                        Msr::IA32_XSS.write(self.host_xss);
-                    }
+                if self.xsaves_available && self.guest_xss != self.host_xss {
+                    Msr::IA32_XSS.write(self.host_xss);
                 }
             }
         }
+    }
+
+    /// Record an XSETBV performed by the guest while it is running.
+    pub fn set_guest_xcr0(&mut self, value: u64) {
+        self.guest_xcr0 = value;
+    }
+
+    #[cfg(feature = "vmx")]
+    pub fn guest_xss(&self) -> u64 {
+        self.guest_xss
     }
 }
 

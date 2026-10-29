@@ -501,7 +501,7 @@ pub enum VmcsReadOnlyNW {
 define_vmcs_fields_ro!(VmcsReadOnlyNW, usize);
 
 /// VM-Exit Informations. (SDM Vol. 3C, Section 24.9.1)
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct VmxExitInfo {
     /// Raw VM-exit reason, including the VM-entry-failure flag.
     pub full_exit_reason: u32,

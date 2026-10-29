@@ -468,6 +468,7 @@ impl AxVM {
             #[cfg(target_arch = "x86_64")]
             let setup_config = crate::vcpu::AxVCpuSetupConfig {
                 intercept_all_io: inner_mut.config.host_controlled(),
+                intercept_legacy_serial: !inner_mut.config.host_controlled(),
                 intercept_com1: inner_mut
                     .config
                     .emu_devices()
@@ -782,7 +783,8 @@ impl AxVM {
 
             let exit_reason = loop {
                 let exit_reason = Self::with_bound_vcpu(&vcpu, || {
-                    vcpu.set_hlt_exiting(false)?;
+                    // Route x86 HLT through host halt polling and blocking.
+                    vcpu.set_hlt_exiting(cfg!(target_arch = "x86_64"))?;
                     vcpu.run()
                 })?;
                 trace!("{exit_reason:#x?}");

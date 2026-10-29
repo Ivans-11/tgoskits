@@ -158,6 +158,11 @@ impl EmulatedLocalApic {
         self.get_vlapic_regs().posted_edge_masks()
     }
 
+    /// Check hardware-maintained IRR before blocking the owning vCPU.
+    pub fn has_pending_interrupt(&self) -> bool {
+        self.get_vlapic_regs().has_pending_interrupt()
+    }
+
     /// Apply the side effects of a hardware-assisted APIC write after VM exit.
     pub fn handle_apic_write(&self, offset: usize) -> AxResult<usize> {
         self.get_mut_vlapic_regs().handle_apic_write(offset)

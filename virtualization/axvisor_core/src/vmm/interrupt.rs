@@ -115,6 +115,7 @@ pub(crate) fn deliver_interrupt(route: InterruptRoute) {
         && route.interrupt.trigger == InterruptTriggerMode::EdgeTriggered
         && axvm::try_post_interrupt(route.vm_id, route.vcpu_id, route.interrupt.vector)
     {
+        vmm::vcpus::notify_vcpu_wakeup(route.vm_id, route.vcpu_id);
         return;
     }
     if let Some(context) = crate::context::try_current_vcpu_context()
@@ -124,6 +125,9 @@ pub(crate) fn deliver_interrupt(route: InterruptRoute) {
             inject_current_vcpu(route, &vcpu);
         })
     {
+        if cfg!(target_arch = "x86_64") {
+            vmm::vcpus::notify_vcpu_wakeup(route.vm_id, route.vcpu_id);
+        }
         return;
     }
 

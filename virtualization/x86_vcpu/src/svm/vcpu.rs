@@ -461,7 +461,12 @@ impl SvmVcpu {
         self.iopm
             .set_intercept_of_range(X86_PIT_PORT_BASE as u32, X86_PIT_PORT_COUNT, true);
         self.iopm.set_intercept(X86_PIT_SPEAKER_PORT as u32, true);
-        if config.intercept_com1 {
+        if config.intercept_legacy_serial {
+            for base in crate::LEGACY_SERIAL_PORTS {
+                self.iopm
+                    .set_intercept_of_range(base as u32, X86_COM1_PORT_COUNT, true);
+            }
+        } else if config.intercept_com1 {
             self.iopm
                 .set_intercept_of_range(X86_COM1_PORT_BASE as u32, X86_COM1_PORT_COUNT, true);
         }
@@ -1102,7 +1107,7 @@ impl SvmVcpu {
                 })
                 .ok_or_else(|| ax_err_type!(InvalidInput))
                 .and_then(|x| {
-                    self.xstate.guest_xcr0 = x.bits();
+                    self.xstate.set_guest_xcr0(x.bits());
                     self.advance_rip(VM_EXIT_INSTR_LEN_XSETBV)
                 })
         } else {
@@ -1428,7 +1433,7 @@ impl SvmVcpu {
                 for i in 0..width.size() {
                     data |= (self.read_guest_u8(imm_addr + i)? as u64) << (i * 8);
                 }
-                let exit = self.handle_decoded_npt_mmio_write(addr, data as u64, local_apic)?;
+                let exit = self.handle_decoded_npt_mmio_write(addr, data, local_apic)?;
                 Ok(Some((
                     exit,
                     (imm_addr.as_usize() + width.size() - start.as_usize()) as u8,
@@ -1781,6 +1786,7 @@ impl SvmVcpu {
         let self_addr = self as *mut Self as u64;
         let vmcb = self.vmcb.phys_addr().as_usize() as u64;
 
+        self.xstate.refresh_host();
         self.load_guest_xstate();
         self.before_vmrun();
 

@@ -156,6 +156,10 @@ fn supported_cpuid_entries_x86_64() -> Vec<KvmCpuidEntry2> {
     if max_basic >= 1 {
         push_host_cpuid(&mut entries, 1, 0, 0);
     }
+    if max_basic >= 2 {
+        // Cache/TLB descriptors include the marker directing libc to leaf 4.
+        push_host_cpuid(&mut entries, 2, 0, 0);
+    }
     if max_basic >= 4 {
         for index in 0..=16 {
             let entry = host_cpuid(4, index);

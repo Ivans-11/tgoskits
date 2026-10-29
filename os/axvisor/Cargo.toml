@@ -67,10 +67,11 @@ conformance-test = [
 [dependencies]
 [target.'cfg(not(any(windows, unix)))'.dependencies]
 ax-kspin = { workspace = true }
+ax-percpu = { workspace = true }
 log = "0.4"
 
 # System dependent modules provided by ArceOS.
-ax-std = { workspace = true, features = ["ext-ld", "paging", "irq", "multitask", "task-ext", "smp", "hv"] }
+ax-std = { workspace = true, features = ["ext-ld", "paging", "irq", "multitask", "task-ext", "smp", "ipi", "hv"] }
 ax-hal = { workspace = true, features = ["paging", "irq", "smp", "hv", "axvisor-linker"] }
 # System dependent modules provided by ArceOS-Hypervisor (bare-metal only)
 axaddrspace = { workspace = true }
@@ -88,7 +89,7 @@ ax-driver.workspace = true
 axplat-dyn = { workspace = true, optional = true, default-features = false }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-ax-config = { workspace = true, features = ["plat-dyn"] }
+ax-config = { workspace = true }
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu-ext = "0.1"
 arm-gic-driver = { workspace = true, features = ["rdif"] }
@@ -101,7 +102,7 @@ clap = { version = "4.6", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
-ax-config = { workspace = true, features = ["plat-dyn"] }
+ax-config = { workspace = true }
 prettyplease = "0.2"
 quote = "1.0"
 syn = "2.0"

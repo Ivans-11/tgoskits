@@ -508,6 +508,21 @@ impl VirtualApicRegs {
         self.isrv as u8
     }
 
+    /// Whether hardware has a virtual interrupt that can wake a halted guest.
+    /// Read the APIC page after VM exit, including hardware-updated IRR/ISR,
+    /// rather than relying on the software injection queue or cached ISR.
+    pub fn has_pending_interrupt(&self) -> bool {
+        if !self.apic_base.is_set(APIC_BASE::XAPIC_ENABLED)
+            || !self
+                .regs()
+                .SVR
+                .is_set(SPURIOUS_INTERRUPT_VECTOR::APICSoftwareEnableDisable)
+        {
+            return false;
+        }
+        pending_interrupt_above_priority(self.regs())
+    }
+
     /// Edge vectors eligible for hardware posting in the current LAPIC state.
     pub fn posted_edge_masks(&self) -> [u64; 4] {
         if !self.is_xapic_enabled()
@@ -847,6 +862,43 @@ impl VirtualApicRegs {
     fn write_dcr(&mut self) -> AxResult {
         self.virtual_timer.write_dcr(self.regs().DCR_TIMER.get());
         Ok(())
+    }
+}
+
+fn pending_interrupt_above_priority(regs: &LocalAPICRegs) -> bool {
+    let highest = |words: [u32; 8]| {
+        (1..8).rev().find_map(|i| {
+            let bits = words[i];
+            (bits != 0).then(|| i as u32 * 32 + u32::from(fls32(bits)))
+        })
+    };
+    let isr = highest(core::array::from_fn(|i| regs.ISR[i].get() as u32)).unwrap_or(0);
+    let priority = prio(regs.TPR.get()).max(prio(isr));
+    highest(core::array::from_fn(|i| regs.IRR[i].get() as u32))
+        .is_some_and(|vector| prio(vector) > priority)
+}
+
+#[cfg(test)]
+mod pending_interrupt_tests {
+    use super::*;
+
+    #[test]
+    fn hardware_irr_obeys_tpr_and_hardware_isr() {
+        // Model hardware transferring a posted vector into the virtual APIC
+        // page, without adding anything to a software injection queue.
+        let mut page = [0u128; 256];
+        let ptr = page.as_mut_ptr().cast::<LocalAPICRegs>();
+        let regs = unsafe { &*ptr };
+        assert!(!pending_interrupt_above_priority(regs));
+        unsafe { ptr.cast::<u32>().add(0x270 / 4).write_volatile(1 << 17) };
+        assert!(pending_interrupt_above_priority(regs)); // vector 0xf1
+        regs.TPR.set(0xf0);
+        assert!(!pending_interrupt_above_priority(regs));
+        regs.TPR.set(0);
+        regs.ISR[7].set(1 << 16); // 0xf0: same priority class
+        assert!(!pending_interrupt_above_priority(regs));
+        regs.ISR[7].set(0); // hardware EOI
+        assert!(pending_interrupt_above_priority(regs));
     }
 }
 
