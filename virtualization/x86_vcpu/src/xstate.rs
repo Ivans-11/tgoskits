@@ -105,6 +105,11 @@ impl XState {
     pub fn guest_xss(&self) -> u64 {
         self.guest_xss
     }
+
+    #[cfg(feature = "vmx")]
+    pub fn set_guest_xss(&mut self, value: u64) {
+        self.guest_xss = value;
+    }
 }
 
 pub fn xsave_available() -> bool {

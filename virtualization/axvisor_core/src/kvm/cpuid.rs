@@ -359,6 +359,8 @@ fn host_cpuid(function: u32, index: u32) -> KvmCpuidEntry2 {
             #[cfg(feature = "vmx")]
             if index == 0 {
                 entry.ecx &= !((1 << 5) | (1 << 16)); // WAITPKG, LA57
+                // Match the guest capability policy: do not advertise IBT.
+                entry.edx &= !(1 << 20);
             }
             const AMX_FEATURES: u32 = (1 << 22) | (1 << 24) | (1 << 25);
             entry.edx &= !AMX_FEATURES;

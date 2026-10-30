@@ -13,7 +13,7 @@ const ZERO: CpuIdResult = CpuIdResult {
 };
 const INDEX_SIGNIFICANT: u32 = 1;
 
-/// Final virtualized results; invalidated on CPUID-table, CR4 or XCR0 changes.
+/// Final virtualized results; invalidated on CPUID-table, CR4, XCR0 or XSS changes.
 #[derive(Debug)]
 pub(super) struct GuestCpuidCache(Vec<(u32, u32, CpuIdResult)>);
 
@@ -236,6 +236,50 @@ mod tests {
         assert_eq!(configured(&table, 4, 1).eax, 99);
         assert_eq!(configured(&table, 4, 0).eax, 0);
         assert_eq!(configured(&table, 7, 0).eax, 0);
+    }
+
+    #[test]
+    fn compacted_size_tracks_guest_xss() {
+        let table = [
+            AxVCpuCpuidEntry {
+                function: 0xd,
+                index: 0,
+                flags: 1,
+                eax: 7,
+                ..Default::default()
+            },
+            AxVCpuCpuidEntry {
+                function: 0xd,
+                index: 1,
+                flags: 1,
+                eax: 1 << 3,
+                ecx: 1 << 11,
+                ..Default::default()
+            },
+            AxVCpuCpuidEntry {
+                function: 0xd,
+                index: 2,
+                flags: 1,
+                eax: 256,
+                ebx: 576,
+                ..Default::default()
+            },
+            AxVCpuCpuidEntry {
+                function: 0xd,
+                index: 11,
+                flags: 1,
+                eax: 16,
+                ecx: 1,
+                ..Default::default()
+            },
+        ];
+        let mut cache = CpuidCache::new();
+        // Disabling supervisor CET state must shrink the compacted buffer,
+        // while the standard (XCR0-only) layout stays unchanged.
+        assert_eq!(cache.xsave(&table, 1, 7, 1 << 11).ebx, 848);
+        assert_eq!(cache.xsave(&table, 1, 7, 0).ebx, 832);
+        assert_eq!(cache.xsave(&table, 0, 7, 1 << 11).ebx, 832);
+        assert_eq!(cache.xsave(&table, 0, 7, 0).ebx, 832);
     }
 
     #[test]

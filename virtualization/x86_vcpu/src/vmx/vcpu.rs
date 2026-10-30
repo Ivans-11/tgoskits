@@ -750,6 +750,10 @@ impl VmxVcpu {
         for index in &SWITCHED_MSR_INDICES[1..] {
             self.msr_bitmap.set_write_intercept(*index, true);
         }
+        // Track XSS writes so state switching and CPUID sizing share the
+        // guest's current value without reading the MSR on every VM exit.
+        self.msr_bitmap
+            .set_write_intercept(Msr::IA32_XSS as u32, true);
         for index in [IA32_PAT, IA32_EFER] {
             self.msr_bitmap.set_read_intercept(index, true);
             self.msr_bitmap.set_write_intercept(index, true);
@@ -1401,6 +1405,9 @@ impl VmxVcpu {
             VmxExitReason::XSETBV => Some(self.handle_xsetbv()),
             VmxExitReason::CR_ACCESS => Some(self.handle_cr()),
             VmxExitReason::CPUID => Some(self.handle_cpuid()),
+            VmxExitReason::MSR_WRITE if self.regs().rcx as u32 == Msr::IA32_XSS as u32 => {
+                Some(self.handle_xss_write())
+            }
             msr_rw @ (VmxExitReason::MSR_READ | VmxExitReason::MSR_WRITE)
                 if matches!(self.regs().rcx as u32, IA32_PAT | IA32_EFER)
                     || switched_msr_slot(self.regs().rcx as u32).is_some() =>
@@ -2233,6 +2240,9 @@ impl VmxVcpu {
             LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
                 let mut res = self.cpuid_cache.query(&self.cpuid, function, index);
                 if regs_clone.rcx == 0 {
+                    // Apply the IBT policy to both direct and userspace-configured guests.
+                    const FEATURE_IBT: u32 = 1 << 20;
+                    res.edx &= !FEATURE_IBT;
                     // AMX tile state is not represented by the x86 crate's
                     // Xcr0 bitflags and cannot be switched safely here.
                     // Hide AMX consistently so guests do not issue XSETBV
@@ -2361,6 +2371,20 @@ impl VmxVcpu {
             // xcr0 only
             ax_err!(Unsupported, "only xcr0 is supported")
         }
+    }
+
+    fn handle_xss_write(&mut self) -> AxResult {
+        let value = self.read_edx_eax();
+        let features = self.cpuid_cache.query(&self.cpuid, 0xd, 1);
+        let supported = u64::from(features.ecx) | (u64::from(features.edx) << 32);
+        if features.eax & (1 << 3) == 0 || value & !supported != 0 {
+            // Unsupported XSAVES or reserved XSS bits: fault at WRMSR.
+            self.queue_event(13, Some(0));
+            return Ok(());
+        }
+        self.xstate.set_guest_xss(value);
+        self.cpuid_results.clear();
+        self.advance_rip(2)
     }
 
     fn handle_state_msr(&mut self, write: bool) -> AxResult {
