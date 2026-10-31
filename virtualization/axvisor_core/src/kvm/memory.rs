@@ -151,6 +151,19 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
     handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false)
 }
 
+/// Classifies a fault without pinning or allocating pages while a vCPU is bound.
+#[cfg(not(target_arch = "aarch64"))]
+pub(in crate::kvm) fn outside_memory_slots(
+    vm_file: api_control::ControlFileId,
+    addr: GuestPhysAddr,
+) -> AxResult<bool> {
+    let files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vm(vm)) = files.get(&vm_file) else {
+        return ax_err!(NotFound);
+    };
+    Ok(memory_slot_for_gpa(vm, addr.as_usize() as u64).is_none())
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 fn handle_memory_slot_page_fault_inner(
     vm_file: api_control::ControlFileId,
@@ -494,7 +507,7 @@ fn ensure_no_memory_overlap(vm: &VmFileState, slot_id: u32, new_slot: &MemorySlo
     Ok(())
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+#[cfg(not(target_arch = "aarch64"))]
 fn memory_slot_for_gpa(vm: &VmFileState, gpa: u64) -> Option<(&u32, &MemorySlot)> {
     vm.memory_slots.iter().find(|(_, slot)| {
         slot.guest_phys_addr <= gpa && gpa < slot.guest_phys_addr + slot.memory_size

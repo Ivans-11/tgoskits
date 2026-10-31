@@ -671,11 +671,34 @@ impl AxVM {
     where
         F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
     {
+        self.run_vcpu_raw_with_mmio(vcpu_id, external_page_fault_handler, |_| Ok(false))
+    }
+
+    /// Runs a vCPU, decoding known MMIO faults before unbinding it.
+    ///
+    /// `is_mmio` must exclude all externally managed RAM slots and must not
+    /// sleep or resolve faults: it is called with local interrupts disabled.
+    /// RAM faults are still resolved after unbinding, in the caller's context.
+    /// SVM already decodes faults while bound and does not need this classifier.
+    pub fn run_vcpu_raw_with_mmio<F, M>(
+        &self,
+        vcpu_id: usize,
+        external_page_fault_handler: F,
+        is_mmio: M,
+    ) -> AxResult<AxVCpuExitReason>
+    where
+        F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
+        M: FnMut(GuestPhysAddr) -> AxResult<bool>,
+    {
         #[cfg(feature = "svm")]
-        return self.run_vcpu_raw_svm(vcpu_id, external_page_fault_handler);
+        {
+            let _ = is_mmio;
+            self.run_vcpu_raw_svm(vcpu_id, external_page_fault_handler)
+        }
 
         #[cfg(not(feature = "svm"))]
         {
+            let mut is_mmio = is_mmio;
             let mut external_page_fault_handler = external_page_fault_handler;
             let vcpu = self
                 .vcpu(vcpu_id)
@@ -690,6 +713,14 @@ impl AxVM {
                     // an unbind/bind pair for each one.
                     for _ in 0..8 {
                         let exit_reason = vcpu.run()?;
+                        if let AxVCpuExitReason::NestedPageFault { addr, access_flags } =
+                            exit_reason
+                            && !access_flags.contains(MappingFlags::EXECUTE)
+                            && is_mmio(addr)?
+                            && !self.inner_mut.lock().address_space.has_memory_region(addr)
+                        {
+                            return Ok(vcpu.decode_nested_page_fault()?.unwrap_or(exit_reason));
+                        }
                         if !matches!(exit_reason, AxVCpuExitReason::Nothing) {
                             return Ok(exit_reason);
                         }

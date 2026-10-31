@@ -184,7 +184,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             || arm_run_state.leave(),
         );
         #[cfg(not(target_arch = "aarch64"))]
-        let run_result = vm.run_vcpu_raw(vcpu_id, |addr, access_flags| {
+        let resolve_fault = |addr, access_flags| {
             #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
             {
                 handle_memory_slot_page_fault(vm_file, addr, access_flags)
@@ -194,6 +194,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 let _ = (addr, access_flags);
                 Ok(false)
             }
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let run_result = vm.run_vcpu_raw_with_mmio(vcpu_id, resolve_fault, |addr| {
+            crate::kvm::memory::outside_memory_slots(vm_file, addr)
         });
         let exit_reason = match run_result {
             Ok(exit_reason) => exit_reason,

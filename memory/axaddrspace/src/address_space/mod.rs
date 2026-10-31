@@ -152,6 +152,11 @@ impl<H: PagingHandler> AddrSpace<H> {
         self.areas.clear(&mut self.pt).unwrap();
     }
 
+    /// Checks whether an address belongs to a region, including uncommitted pages.
+    pub fn has_memory_region(&self, addr: GuestPhysAddr) -> bool {
+        self.areas.find(addr).is_some()
+    }
+
     /// Handles a page fault at the given address.
     ///
     /// `access_flags` indicates the access type that caused the page fault.
