@@ -42,6 +42,35 @@ pub fn detect_h_extension() -> bool {
     ans != 2
 }
 
+/// Select the supported G-stage mode on an H-capable hart.
+/// Unsupported HGATP modes are WARL and read back as a different mode.
+pub fn max_guest_page_table_levels() -> usize {
+    let interrupts_enabled = sstatus::read().sie();
+    let previous: usize;
+    let supported: usize;
+    unsafe {
+        sstatus::clear_sie();
+        asm!(
+            "csrr {previous}, hgatp",
+            "csrw hgatp, zero",
+            "csrw hgatp, {candidate}",
+            "csrr {supported}, hgatp",
+            "csrw hgatp, {previous}",
+            ".insn r 0x73, 0, 0x31, x0, x0, x0", // hfence.gvma x0, x0
+            previous = out(reg) previous,
+            supported = out(reg) supported,
+            candidate = in(reg) 9usize << 60,
+            options(nostack),
+        );
+        if interrupts_enabled {
+            sstatus::set_sie();
+        }
+    }
+    // Sv39x4 is the baseline G-stage mode on RV64 H implementations.
+    let _ = previous;
+    if supported >> 60 == 9 { 4 } else { 3 }
+}
+
 // Tries to execute all instructions defined in clojure `f`.
 // If resulted in an exception, this function returns its exception id.
 //

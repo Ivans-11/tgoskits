@@ -57,7 +57,7 @@ impl RISCVVCpu {
             KVM_REG_RISCV_CONFIG_MVENDORID
             | KVM_REG_RISCV_CONFIG_MARCHID
             | KVM_REG_RISCV_CONFIG_MIMPID => Ok(0),
-            KVM_REG_RISCV_CONFIG_SATP_MODE => Ok(KVM_RISCV_SATP_MODE_SV48),
+            KVM_REG_RISCV_CONFIG_SATP_MODE => Ok((crate::max_guest_page_table_levels() + 5) as u64),
             _ => Err(AxError::Unsupported),
         }
     }

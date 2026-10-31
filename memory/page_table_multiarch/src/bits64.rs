@@ -10,12 +10,12 @@ use crate::{
 
 const ENTRY_COUNT: usize = 512;
 
-const fn p4_index(vaddr: usize) -> usize {
-    (vaddr >> (12 + 27)) & (ENTRY_COUNT - 1)
+const fn p4_index(vaddr: usize, entries: usize) -> usize {
+    (vaddr >> (12 + 27)) & (entries - 1)
 }
 
-const fn p3_index(vaddr: usize) -> usize {
-    (vaddr >> (12 + 18)) & (ENTRY_COUNT - 1)
+const fn p3_index(vaddr: usize, entries: usize) -> usize {
+    (vaddr >> (12 + 18)) & (entries - 1)
 }
 
 const fn p2_index(vaddr: usize) -> usize {
@@ -30,23 +30,41 @@ const fn p1_index(vaddr: usize) -> usize {
 ///
 /// It also tracks all intermediate level tables. They will be deallocated
 /// When the [`PageTable64`] itself is dropped.
-pub struct PageTable64<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> {
+/// `ROOT_PAGES` is one for ordinary tables and four for RISC-V G-stage x4.
+pub struct PageTable64<
+    M: PagingMetaData,
+    PTE: GenericPTE,
+    H: PagingHandler,
+    const ROOT_PAGES: usize = 1,
+> {
     root_paddr: PhysAddr,
     #[cfg(feature = "copy-from")]
-    borrowed_entries: bitmaps::Bitmap<ENTRY_COUNT>,
+    borrowed_entries: [bitmaps::Bitmap<ENTRY_COUNT>; ROOT_PAGES],
     _phantom: PhantomData<(M, PTE, H)>,
 }
 
-impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H> {
+impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler, const ROOT_PAGES: usize>
+    PageTable64<M, PTE, H, ROOT_PAGES>
+{
     /// Creates a new page table instance or returns the error.
     ///
-    /// It will allocate a new page for the root page table.
+    /// The root allocation is aligned to its size (16 KiB for G-stage x4).
     pub fn try_new() -> PagingResult<Self> {
-        let root_paddr = Self::alloc_table()?;
+        assert!(matches!(M::ROOT_ENTRY_COUNT, 512 | 2048));
+        assert_eq!(ROOT_PAGES, M::ROOT_ENTRY_COUNT / ENTRY_COUNT);
+        let root_paddr = if M::ROOT_ENTRY_COUNT == ENTRY_COUNT {
+            Self::alloc_table()?
+        } else {
+            let pages = M::ROOT_ENTRY_COUNT / ENTRY_COUNT;
+            let size = pages * PAGE_SIZE_4K;
+            let paddr = H::alloc_frames(pages, size).ok_or(PagingError::NoMemory)?;
+            unsafe { core::ptr::write_bytes(H::phys_to_virt(paddr).as_mut_ptr(), 0, size) };
+            paddr
+        };
         Ok(Self {
             root_paddr,
             #[cfg(feature = "copy-from")]
-            borrowed_entries: bitmaps::Bitmap::new(),
+            borrowed_entries: [bitmaps::Bitmap::new(); ROOT_PAGES],
             _phantom: PhantomData,
         })
     }
@@ -101,13 +119,15 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     /// Gets a cursor to modify the page table.
     ///
     /// The TLB will be flushed automatically when the cursor is dropped.
-    pub fn cursor(&mut self) -> PageTable64Cursor<'_, M, PTE, H> {
+    pub fn cursor(&mut self) -> PageTable64Cursor<'_, M, PTE, H, ROOT_PAGES> {
         PageTable64Cursor::new(self)
     }
 }
 
 // Private implements.
-impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H> {
+impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler, const ROOT_PAGES: usize>
+    PageTable64<M, PTE, H, ROOT_PAGES>
+{
     fn alloc_table() -> PagingResult<PhysAddr> {
         if let Some(paddr) = H::alloc_frame() {
             let ptr = H::phys_to_virt(paddr).as_mut_ptr();
@@ -120,12 +140,22 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
 
     fn table_of<'a>(&self, paddr: PhysAddr) -> &'a [PTE] {
         let ptr = H::phys_to_virt(paddr).as_ptr() as _;
-        unsafe { core::slice::from_raw_parts(ptr, ENTRY_COUNT) }
+        let entries = if paddr == self.root_paddr {
+            M::ROOT_ENTRY_COUNT
+        } else {
+            ENTRY_COUNT
+        };
+        unsafe { core::slice::from_raw_parts(ptr, entries) }
     }
 
     fn table_of_mut<'a>(&mut self, paddr: PhysAddr) -> &'a mut [PTE] {
         let ptr = H::phys_to_virt(paddr).as_mut_ptr() as _;
-        unsafe { core::slice::from_raw_parts_mut(ptr, ENTRY_COUNT) }
+        let entries = if paddr == self.root_paddr {
+            M::ROOT_ENTRY_COUNT
+        } else {
+            ENTRY_COUNT
+        };
+        unsafe { core::slice::from_raw_parts_mut(ptr, entries) }
     }
 
     fn next_table<'a>(&self, entry: &PTE) -> PagingResult<&'a [PTE]> {
@@ -164,12 +194,12 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             self.table_of(self.root_paddr())
         } else if M::LEVELS == 4 {
             let p4 = self.table_of(self.root_paddr());
-            let p4e = &p4[p4_index(vaddr)];
+            let p4e = &p4[p4_index(vaddr, p4.len())];
             self.next_table(p4e)?
         } else {
             unreachable!()
         };
-        let p3e = &p3[p3_index(vaddr)];
+        let p3e = &p3[p3_index(vaddr, p3.len())];
         if p3e.is_huge() {
             return Ok((p3e, PageSize::Size1G));
         }
@@ -191,12 +221,14 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             self.table_of_mut(self.root_paddr())
         } else if M::LEVELS == 4 {
             let p4 = self.table_of_mut(self.root_paddr());
-            let p4e = &mut p4[p4_index(vaddr)];
+            let index = p4_index(vaddr, p4.len());
+            let p4e = &mut p4[index];
             self.next_table_mut(p4e)?
         } else {
             unreachable!()
         };
-        let p3e = &mut p3[p3_index(vaddr)];
+        let index = p3_index(vaddr, p3.len());
+        let p3e = &mut p3[index];
         if p3e.is_huge() {
             return Ok((p3e, PageSize::Size1G));
         }
@@ -222,12 +254,14 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
             self.table_of_mut(self.root_paddr())
         } else if M::LEVELS == 4 {
             let p4 = self.table_of_mut(self.root_paddr());
-            let p4e = &mut p4[p4_index(vaddr)];
+            let index = p4_index(vaddr, p4.len());
+            let p4e = &mut p4[index];
             self.next_table_mut_or_create(p4e)?
         } else {
             unreachable!()
         };
-        let p3e = &mut p3[p3_index(vaddr)];
+        let index = p3_index(vaddr, p3.len());
+        let p3e = &mut p3[index];
         if page_size == PageSize::Size1G {
             return Ok(p3e);
         }
@@ -294,41 +328,55 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     }
 }
 
-impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> Drop for PageTable64<M, PTE, H> {
+impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler, const ROOT_PAGES: usize> Drop
+    for PageTable64<M, PTE, H, ROOT_PAGES>
+{
     fn drop(&mut self) {
         let root = self.table_of(self.root_paddr);
         #[allow(unused_variables)]
         for (i, entry) in root.iter().enumerate() {
             #[cfg(feature = "copy-from")]
-            if self.borrowed_entries.get(i) {
+            if self.borrowed_entries[i / ENTRY_COUNT].get(i % ENTRY_COUNT) {
                 continue;
             }
             if self.next_table(entry).is_ok() {
                 self.dealloc_tree(entry.paddr(), 1);
             }
         }
-        H::dealloc_frame(self.root_paddr());
+        if M::ROOT_ENTRY_COUNT == ENTRY_COUNT {
+            H::dealloc_frame(self.root_paddr());
+        } else {
+            H::dealloc_frames(self.root_paddr(), M::ROOT_ENTRY_COUNT / ENTRY_COUNT);
+        }
     }
 }
 
 /// A cursor created by [`PageTable64::cursor`] to modify the page table.
-pub struct PageTable64Cursor<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> {
-    inner: &'a mut PageTable64<M, PTE, H>,
+pub struct PageTable64Cursor<
+    'a,
+    M: PagingMetaData,
+    PTE: GenericPTE,
+    H: PagingHandler,
+    const ROOT_PAGES: usize = 1,
+> {
+    inner: &'a mut PageTable64<M, PTE, H, ROOT_PAGES>,
     flusher: TlbFlusher<M>,
 }
 
-impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> Deref
-    for PageTable64Cursor<'_, M, PTE, H>
+impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler, const ROOT_PAGES: usize> Deref
+    for PageTable64Cursor<'_, M, PTE, H, ROOT_PAGES>
 {
-    type Target = PageTable64<M, PTE, H>;
+    type Target = PageTable64<M, PTE, H, ROOT_PAGES>;
 
-    fn deref(&self) -> &PageTable64<M, PTE, H> {
+    fn deref(&self) -> &PageTable64<M, PTE, H, ROOT_PAGES> {
         self.inner
     }
 }
 
-impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor<'a, M, PTE, H> {
-    fn new(inner: &'a mut PageTable64<M, PTE, H>) -> Self {
+impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler, const ROOT_PAGES: usize>
+    PageTable64Cursor<'a, M, PTE, H, ROOT_PAGES>
+{
+    fn new(inner: &'a mut PageTable64<M, PTE, H, ROOT_PAGES>) -> Self {
         Self {
             inner,
             flusher: TlbFlusher::None,
@@ -574,11 +622,16 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
     /// Copy entries from another page table within the given virtual memory
     /// range.
     #[cfg(feature = "copy-from")]
-    pub fn copy_from(&mut self, other: &PageTable64<M, PTE, H>, start: M::VirtAddr, size: usize) {
+    pub fn copy_from(
+        &mut self,
+        other: &PageTable64<M, PTE, H, ROOT_PAGES>,
+        start: M::VirtAddr,
+        size: usize,
+    ) {
         if size == 0 {
             return;
         }
-        let src_table = self.table_of(other.root_paddr);
+        let src_table = other.table_of(other.root_paddr);
         let root_paddr = self.root_paddr;
         let dst_table = self.inner.table_of_mut(root_paddr);
         let index_fn = if M::LEVELS == 3 {
@@ -588,13 +641,15 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         } else {
             unreachable!()
         };
-        let start_idx = index_fn(start.into());
-        let end_idx = index_fn(start.into() + size - 1) + 1;
-        assert!(start_idx < ENTRY_COUNT);
-        assert!(end_idx <= ENTRY_COUNT);
+        let start_idx = index_fn(start.into(), M::ROOT_ENTRY_COUNT);
+        let end_idx = index_fn(start.into() + size - 1, M::ROOT_ENTRY_COUNT) + 1;
+        assert!(start_idx < M::ROOT_ENTRY_COUNT);
+        assert!(end_idx <= M::ROOT_ENTRY_COUNT);
         for i in start_idx..end_idx {
             let entry = &mut dst_table[i];
-            if !self.inner.borrowed_entries.set(i, true) && self.next_table(entry).is_ok() {
+            if !self.inner.borrowed_entries[i / ENTRY_COUNT].set(i % ENTRY_COUNT, true)
+                && self.next_table(entry).is_ok()
+            {
                 self.dealloc_tree(entry.paddr(), 1);
             }
             *entry = src_table[i];
@@ -620,8 +675,8 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
     }
 }
 
-impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> Drop
-    for PageTable64Cursor<'_, M, PTE, H>
+impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler, const ROOT_PAGES: usize> Drop
+    for PageTable64Cursor<'_, M, PTE, H, ROOT_PAGES>
 {
     fn drop(&mut self) {
         self.flush();

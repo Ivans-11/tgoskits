@@ -18,7 +18,7 @@ use axvisor_api::control as api_control;
 use axvm::AxVMRef;
 
 use super::{CONTROL_FILES, ControlFileState};
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 use crate::kvm::state::{MappedMemoryPage, PinnedPageGroup};
 use crate::kvm::{
     abi::raw as abi,
@@ -59,7 +59,7 @@ pub(in crate::kvm) fn set_user_memory_region(
         return Ok(());
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
     {
         let vm_ref = vm.vm.clone();
         ensure_no_memory_overlap(vm, region.slot, &region.into())?;
@@ -111,7 +111,7 @@ pub(in crate::kvm) fn set_user_memory_region(
         Ok(())
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
     {
         let mut new_slot: MemorySlot = region.into();
         ensure_no_memory_overlap(vm, region.slot, &new_slot)?;
@@ -142,7 +142,7 @@ pub(in crate::kvm) fn set_user_memory_region(
 /// commit their entire userspace range. In particular, gVisor registers sparse
 /// ranges that are several GiB large. Resolve only the faulting page and retain
 /// its host pin until the slot is removed.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 pub(in crate::kvm) fn handle_memory_slot_page_fault(
     vm_file: api_control::ControlFileId,
     fault_addr: GuestPhysAddr,
@@ -151,7 +151,7 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
     handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 fn handle_memory_slot_page_fault_inner(
     vm_file: api_control::ControlFileId,
     fault_addr: GuestPhysAddr,
@@ -400,7 +400,7 @@ impl From<UserspaceMemoryRegion> for MemorySlot {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
 fn map_pinned_user_memory(
     vm: &AxVMRef,
     region: UserspaceMemoryRegion,
@@ -448,6 +448,20 @@ pub(in crate::kvm) fn unmap_memory_slot(vm: &AxVMRef, slot: MemorySlot) {
         return;
     }
 
+    // RISC-V slots are sparse after demand mapping. MemorySet::unmap already
+    // skips holes, so remove all mappings in one traversal before unpinning.
+    // Per-page unmap would repeatedly scan the same areas during VM teardown.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let _ = vm.unmap_region(
+            GuestPhysAddr::from(slot.guest_phys_addr as usize),
+            slot.memory_size as usize,
+        );
+        for mapped_page in slot.mapped_pages.into_values() {
+            mapped_page.pinned_pages.release();
+        }
+    }
+    #[cfg(not(target_arch = "riscv64"))]
     for (page_gpa, mapped_page) in slot.mapped_pages {
         let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa as usize), abi::PAGE_SIZE_USIZE);
         mapped_page.pinned_pages.release();
@@ -480,14 +494,14 @@ fn ensure_no_memory_overlap(vm: &VmFileState, slot_id: u32, new_slot: &MemorySlo
     Ok(())
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 fn memory_slot_for_gpa(vm: &VmFileState, gpa: u64) -> Option<(&u32, &MemorySlot)> {
     vm.memory_slots.iter().find(|(_, slot)| {
         slot.guest_phys_addr <= gpa && gpa < slot.guest_phys_addr + slot.memory_size
     })
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MemorySlotSnapshot {
     slot_id: u32,
@@ -500,7 +514,7 @@ struct MemorySlotSnapshot {
     page_hva: usize,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 impl MemorySlotSnapshot {
     fn new(slot_id: u32, slot: &MemorySlot, page_gpa: u64) -> AxResult<Self> {
         let page_offset = page_gpa
@@ -536,7 +550,7 @@ const fn is_page_aligned(addr: u64) -> bool {
     addr & (abi::PAGE_SIZE - 1) == 0
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 const fn align_down_to_page(addr: u64) -> u64 {
     addr & !(abi::PAGE_SIZE - 1)
 }

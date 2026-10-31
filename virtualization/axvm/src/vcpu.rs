@@ -117,9 +117,7 @@ cfg_if::cfg_if! {
         pub use riscv_vcpu::RISCVVCpuCreateConfig as AxVCpuCreateConfig;
         pub use riscv_vcpu::has_hardware_support;
 
-        /// RISC-V uses Sv39 (3 levels) or Sv48 (4 levels) for guest page tables.
-        /// Default to 4 levels (Sv48) for maximum address space.
-        pub fn max_guest_page_table_levels() -> usize { 4 }
+        pub use riscv_vcpu::max_guest_page_table_levels;
     } else if #[cfg(target_arch = "loongarch64")] {
         pub use loongarch_vcpu::LoongArchPerCpu as AxVMArchPerCpuImpl;
         pub use loongarch_vcpu::LoongArchVCpu as AxArchVCpuImpl;

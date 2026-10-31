@@ -42,7 +42,7 @@ use x86::{update_vcpu_run_interrupt_state, vcpu_run_irq_window_open};
 use super::{CONTROL_FILES, ControlFileState, take_control_vcpu_interrupts};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::eventfd::is_userspace_eoi_vector;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 use crate::kvm::memory::handle_memory_slot_page_fault;
 use crate::{
     kvm::{
@@ -185,11 +185,11 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         );
         #[cfg(not(target_arch = "aarch64"))]
         let run_result = vm.run_vcpu_raw(vcpu_id, |addr, access_flags| {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
             {
                 handle_memory_slot_page_fault(vm_file, addr, access_flags)
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
             {
                 let _ = (addr, access_flags);
                 Ok(false)

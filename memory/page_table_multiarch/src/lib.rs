@@ -68,6 +68,10 @@ pub trait PagingMetaData: Sync + Send {
     /// The maximum number of bits of virtual address.
     const VA_MAX_BITS: usize;
 
+    /// Number of root entries. RISC-V G-stage x4 tables have 2048 entries;
+    /// ordinary 64-bit page tables have 512. Lower levels always have 512.
+    const ROOT_ENTRY_COUNT: usize = 512;
+
     /// The maximum physical address.
     const PA_MAX_ADDR: usize = (1 << Self::PA_MAX_BITS) - 1;
 

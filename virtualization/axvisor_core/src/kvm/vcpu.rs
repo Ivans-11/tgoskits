@@ -168,6 +168,11 @@ pub(in crate::kvm) fn get_one_reg(
         )?;
         return Ok(0);
     }
+    #[cfg(target_arch = "riscv64")]
+    if let Some(frequency) = riscv_timer_frequency(one_reg.id)? {
+        write_u64_user(one_reg.addr as usize, frequency)?;
+        return Ok(0);
+    }
     let value = vcpu.get_arch_reg(one_reg.id)?;
     write_u64_user(one_reg.addr as usize, value)?;
     Ok(0)
@@ -190,8 +195,42 @@ pub(in crate::kvm) fn set_one_reg(
             ax_err!(InvalidInput)
         };
     }
+    #[cfg(target_arch = "riscv64")]
+    if let Some(frequency) = riscv_timer_frequency(one_reg.id)? {
+        return if value == frequency {
+            Ok(0)
+        } else {
+            Err(AxError::InvalidInput)
+        };
+    }
     vcpu.set_arch_reg(one_reg.id, value)?;
     Ok(0)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn riscv_timer_frequency(reg_id: u64) -> AxResult<Option<u64>> {
+    use kvm_uapi::riscv::{KVM_REG_RISCV_TIMER_FREQUENCY_INDEX, KvmRiscvRegKind, riscv_reg_kind};
+    if !matches!(
+        riscv_reg_kind(reg_id),
+        Ok(KvmRiscvRegKind::Timer(KVM_REG_RISCV_TIMER_FREQUENCY_INDEX))
+    ) {
+        return Ok(None);
+    }
+    let bytes = crate::vmm::fdt::try_get_host_fdt().ok_or(AxError::BadState)?;
+    let fdt = fdt_parser::Fdt::from_bytes(bytes).map_err(|_| AxError::InvalidData)?;
+    let cpus = fdt.find_nodes("/cpus").next().ok_or(AxError::InvalidData)?;
+    let property = cpus
+        .find_property("timebase-frequency")
+        .ok_or(AxError::InvalidData)?;
+    let value = property
+        .raw_value()
+        .try_into()
+        .map(u32::from_be_bytes)
+        .map_err(|_| AxError::InvalidData)?;
+    if value == 0 {
+        return Err(AxError::InvalidData);
+    }
+    Ok(Some(u64::from(value)))
 }
 
 #[cfg(target_arch = "aarch64")]

@@ -13,4 +13,28 @@
 // limitations under the License.
 
 pub use ax_page_table_entry::riscv::Rv64PTE;
-pub use ax_page_table_multiarch::riscv::{Sv39MetaData, Sv48MetaData};
+use ax_page_table_multiarch::PagingMetaData;
+
+/// RISC-V G-stage table: unsigned GPAs and a four-page root table.
+pub struct GStageMetaData<const LEVELS: usize>;
+
+impl<const LEVELS: usize> PagingMetaData for GStageMetaData<LEVELS> {
+    const LEVELS: usize = LEVELS;
+    const PA_MAX_BITS: usize = 56;
+    const VA_MAX_BITS: usize = 12 + LEVELS * 9 + 2;
+    const ROOT_ENTRY_COUNT: usize = 2048;
+
+    type VirtAddr = crate::GuestPhysAddr;
+
+    fn vaddr_is_valid(vaddr: usize) -> bool {
+        vaddr < (1usize << Self::VA_MAX_BITS)
+    }
+
+    fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {
+        // G-stage mappings require GVMA, not the VS-stage VVMA fence.
+        // Keep a memory clobber so PTE stores complete before invalidation.
+        unsafe {
+            core::arch::asm!(".insn r 0x73, 0, 0x31, x0, x0, x0", options(nostack));
+        }
+    }
+}

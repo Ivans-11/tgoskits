@@ -192,16 +192,28 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
     }
 
     fn set_ept_root(&mut self, ept_root: HostPhysAddr) -> AxResult {
-        // AxVM builds a 4-level guest stage-2 page table on RISC-V, so hgatp
-        // must use Sv48x4 as well.
-        self.regs.virtual_hs_csrs.hgatp = 9usize << 60 | usize::from(ept_root) >> 12;
+        if !usize::from(ept_root).is_multiple_of(0x4000) {
+            return ax_errno::ax_err!(InvalidInput, "G-stage root must be 16 KiB aligned");
+        }
+        let mode = crate::max_guest_page_table_levels() + 5;
+        self.regs.virtual_hs_csrs.hgatp = mode << 60 | usize::from(ept_root) >> 12;
         Ok(())
     }
 
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
         let mut host_fp = FpDState::default();
+        let host_sstatus: usize;
+        let host_sie: usize;
         unsafe {
-            sstatus::clear_sie();
+            // Preserve the host's interrupt state, including callers that
+            // enter with local interrupts disabled.
+            core::arch::asm!(
+                "csrrc {status}, sstatus, {sie_bit}",
+                "csrr {enable}, sie",
+                status = out(reg) host_sstatus,
+                enable = out(reg) host_sie,
+                sie_bit = in(reg) 1usize << 1,
+            );
             sie::set_sext();
             sie::set_ssoft();
             sie::set_stimer();
@@ -215,12 +227,31 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             _axvisor_save_fpu_context_d(&mut self.fp);
             _axvisor_load_fpu_context_d(&host_fp);
         }
+        // A host interrupt can overwrite these CSRs as soon as interrupts
+        // are restored. Decode the saved exit, as in the KVM run loop.
+        self.regs.trap_csrs.load_from_hw();
+        let scause = scause::read();
         unsafe {
-            sie::clear_sext();
-            sie::clear_ssoft();
-            sstatus::set_sie();
+            core::arch::asm!("csrw sie, {enable}", enable = in(reg) host_sie);
+            if host_sstatus & (1 << 1) != 0 {
+                sstatus::set_sie();
+            }
         }
-        self.vmexit_handler()
+        self.vmexit_handler(scause)
+    }
+
+    fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
+        // Only unresolved explicit data accesses can be MMIO. Instruction
+        // fetches and implicit VS page-table accesses must remain RAM faults.
+        let cause = self.regs.trap_csrs.scause;
+        if cause == Exception::LoadGuestPageFault as usize
+            || cause == Exception::StoreGuestPageFault as usize
+        {
+            self.handle_guest_page_fault(cause == Exception::StoreGuestPageFault as usize)
+                .map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     fn bind(&mut self) -> AxResult {
@@ -528,10 +559,7 @@ impl RISCVVCpu {
         }
     }
 
-    fn vmexit_handler(&mut self) -> AxResult<AxVCpuExitReason> {
-        self.regs.trap_csrs.load_from_hw();
-
-        let scause = scause::read();
+    fn vmexit_handler(&mut self, scause: scause::Scause) -> AxResult<AxVCpuExitReason> {
         use riscv::interrupt::{Interrupt, Trap};
 
         trace!(
@@ -832,8 +860,30 @@ impl RISCVVCpu {
                 Ok(AxVCpuExitReason::ExternalInterrupt { vector: S_EXT as _ })
             }
             Trap::Exception(
-                gpf @ (Exception::LoadGuestPageFault | Exception::StoreGuestPageFault),
-            ) => self.handle_guest_page_fault(gpf == Exception::StoreGuestPageFault),
+                gpf @ (Exception::InstructionGuestPageFault
+                | Exception::LoadGuestPageFault
+                | Exception::StoreGuestPageFault),
+            ) => {
+                // Resolve RAM before decoding an MMIO access. A G-stage fault
+                // can also occur during the implicit walk of a VS page table.
+                let access_flags = if instr_is_pseudo(self.regs.trap_csrs.htinst as u32) {
+                    if self.regs.trap_csrs.htinst as u32 == TINST_PSEUDO_STORE {
+                        MappingFlags::WRITE
+                    } else {
+                        MappingFlags::READ
+                    }
+                } else {
+                    match gpf {
+                        Exception::InstructionGuestPageFault => MappingFlags::EXECUTE,
+                        Exception::StoreGuestPageFault => MappingFlags::WRITE,
+                        _ => MappingFlags::READ,
+                    }
+                };
+                Ok(AxVCpuExitReason::NestedPageFault {
+                    addr: self.regs.trap_csrs.gpt_page_fault_addr(),
+                    access_flags,
+                })
+            }
             _ => {
                 panic!(
                     "Unhandled trap: {:?}, sepc: {:#x}, stval: {:#x}, htval: {:#x}, htinst: \
@@ -1011,7 +1061,7 @@ impl RISCVVCpu {
     fn decode_instr_at(&mut self, vaddr: GuestVirtAddr) -> AxResult<InstructionDecode> {
         // The htinst CSR contains "transformed instruction" that caused the page fault. We
         // can use it but we use the sepc to fetch the original instruction instead for now.
-        let mut instr = riscv_h::register::htinst::read();
+        let mut instr = self.regs.trap_csrs.htinst;
         let instr_len;
         if instr == 0 {
             // Read the instruction from guest memory.

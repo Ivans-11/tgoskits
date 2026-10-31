@@ -24,11 +24,11 @@ cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         pub type NestedPageTableL4<H> = arch::ExtendedPageTable<H>;
     } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
-        /// RISC-V Level 3 nested page table (Sv39, x4 not supported)
-        pub type NestedPageTableL3<H> = ax_page_table_multiarch::PageTable64<arch::Sv39MetaData<GuestPhysAddr>, arch::Rv64PTE, H>;
+        /// RISC-V Level 3 nested page table (Sv39x4).
+        pub type NestedPageTableL3<H> = ax_page_table_multiarch::PageTable64<arch::GStageMetaData<3>, arch::Rv64PTE, H, 4>;
 
-        /// RISC-V Level 4 nested page table (Sv48, x4 not supported)
-        pub type NestedPageTableL4<H> = ax_page_table_multiarch::PageTable64<arch::Sv48MetaData<GuestPhysAddr>, arch::Rv64PTE, H>;
+        /// RISC-V Level 4 nested page table (Sv48x4).
+        pub type NestedPageTableL4<H> = ax_page_table_multiarch::PageTable64<arch::GStageMetaData<4>, arch::Rv64PTE, H, 4>;
     } else if #[cfg(target_arch = "aarch64")] {
         /// AArch64 Level 3 nested page table type alias.
         pub type NestedPageTableL3<H> = ax_page_table_multiarch::PageTable64<arch::A64HVPagingMetaDataL3, arch::A64PTEHV, H>;

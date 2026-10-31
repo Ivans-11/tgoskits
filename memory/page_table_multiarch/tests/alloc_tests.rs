@@ -209,6 +209,78 @@ fn test_dealloc_x86() -> PagingResult<()> {
     Ok(())
 }
 
+// Exercise the generic x4-root machinery on the build host, including all
+// four root pages and allocation/deallocation pairing.
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn test_x4_root() -> PagingResult<()> {
+    struct X4<const LEVELS: usize>;
+    impl<const LEVELS: usize> PagingMetaData for X4<LEVELS> {
+        const LEVELS: usize = LEVELS;
+        const PA_MAX_BITS: usize = 52;
+        const VA_MAX_BITS: usize = 12 + LEVELS * 9 + 2;
+        const ROOT_ENTRY_COUNT: usize = 2048;
+        type VirtAddr = VirtAddr;
+        fn flush_tlb(_: Option<VirtAddr>) {}
+    }
+    fn check<const LEVELS: usize>() -> PagingResult<()> {
+        type Pte = ax_page_table_entry::x86_64::X64PTE;
+        let mut table =
+            PageTable64::<X4<LEVELS>, Pte, TrackPagingHandler<X4<LEVELS>>, 4>::try_new()?;
+        assert_eq!(table.root_paddr().as_usize() % 16384, 0);
+        let stride = 1usize << (12 + LEVELS * 9);
+        for i in 0..4 {
+            table.cursor().map(
+                (i * stride + 0x1000).into(),
+                (0x1000 + i * 4096).into(),
+                PageSize::Size4K,
+                MappingFlags::READ,
+            )?;
+        }
+        for i in 0..4 {
+            assert_eq!(
+                table.query((i * stride + 0x1000).into())?.0.as_usize(),
+                0x1000 + i * 4096
+            );
+        }
+        #[cfg(feature = "copy-from")]
+        {
+            let mut borrowed =
+                PageTable64::<X4<LEVELS>, Pte, TrackPagingHandler<X4<LEVELS>>, 4>::try_new()?;
+            borrowed.cursor().copy_from(&table, 0.into(), 4 * stride);
+            for i in 0..4 {
+                assert_eq!(
+                    borrowed.query((i * stride + 0x1000).into())?.0.as_usize(),
+                    0x1000 + i * 4096
+                );
+            }
+            // Dropping the borrower must not free any of the source's subtrees.
+            drop(borrowed);
+            assert!(table.query((3 * stride + 0x1000).into()).is_ok());
+        }
+        drop(table);
+        assert_eq!(ALLOCATED.with_borrow(|it| it.len()), 0);
+        assert_eq!(ALIGN.with_borrow(|it| it.len()), 0);
+        Ok(())
+    }
+    check::<3>()?;
+    check::<4>()
+}
+
+#[test]
+#[cfg(all(target_arch = "x86_64", feature = "copy-from"))]
+fn test_ordinary_root_bitmap_size() {
+    use ax_page_table_entry::x86_64::X64PTE;
+    use ax_page_table_multiarch::x86_64::X64PagingMetaData;
+    type Table = PageTable64<X64PagingMetaData, X64PTE, TrackPagingHandler<X64PagingMetaData>>;
+    // Original layout: one physical address and one 512-bit bitmap, including
+    // the bitmap's alignment padding.
+    assert_eq!(
+        core::mem::size_of::<Table>(),
+        core::mem::size_of::<(PhysAddr, bitmaps::Bitmap<512>)>()
+    );
+}
+
 #[test]
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64", docsrs))]
 fn test_dealloc_riscv() -> PagingResult<()> {

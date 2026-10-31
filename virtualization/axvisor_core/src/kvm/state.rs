@@ -295,7 +295,7 @@ pub(in crate::kvm) struct PinnedPageGroup {
 }
 
 impl PinnedPageGroup {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
     pub(in crate::kvm) fn new(id: api_control::PinnedUserPagesId, pages: usize) -> Self {
         Self {
             id,
