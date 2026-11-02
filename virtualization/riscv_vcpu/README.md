@@ -49,6 +49,25 @@ cargo doc --no-deps
 
 ## Integration
 
+### Host privilege mode
+
+The default backend runs in S/HS-mode under SBI firmware. The optional
+`m-mode` feature selects an M-mode host at build time: machine trap CSRs,
+`mret` guest entry, machine interrupt forwarding and a virtual SBI implementation
+that does not forward calls to firmware. Guest execution remains in VS/VU-mode.
+
+When using `axvisor_core`, enable its `m-mode` feature, which also selects
+M-mode interrupt guards. Integrations using `riscv_vcpu` directly must likewise
+enable `ax-kernel-guard/m-mode` if they use that crate for interrupt locks.
+All callers of a single build must use the selected host privilege mode.
+
+The M-mode host owns PMP configuration and must grant access to the memory
+used for guest RAM and G-stage page tables. The backend saves/restores machine
+delegation, counter access and environment configuration around vCPU binding.
+Physical timer, IPI delivery and synchronous remote fences remain host services
+through the existing adapter interfaces. The `sstc` feature requires hardware
+support for virtual supervisor timer comparators.
+
 ### Example
 
 ```rust

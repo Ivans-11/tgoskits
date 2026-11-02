@@ -16,6 +16,7 @@ fs = ["axvisor_api/fs"]
 shell = ["axvisor_api/shell"]
 svm = ["axvm/svm"]
 sstc = ["riscv_vcpu/sstc"]
+m-mode = ["riscv_vcpu/m-mode", "ax-kernel-guard/m-mode"]
 vmx = ["axvm/vmx"]
 
 [dependencies]

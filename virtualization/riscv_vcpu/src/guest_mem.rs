@@ -29,7 +29,11 @@ use crate::trap::Exception;
 // 3. The original file mistakenly declared that `_copy_from_guest` and `_copy_to_guest` are copying
 //    from/to guest physical addresses, but they are actually copying from/to guest virtual
 //    addresses (as hlv/hsv instructions do). We fix description here.
-core::arch::global_asm!(include_str!("mem_extable.S"));
+core::arch::global_asm!(include_str!("mem_extable.S"),
+    host_cause = const crate::host::CAUSE,
+    host_tval = const crate::host::TVAL,
+    host_tval2 = const crate::host::TVAL2,
+);
 
 unsafe extern "C" {
     /// Copy data from guest virtual address to host address.

@@ -94,11 +94,11 @@ _fetch_guest_instruction:
     ret
 4:
     // Took a fault, record trap CSRs and return 1.
-    csrr  t2, scause
+    csrr  t2, {host_cause}
     sd    t2, 0(a2)
-    csrr  t2, stval
+    csrr  t2, {host_tval}
     sd    t2, 8(a2)
-    csrr  t2, htval
+    csrr  t2, {host_tval2}
     sd    t2, 16(a2)
     li    a0, 1
     ret

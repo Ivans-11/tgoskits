@@ -222,7 +222,13 @@ fn enable_local_interrupts() {
     unsafe {
         sie::set_ssoft();
         sie::set_stimer();
-        sie::set_sext();
+        // Only enable external delivery when this backend can claim and complete
+        // interrupts. Platforms with another controller still use SBI timer/IPIs.
+        if get_irq_handler().is_some() {
+            sie::set_sext();
+        } else {
+            sie::clear_sext();
+        }
     }
 }
 
@@ -248,10 +254,9 @@ fn handle_external_irq() -> Option<someboot::irq::IrqId> {
 }
 
 fn claim_external_irq_source() -> Option<NonZeroU32> {
-    let Some(handler) = get_irq_handler() else {
-        warn!("RISC-V PLIC IRQ handler is not registered for external IRQ");
-        return None;
-    };
+    // The VMM also polls this path on timer exits. With no PLIC registered,
+    // there is no source to claim; polling does not imply an external IRQ.
+    let handler = get_irq_handler()?;
     handler.claim_current()
 }
 

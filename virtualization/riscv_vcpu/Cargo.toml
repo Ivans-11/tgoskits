@@ -21,6 +21,7 @@ targets = ["riscv64gc-unknown-none-elf"]
 [features]
 default = []
 sstc = []
+m-mode = []
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 log = "0.4"

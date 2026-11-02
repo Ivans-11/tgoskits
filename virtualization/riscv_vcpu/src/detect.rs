@@ -14,7 +14,7 @@
 
 //! Detect instruction sets (ISA extensions) by trap-and-return procedure
 //!
-//! First, it disables all S-level interrupts. Remaining traps in RISC-V core
+//! First, it disables host interrupts. Remaining traps in RISC-V core
 //! are all exceptions.
 //! Then, it filters out illegal instruction from exceptions.
 //! ref: <https://github.com/luojia65/zihai/blob/main/zihai/src/detect.rs>
@@ -23,12 +23,10 @@ use core::arch::{asm, naked_asm};
 
 use riscv::{
     interrupt::{Exception, Interrupt, Trap},
-    register::{
-        scause::Scause,
-        sstatus,
-        stvec::{self, Stvec, TrapMode},
-    },
+    register::scause::Scause,
 };
+
+use crate::host;
 
 /// Detect if hypervisor extension exists on current hart environment
 ///
@@ -45,11 +43,10 @@ pub fn detect_h_extension() -> bool {
 /// Select the supported G-stage mode on an H-capable hart.
 /// Unsupported HGATP modes are WARL and read back as a different mode.
 pub fn max_guest_page_table_levels() -> usize {
-    let interrupts_enabled = sstatus::read().sie();
+    let flags = host::irq_save();
     let previous: usize;
     let supported: usize;
     unsafe {
-        sstatus::clear_sie();
         asm!(
             "csrr {previous}, hgatp",
             "csrw hgatp, zero",
@@ -62,9 +59,7 @@ pub fn max_guest_page_table_levels() -> usize {
             candidate = in(reg) 9usize << 60,
             options(nostack),
         );
-        if interrupts_enabled {
-            sstatus::set_sie();
-        }
+        host::irq_restore(flags);
     }
     // Sv39x4 is the baseline G-stage mode on RV64 H implementations.
     let _ = previous;
@@ -139,46 +134,34 @@ fn riscv_illegal_insn_bits(insn: u16) -> usize {
 
 // Initialize environment for trap detection and filter in exception only
 #[inline]
-unsafe fn init_detect_trap(param: usize) -> (bool, Stvec, usize) {
-    // clear SIE to handle exception only
-    let stored_sie = sstatus::read().sie();
-    unsafe {
-        sstatus::clear_sie();
-    }
-    // use detect trap handler to handle exceptions
-    let stored_stvec = stvec::read();
+unsafe fn init_detect_trap(param: usize) -> (usize, usize, usize) {
+    let flags = host::irq_save();
+    let stored_tvec: usize;
     let mut trap_addr = on_detect_trap as *const () as usize;
     if trap_addr & 0b1 != 0 {
         trap_addr += 0b1;
     }
     let stored_tp: usize;
 
-    let mut stvec = Stvec::from_bits(0);
-    stvec.set_address(trap_addr);
-    stvec.set_trap_mode(TrapMode::Direct);
-
     unsafe {
-        stvec::write(stvec);
+        asm!("csrrw {}, {}, {}", out(reg) stored_tvec, const host::TVEC, in(reg) trap_addr);
         // store tp register. tp will be used to load parameter and store return value
         asm!("mv  {}, tp", "mv  tp, {}", out(reg) stored_tp, in(reg) param, options(nomem, nostack));
     }
     // returns preserved previous hardware states
-    (stored_sie, stored_stvec, stored_tp)
+    (flags, stored_tvec, stored_tp)
 }
 
 // Restore previous hardware states before trap detection
 #[inline]
-unsafe fn restore_detect_trap(sie: bool, stvec: Stvec, tp: usize) -> usize {
+unsafe fn restore_detect_trap(flags: usize, tvec: usize, tp: usize) -> usize {
     // read the return value from tp register, and restore tp value
     let ans: usize;
     unsafe {
         asm!("mv  {}, tp", "mv  tp, {}", out(reg) ans, in(reg) tp, options(nomem, nostack));
         // restore trap vector settings
-        asm!("csrw  stvec, {}", in(reg) stvec.bits(), options(nomem, nostack));
-        // enable interrupts
-        if sie {
-            sstatus::set_sie();
-        };
+        asm!("csrw {}, {}", const host::TVEC, in(reg) tvec);
+        host::irq_restore(flags);
     }
     ans
 }
@@ -239,24 +222,24 @@ unsafe extern "C" fn on_detect_trap() -> ! {
         "sd     t4, 14*8(sp)",
         "sd     t5, 15*8(sp)",
         "sd     t6, 16*8(sp)",
-        "csrr   t0, sstatus",
+        "csrr   t0, {status}",
         "sd     t0, 17*8(sp)",
-        "csrr   t1, sepc",
+        "csrr   t1, {epc}",
         "sd     t1, 18*8(sp)",
-        "csrr   t2, scause",
+        "csrr   t2, {cause}",
         "sd     t2, 19*8(sp)",
-        "csrr   t3, stval",
+        "csrr   t3, {tval}",
         "sd     t3, 20*8(sp)",
         "mv     a0, sp",
         "call   {rust_detect_trap}",
         "ld     t0, 17*8(sp)",
-        "csrw   sstatus, t0",
+        "csrw   {status}, t0",
         "ld     t1, 18*8(sp)",
-        "csrw   sepc, t1",
+        "csrw   {epc}, t1",
         "ld     t2, 19*8(sp)",
-        "csrw   scause, t2",
+        "csrw   {cause}, t2",
         "ld     t3, 20*8(sp)",
-        "csrw   stval, t3",
+        "csrw   {tval}, t3",
         "ld     ra, 0*8(sp)",
         "ld     tp, 1*8(sp)",
         "ld     a0, 2*8(sp)",
@@ -275,7 +258,12 @@ unsafe extern "C" fn on_detect_trap() -> ! {
         "ld     t5, 15*8(sp)",
         "ld     t6, 16*8(sp)",
         "addi   sp, sp, 8*21",
-        "sret",
+        ".if {machine}", "mret", ".else", "sret", ".endif",
+        machine = const host::MACHINE as usize,
+        status = const host::STATUS,
+        epc = const host::EPC,
+        cause = const host::CAUSE,
+        tval = const host::TVAL,
         rust_detect_trap = sym rust_detect_trap,
     )
 }

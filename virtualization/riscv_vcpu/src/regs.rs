@@ -134,6 +134,7 @@ impl GeneralPurposeRegisters {
 #[repr(C)]
 pub struct HypervisorCpuState {
     pub gprs: GeneralPurposeRegisters,
+    /// Host trap-bank status (mstatus with m-mode, otherwise sstatus).
     pub sstatus: usize,
     pub hstatus: usize,
     pub henvcfg: usize,
@@ -147,6 +148,7 @@ pub struct HypervisorCpuState {
 #[repr(C)]
 pub struct GuestCpuState {
     pub gprs: GeneralPurposeRegisters,
+    /// Return status for the selected host trap bank; distinct from vsstatus.
     pub sstatus: usize,
     pub hstatus: usize,
     pub scounteren: usize,
@@ -236,13 +238,17 @@ pub struct VmCpuTrapState {
 impl VmCpuTrapState {
     /// Reads the trap-related CSRs from hardware and stores them in this structure.
     pub fn load_from_hw(&mut self) {
-        use riscv::register::{scause, stval};
-        use riscv_h::register::{htinst, htval};
-
-        self.scause = scause::read().bits();
-        self.stval = stval::read();
-        self.htval = htval::read();
-        self.htinst = htinst::read();
+        use crate::host;
+        unsafe {
+            core::arch::asm!(
+                "csrr {cause}, {cause_csr}", "csrr {tval}, {tval_csr}",
+                "csrr {tval2}, {tval2_csr}", "csrr {tinst}, {tinst_csr}",
+                cause = out(reg) self.scause, tval = out(reg) self.stval,
+                tval2 = out(reg) self.htval, tinst = out(reg) self.htinst,
+                cause_csr = const host::CAUSE, tval_csr = const host::TVAL,
+                tval2_csr = const host::TVAL2, tinst_csr = const host::TINST,
+            );
+        }
     }
 
     /// Returns the guest physical address that caused a guest page fault.

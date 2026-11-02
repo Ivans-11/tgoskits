@@ -17,7 +17,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use ax_errno::{AxError, AxErrorKind, AxResult};
 use axaddrspace::{GuestPhysAddr, GuestVirtAddr, HostPhysAddr, MappingFlags, device::AccessWidth};
 use axvcpu::AxVCpuExitReason;
-use riscv::register::{scause, sie, sstatus};
+#[cfg(not(feature = "m-mode"))]
+use riscv::register::sie;
+use riscv::register::{scause, sstatus};
 use riscv_decode::{
     Instruction,
     types::{IType, SType},
@@ -41,7 +43,7 @@ use sbi_spec::{base, hsm, legacy, pmu, rfnc, spi, srst};
 use crate::{
     EID_HVC, RISCVVCpuCreateConfig,
     consts::traps::irq::{S_EXT, S_SOFT},
-    guest_mem,
+    guest_mem, host,
     regs::*,
     sbi_console::*,
     trap::Exception,
@@ -83,6 +85,8 @@ pub struct RISCVVCpu {
     fp: FpDState,
     sbi: RISCVVCpuSbi,
     queued_hvip: AtomicUsize,
+    #[cfg(feature = "m-mode")]
+    machine_state: host::MachineState,
 }
 
 #[derive(Debug, Default)]
@@ -124,6 +128,46 @@ impl Default for RISCVVCpuSbi {
     }
 }
 
+impl RISCVVCpuSbi {
+    fn handle_ecall(&self, eid: usize, fid: usize, param: [usize; 6]) -> sbi_spec::binary::SbiRet {
+        #[cfg(not(feature = "m-mode"))]
+        {
+            RustSBI::handle_ecall(self, eid, fid, param)
+        }
+        #[cfg(feature = "m-mode")]
+        {
+            use sbi_spec::binary::SbiRet;
+            if eid == pmu::EID_PMU {
+                return RustSBI::handle_ecall(self, eid, fid, param);
+            }
+            if eid != base::EID_BASE {
+                return SbiRet::not_supported();
+            }
+            // There is no lower firmware to receive an M-mode ecall. Describe
+            // only services implemented by this virtual SBI, never forward it.
+            let value = match fid {
+                base::GET_SBI_SPEC_VERSION => 0x0200_0000,
+                base::GET_SBI_IMPL_ID => base::impl_id::RUST_SBI,
+                base::GET_SBI_IMPL_VERSION => 1,
+                base::PROBE_EXTENSION => usize::from(matches!(
+                    param[0],
+                    base::EID_BASE
+                        | EID_TIME
+                        | spi::EID_SPI
+                        | hsm::EID_HSM
+                        | srst::EID_SRST
+                        | rfnc::EID_RFNC
+                        | EID_DBCN
+                        | pmu::EID_PMU
+                )),
+                base::GET_MVENDORID | base::GET_MARCHID | base::GET_MIMPID => 0,
+                _ => return SbiRet::not_supported(),
+            };
+            SbiRet::success(value)
+        }
+    }
+}
+
 impl axvcpu::AxArchVCpu for RISCVVCpu {
     type CreateConfig = RISCVVCpuCreateConfig;
 
@@ -131,6 +175,9 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
 
     fn new(_vm_id: usize, _vcpu_id: usize, config: Self::CreateConfig) -> AxResult<Self> {
         let mut regs = VmCpuRegisters::default();
+        // Match the SBI/KVM boot environment: allow guest userspace to read
+        // cycle, time and instret until the guest changes scounteren itself.
+        regs.guest_regs.scounteren = 0x7;
         // Setup the guest's general purpose registers.
         // `a0` is the hartid
         regs.guest_regs.gprs.set_reg(GprIndex::A0, config.hart_id);
@@ -142,6 +189,8 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             fp: FpDState::default(),
             sbi: RISCVVCpuSbi::default(),
             queued_hvip: AtomicUsize::new(0),
+            #[cfg(feature = "m-mode")]
+            machine_state: host::MachineState::default(),
         })
     }
 
@@ -153,6 +202,17 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         sstatus.set_spp(sstatus::SPP::Supervisor);
         sstatus.set_fs(sstatus::FS::Dirty);
         self.regs.guest_regs.sstatus = sstatus.bits();
+        #[cfg(feature = "m-mode")]
+        {
+            // The entry status slot holds mstatus for an M host: MPV=1 and
+            // MPP=S select VS on mret. Preserve the RV64 width fields.
+            let status = riscv::register::mstatus::read().bits();
+            self.regs.guest_regs.sstatus = (status
+                & !((3 << 11) | (1 << 3) | (1 << 7) | (1 << 17)))
+                | (1 << 11)
+                | (1usize << 39)
+                | (3 << 13);
+        }
 
         // Set hstatus.
         let mut hstatus = hstatus::Hstatus::from_bits(0);
@@ -182,6 +242,13 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         self.regs.virtual_hs_csrs.hvip = 0;
         self.regs.virtual_hs_csrs.hgeie = 0;
         self.regs.virtual_hs_csrs.henvcfg = GUEST_HENVCFG;
+        #[cfg(all(feature = "m-mode", feature = "sstc"))]
+        {
+            // M-mode hosts forward physical timer IRQs to their own driver.
+            // Enable the VS comparator so guest deadlines raise VSTIP without
+            // relying on the S-mode host's timer-polling fallback.
+            self.regs.virtual_hs_csrs.henvcfg |= 1usize << 63;
+        }
 
         Ok(())
     }
@@ -202,21 +269,23 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
 
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
         let mut host_fp = FpDState::default();
-        let host_sstatus: usize;
+        let flags = host::irq_save();
         let host_sie: usize;
         unsafe {
             // Preserve the host's interrupt state, including callers that
             // enter with local interrupts disabled.
             core::arch::asm!(
-                "csrrc {status}, sstatus, {sie_bit}",
-                "csrr {enable}, sie",
-                status = out(reg) host_sstatus,
+                "csrr {enable}, {ie}",
                 enable = out(reg) host_sie,
-                sie_bit = in(reg) 1usize << 1,
+                ie = const host::IE,
             );
-            sie::set_sext();
-            sie::set_ssoft();
-            sie::set_stimer();
+            #[cfg(not(feature = "m-mode"))]
+            {
+                // Retain the host's external interrupt mask; the core does not
+                // own the physical interrupt controller.
+                sie::set_ssoft();
+                sie::set_stimer();
+            }
         }
         unsafe {
             _axvisor_save_fpu_context_d(&mut host_fp);
@@ -230,12 +299,18 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         // A host interrupt can overwrite these CSRs as soon as interrupts
         // are restored. Decode the saved exit, as in the KVM run loop.
         self.regs.trap_csrs.load_from_hw();
-        let scause = scause::read();
+        let scause = scause::Scause::from_bits(self.regs.trap_csrs.scause);
+        #[cfg(feature = "m-mode")]
+        {
+            // M traps record the previous virtual privilege in MPP, not SPVP.
+            let supervisor = self.regs.guest_regs.sstatus & (1 << 11) != 0;
+            let mut status = hstatus::Hstatus::from_bits(self.regs.guest_regs.hstatus);
+            status.set_spvp(supervisor);
+            self.regs.guest_regs.hstatus = status.bits();
+        }
         unsafe {
-            core::arch::asm!("csrw sie, {enable}", enable = in(reg) host_sie);
-            if host_sstatus & (1 << 1) != 0 {
-                sstatus::set_sie();
-            }
+            core::arch::asm!("csrw {ie}, {enable}", ie = const host::IE, enable = in(reg) host_sie);
+            host::irq_restore(flags);
         }
         self.vmexit_handler(scause)
     }
@@ -257,6 +332,8 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
     fn bind(&mut self) -> AxResult {
         // Load the vCPU's CSRs from the stored state.
         unsafe {
+            #[cfg(feature = "m-mode")]
+            self.machine_state.bind();
             let vsatp = Vsatp::from_bits(self.regs.vs_csrs.vsatp);
             vsatp.write();
             let vstvec = Vstvec::from_bits(self.regs.vs_csrs.vstvec);
@@ -332,6 +409,10 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             vstimecmp::write(usize::MAX);
             core::arch::asm!("csrw hgatp, x0");
             core::arch::riscv64::hfence_gvma_all();
+        }
+        #[cfg(feature = "m-mode")]
+        unsafe {
+            self.machine_state.unbind();
         }
         Ok(())
     }
@@ -463,6 +544,7 @@ impl RISCVVCpu {
             hvip::clear_vstip();
             #[cfg(feature = "sstc")]
             vstimecmp::write(deadline);
+            #[cfg(not(feature = "m-mode"))]
             sie::set_stimer();
         }
     }
@@ -507,6 +589,10 @@ impl RISCVVCpu {
         self.regs.vs_csrs.vstval = fault_addr.as_usize();
         self.regs.vs_csrs.vsstatus = vsstatus.bits();
         self.regs.guest_regs.sepc = trap_pc;
+        #[cfg(feature = "m-mode")]
+        {
+            self.regs.guest_regs.sstatus = (self.regs.guest_regs.sstatus & !(3 << 11)) | (1 << 11);
+        }
 
         // `run_vcpu()` may re-enter the same bound vCPU without reloading the
         // cached VS CSR block, so keep the live CSRs in sync with the cache.
@@ -568,6 +654,15 @@ impl RISCVVCpu {
             self.regs.guest_regs.sepc,
             self.regs.trap_csrs.stval
         );
+
+        #[cfg(feature = "m-mode")]
+        if scause.is_interrupt() && matches!(scause.code(), 3 | 5 | 7 | 11) {
+            // An M-mode host may use STIP (Sstc) without delegating it to S.
+            // Keep the native cause for the host IRQ dispatcher.
+            return Ok(AxVCpuExitReason::ExternalInterrupt {
+                vector: scause.bits() as _,
+            });
+        }
 
         // Try to convert the raw trap cause to a standard RISC-V trap cause.
         let trap: Trap<Interrupt, Exception> = scause.cause().try_into().map_err(|_| {

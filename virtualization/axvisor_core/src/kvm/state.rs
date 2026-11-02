@@ -33,9 +33,9 @@ use axaddrspace::device::AccessWidth;
 use axvisor_api::{control as api_control, sync::WaitQueue, task::TaskHandle};
 use axvm::AxVMRef;
 #[cfg(target_arch = "x86_64")]
-use hashbrown::HashMap;
+mod mapped_pages;
 #[cfg(target_arch = "x86_64")]
-type MappedPages = HashMap<u64, MappedMemoryPage>;
+type MappedPages = mapped_pages::MappedPages<MappedMemoryPage>;
 #[cfg(not(target_arch = "x86_64"))]
 type MappedPages = BTreeMap<u64, MappedMemoryPage>;
 #[cfg(target_arch = "x86_64")]

@@ -14,6 +14,7 @@
 
 use ax_errno::{AxError, AxResult};
 use axvcpu::AxArchPerCpu;
+#[cfg(not(feature = "m-mode"))]
 use riscv::register::sie;
 use riscv_h::register::{hedeleg, hideleg, hvip};
 
@@ -82,8 +83,12 @@ unsafe fn setup_csrs() {
         core::arch::asm!("csrw {csr}, {rs}", csr = const 0x606, rs = in(reg) -1);
 
         // enable interrupt
-        sie::set_sext();
-        sie::set_ssoft();
-        sie::set_stimer();
+        #[cfg(not(feature = "m-mode"))]
+        {
+            // External interrupt delivery is configured by the host's controller.
+            // A host without a supported controller must be able to keep it masked.
+            sie::set_ssoft();
+            sie::set_stimer();
+        }
     }
 }

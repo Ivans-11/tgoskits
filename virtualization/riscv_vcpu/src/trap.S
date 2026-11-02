@@ -31,7 +31,7 @@ _run_guest:
 
     /* Swap in guest CSRs. */
     ld    t1, ({guest_sstatus})(a0)
-    csrrw t1, sstatus, t1
+    csrrw t1, {host_status}, t1
     sd    t1, ({hyp_sstatus})(a0)
 
     ld    t1, ({guest_hstatus})(a0)
@@ -43,15 +43,15 @@ _run_guest:
     sd    t1, ({hyp_scounteren})(a0)
 
     ld    t1, ({guest_sepc})(a0)
-    csrw  sepc, t1
+    csrw  {host_epc}, t1
 
     /* Set stvec so that hypervisor resumes after the sret when the guest exits. */
     la    t1, _guest_exit
-    csrrw t1, stvec, t1
+    csrrw t1, {host_tvec}, t1
     sd    t1, ({hyp_stvec})(a0)
 
     /* Save sscratch and replace with pointer to GuestInfo. */
-    csrrw t1, sscratch, a0
+    csrrw t1, {host_scratch}, a0
     sd    t1, ({hyp_sscratch})(a0)
 
     /* Restore the gprs from this GuestInfo */
@@ -87,12 +87,16 @@ _run_guest:
     ld   sp, ({guest_sp})(a0)
     ld   a0, ({guest_a0})(a0)
 
+    .if {host_machine}
+    mret
+    .else
     sret
+    .endif
 
 .align 2
 _guest_exit:
     /* Pull GuestInfo out of sscratch, swapping with guest's a0 */
-    csrrw a0, sscratch, a0
+    csrrw a0, {host_scratch}, a0
 
     /* Save guest GPRs. */
     sd   ra, ({guest_ra})(a0)
@@ -127,13 +131,13 @@ _guest_exit:
     sd   sp, ({guest_sp})(a0)
 
     /* Save Guest a0 after recovering from sscratch. */
-    csrr  t0, sscratch
+    csrr  t0, {host_scratch}
     sd    t0, ({guest_a0})(a0)
 
 _restore_csrs:
     /* Swap in hypervisor CSRs. */
     ld    t1, ({hyp_sstatus})(a0)
-    csrrw t1, sstatus, t1
+    csrrw t1, {host_status}, t1
     sd    t1, ({guest_sstatus})(a0)
 
     ld    t1, ({hyp_hstatus})(a0)
@@ -145,13 +149,13 @@ _restore_csrs:
     sd    t1, ({guest_scounteren})(a0)
 
     ld    t1, ({hyp_stvec})(a0)
-    csrw  stvec, t1
+    csrw  {host_tvec}, t1
 
     ld    t1, ({hyp_sscratch})(a0)
-    csrw  sscratch, t1
+    csrw  {host_scratch}, t1
 
     /* Save guest EPC. */
-    csrr  t1, sepc
+    csrr  t1, {host_epc}
     sd    t1, ({guest_sepc})(a0)
 
 

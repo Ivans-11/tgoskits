@@ -1,18 +1,24 @@
 use core::arch::asm;
 
-/// Bit 1: Supervisor Interrupt Enable
-const SIE_BIT: usize = 1 << 1;
+const STATUS: usize = if cfg!(feature = "m-mode") {
+    0x300
+} else {
+    0x100
+};
+const IRQ_ENABLE: usize = if cfg!(feature = "m-mode") {
+    1 << 3
+} else {
+    1 << 1
+};
 
 #[inline]
 pub fn local_irq_save_and_disable() -> usize {
     let flags: usize;
-    // clear the `SIE` bit, and return the old CSR
-    unsafe { asm!("csrrc {}, sstatus, {}", out(reg) flags, const SIE_BIT) };
-    flags & SIE_BIT
+    unsafe { asm!("csrrc {}, {}, {}", out(reg) flags, const STATUS, const IRQ_ENABLE) };
+    flags & IRQ_ENABLE
 }
 
 #[inline]
 pub fn local_irq_restore(flags: usize) {
-    // restore the `SIE` bit
-    unsafe { asm!("csrrs x0, sstatus, {}", in(reg) flags) };
+    unsafe { asm!("csrrs x0, {}, {}", const STATUS, in(reg) flags) };
 }

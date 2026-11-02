@@ -461,22 +461,14 @@ pub(in crate::kvm) fn unmap_memory_slot(vm: &AxVMRef, slot: MemorySlot) {
         return;
     }
 
-    // RISC-V slots are sparse after demand mapping. MemorySet::unmap already
+    // Slots are sparse after demand mapping. MemorySet::unmap already
     // skips holes, so remove all mappings in one traversal before unpinning.
     // Per-page unmap would repeatedly scan the same areas during VM teardown.
-    #[cfg(target_arch = "riscv64")]
-    {
-        let _ = vm.unmap_region(
-            GuestPhysAddr::from(slot.guest_phys_addr as usize),
-            slot.memory_size as usize,
-        );
-        for mapped_page in slot.mapped_pages.into_values() {
-            mapped_page.pinned_pages.release();
-        }
-    }
-    #[cfg(not(target_arch = "riscv64"))]
-    for (page_gpa, mapped_page) in slot.mapped_pages {
-        let _ = vm.unmap_region(GuestPhysAddr::from(page_gpa as usize), abi::PAGE_SIZE_USIZE);
+    let _ = vm.unmap_region(
+        GuestPhysAddr::from(slot.guest_phys_addr as usize),
+        slot.memory_size as usize,
+    );
+    for (_, mapped_page) in slot.mapped_pages {
         mapped_page.pinned_pages.release();
     }
     if slot.user_address_space != 0 {

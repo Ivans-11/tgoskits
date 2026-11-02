@@ -111,6 +111,11 @@ macro_rules! guest_csr_offset {
 
 core::arch::global_asm!(
     include_str!("trap.S"),
+    host_machine = const crate::host::MACHINE as usize,
+    host_status = const crate::host::STATUS,
+    host_tvec = const crate::host::TVEC,
+    host_scratch = const crate::host::SCRATCH,
+    host_epc = const crate::host::EPC,
     hyp_ra = const hyp_gpr_offset(GprIndex::RA),
     hyp_gp = const hyp_gpr_offset(GprIndex::GP),
     hyp_tp = const hyp_gpr_offset(GprIndex::TP),
