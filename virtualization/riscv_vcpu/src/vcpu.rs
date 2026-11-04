@@ -242,11 +242,10 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         self.regs.virtual_hs_csrs.hvip = 0;
         self.regs.virtual_hs_csrs.hgeie = 0;
         self.regs.virtual_hs_csrs.henvcfg = GUEST_HENVCFG;
-        #[cfg(all(feature = "m-mode", feature = "sstc"))]
+        #[cfg(feature = "sstc")]
         {
-            // M-mode hosts forward physical timer IRQs to their own driver.
-            // Enable the VS comparator so guest deadlines raise VSTIP without
-            // relying on the S-mode host's timer-polling fallback.
+            // Enable the VS comparator for both HS-mode and M-mode hosts.
+            // Guest deadlines can then raise VSTIP without a host polling tick.
             self.regs.virtual_hs_csrs.henvcfg |= 1usize << 63;
         }
 
@@ -928,12 +927,12 @@ impl RISCVVCpu {
             }
             Trap::Exception(Exception::VirtualInstruction) => self.handle_virtual_instruction(),
             Trap::Interrupt(Interrupt::SupervisorTimer) => {
-                // Nested environments may not deliver SSTC directly to VS.
-                // Reflect the host polling tick only after the guest's own
-                // comparator has expired, rather than on every host tick.
+                // Retain polling when hardware refuses STCE. Otherwise the
+                // comparator owns VSTIP; a software assertion could remain
+                // pending after a guest directly advances stimecmp.
                 #[cfg(feature = "sstc")]
-                let guest_timer_expired =
-                    riscv::register::time::read64() >= self.regs.vs_csrs.vstimecmp as u64;
+                let guest_timer_expired = henvcfg::read() & (1usize << 63) == 0
+                    && riscv::register::time::read64() >= vstimecmp::read() as u64;
                 #[cfg(not(feature = "sstc"))]
                 let guest_timer_expired = true;
                 if guest_timer_expired {
@@ -1088,10 +1087,9 @@ impl RISCVVCpu {
         }
 
         if let Some(new_value) = new_value {
-            // Linux is using the advertised `sstc` path (`csrw stimecmp,...`).
-            // We currently emulate that CSR access rather than exposing direct
-            // hardware STCE, so this path must also program the underlying HS
-            // timer instead of only updating saved VS state.
+            // Emulate stimecmp when the environment traps this access despite
+            // the requested STCE setting, updating the comparator and clearing
+            // any software-injected pending timer interrupt.
             self.program_guest_timer(new_value);
         }
 

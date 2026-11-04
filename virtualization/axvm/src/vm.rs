@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+#[cfg(not(feature = "svm"))]
+use core::ops::ControlFlow;
 use core::{alloc::Layout, fmt};
 
 use ax_cpumask::CpuMask;
@@ -656,6 +658,25 @@ impl AxVM {
         }
     }
 
+    /// Reuse a bound vCPU for exits fully handled by its backend.
+    ///
+    /// The caller keeps the binding and IRQ guard alive throughout the batch.
+    /// `Break` returns immediately, including for `Nothing` when an entry gate
+    /// closes or an exit decoder requires upper-layer processing.
+    #[cfg(not(feature = "svm"))]
+    fn run_vcpu_batch(
+        limit: usize,
+        mut run: impl FnMut() -> AxResult<ControlFlow<AxVCpuExitReason, AxVCpuExitReason>>,
+    ) -> AxResult<AxVCpuExitReason> {
+        for _ in 0..limit {
+            match run()? {
+                ControlFlow::Continue(AxVCpuExitReason::Nothing) => {}
+                ControlFlow::Continue(exit) | ControlFlow::Break(exit) => return Ok(exit),
+            }
+        }
+        Ok(AxVCpuExitReason::Nothing)
+    }
+
     /// Run a vCPU according to the given vcpu_id.
     ///
     /// ## Arguments
@@ -707,11 +728,7 @@ impl AxVM {
             loop {
                 let exit_reason = Self::with_bound_vcpu(&vcpu, || {
                     vcpu.set_hlt_exiting(true)?;
-                    // `Nothing` means the architecture backend consumed the
-                    // exit and needs no upper-layer work. Keep the VMCS bound
-                    // for a bounded number of such batches instead of paying
-                    // an unbind/bind pair for each one.
-                    for _ in 0..8 {
+                    Self::run_vcpu_batch(8, || {
                         let exit_reason = vcpu.run()?;
                         if let AxVCpuExitReason::NestedPageFault { addr, access_flags } =
                             exit_reason
@@ -719,13 +736,12 @@ impl AxVM {
                             && is_mmio(addr)?
                             && !self.inner_mut.lock().address_space.has_memory_region(addr)
                         {
-                            return Ok(vcpu.decode_nested_page_fault()?.unwrap_or(exit_reason));
+                            return Ok(ControlFlow::Break(
+                                vcpu.decode_nested_page_fault()?.unwrap_or(exit_reason),
+                            ));
                         }
-                        if !matches!(exit_reason, AxVCpuExitReason::Nothing) {
-                            return Ok(exit_reason);
-                        }
-                    }
-                    Ok(AxVCpuExitReason::Nothing)
+                        Ok(ControlFlow::Continue(exit_reason))
+                    })
                 })?;
                 match exit_reason {
                     AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
@@ -768,18 +784,14 @@ impl AxVM {
         loop {
             let exit_reason = Self::with_bound_vcpu(&vcpu, || {
                 vcpu.set_hlt_exiting(true)?;
-                for _ in 0..8 {
+                Self::run_vcpu_batch(8, || {
                     if !enter() {
-                        return Ok(AxVCpuExitReason::Nothing);
+                        return Ok(ControlFlow::Break(AxVCpuExitReason::Nothing));
                     }
                     let result = vcpu.run();
                     leave();
-                    let exit_reason = result?;
-                    if !matches!(exit_reason, AxVCpuExitReason::Nothing) {
-                        return Ok(exit_reason);
-                    }
-                }
-                Ok(AxVCpuExitReason::Nothing)
+                    result.map(ControlFlow::Continue)
+                })
             })?;
             match exit_reason {
                 AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
@@ -869,7 +881,10 @@ impl AxVM {
                 let exit_reason = Self::with_bound_vcpu(&vcpu, || {
                     // Route x86 HLT through host halt polling and blocking.
                     vcpu.set_hlt_exiting(cfg!(target_arch = "x86_64"))?;
-                    vcpu.run()
+                    // VMX already batches inside its backend. Keep the direct
+                    // entry budget unchanged for the other architectures too.
+                    let limit = if cfg!(target_arch = "riscv64") { 8 } else { 1 };
+                    Self::run_vcpu_batch(limit, || vcpu.run().map(ControlFlow::Continue))
                 })?;
                 trace!("{exit_reason:#x?}");
                 let exit_reason = match exit_reason {
