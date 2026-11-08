@@ -22,6 +22,9 @@ targets = ["riscv64gc-unknown-none-elf"]
 default = []
 sstc = []
 m-mode = []
+control = ["axvisor_api/control", "aia"]
+aia = [ "dep:riscv_aia", "dep:ax-kspin", "dep:ax-percpu"]
+aia-hw = ["aia"]
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 log = "0.4"
@@ -45,3 +48,7 @@ axaddrspace = { workspace = true }
 axvcpu = { workspace = true }
 axvisor_api = { workspace = true }
 kvm-uapi = { workspace = true }
+
+riscv_aia = { workspace = true, optional = true }
+ax-kspin = { workspace = true, features = ["smp"], optional = true }
+ax-percpu = { workspace = true, optional = true }

@@ -48,6 +48,10 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
         ControlFileState::Vm(VmFileState {
             vm,
             vm_fd_closed: false,
+            #[cfg(target_arch = "riscv64")]
+            aia: None,
+            #[cfg(target_arch = "riscv64")]
+            aia_device: None,
             memory_slots: BTreeMap::new(),
             ioeventfds: BTreeMap::new(),
             irqfds: BTreeMap::new(),
@@ -93,6 +97,10 @@ pub(in crate::kvm) fn create_vcpu_file(
         }
         if vm.vcpu_files.contains_key(&vcpu_id) {
             return ax_err!(AlreadyExists);
+        }
+        #[cfg(target_arch = "riscv64")]
+        if vm.irqchip_created {
+            return ax_err!(BadState);
         }
 
         let vcpu_file = next_control_file_id()?;

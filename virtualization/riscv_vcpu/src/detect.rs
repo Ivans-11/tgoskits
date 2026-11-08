@@ -40,6 +40,23 @@ pub fn detect_h_extension() -> bool {
     ans != 2
 }
 
+/// Whether the host provides the AIA hypervisor CSRs needed for software IMSIC.
+#[cfg(feature = "aia")]
+pub fn detect_aia() -> bool {
+    with_detect_trap(0, || unsafe {
+        asm!("csrr {}, 0x609", out(reg) _, options(nomem, nostack));
+        asm!("csrr {}, 0x250", out(reg) _, options(nomem, nostack));
+    }) == 0
+}
+
+/// Whether hstateen0 can be saved and restored around guest AIA access.
+#[cfg(feature = "aia")]
+pub fn detect_stateen() -> bool {
+    with_detect_trap(0, || unsafe {
+        asm!("csrr {}, 0x60c", out(reg) _, options(nomem, nostack));
+    }) == 0
+}
+
 /// Select the supported G-stage mode on an H-capable hart.
 /// Unsupported HGATP modes are WARL and read back as a different mode.
 pub fn max_guest_page_table_levels() -> usize {

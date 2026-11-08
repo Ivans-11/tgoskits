@@ -220,6 +220,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         if handle_in_kernel_device_exit(&vm, &vcpu, irqchip_created, &exit_reason)? {
             continue;
         }
+        #[cfg(target_arch = "riscv64")]
+        if super::aia::handle_exit(vm_file, &vcpu, &exit_reason)? {
+            continue;
+        }
 
         match exit_reason {
             AxVCpuExitReason::Nothing => {}
@@ -522,11 +526,19 @@ fn vcpu_run_interrupted(
     if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
         return Ok(true);
     }
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "riscv64"
+    ))]
     {
         api_control::current_thread_has_pending_signal(signal_mask)
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "riscv64"
+    )))]
     {
         let _ = signal_mask;
         Ok(false)

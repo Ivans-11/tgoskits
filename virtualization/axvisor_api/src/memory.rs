@@ -132,6 +132,10 @@ pub trait MemoryIf {
     ///
     /// This function performs the physical-to-virtual address translation
     /// based on the host's memory mapping.
+    /// Host device regions made available to the core must resolve to mappings
+    /// with device-appropriate attributes, valid for the core's lifetime. The
+    /// host prepares those mappings before interrupt-disabled access; this
+    /// operation does not itself grant ownership of a physical device.
     ///
     /// # Arguments
     ///

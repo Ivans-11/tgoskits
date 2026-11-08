@@ -29,6 +29,9 @@ mod pl011;
 #[macro_use]
 extern crate log;
 
+#[cfg(all(target_arch = "riscv64", feature = "aia"))]
+pub mod imsic;
+
 mod config;
 mod device;
 mod range_alloc;

@@ -46,6 +46,9 @@ cfg_if::cfg_if! {
 
 mod arch;
 
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+pub use arch::{guest_tlb_generation, invalidate_guest_tlbs};
+
 pub enum NestedPageTable<H: PagingHandler> {
     #[cfg(not(target_arch = "x86_64"))]
     L3(NestedPageTableL3<H>),

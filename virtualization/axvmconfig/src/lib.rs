@@ -156,6 +156,8 @@ pub enum EmulatedDeviceType {
     // 0x30: PPPT (PLIC Partial Passthrough) devices.
     /// RISC-V PLIC Partial Passthrough Global device.
     PPPTGlobal          = 0x30,
+    /// RISC-V IMSIC interrupt files, one 4 KiB page per guest hart.
+    RiscvImsic          = 0x31,
 
     // Virtio devices.
     /// Virtio block device.
@@ -197,6 +199,7 @@ impl Display for EmulatedDeviceType {
             EmulatedDeviceType::Dummy => write!(f, "meta device"),
             EmulatedDeviceType::VirtioBlk => write!(f, "virtio block"),
             EmulatedDeviceType::VirtioNet => write!(f, "virtio net"),
+            EmulatedDeviceType::RiscvImsic => write!(f, "RISC-V IMSIC"),
             EmulatedDeviceType::VirtioConsole => write!(f, "virtio console"),
         }
     }

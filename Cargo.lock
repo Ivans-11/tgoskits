@@ -1721,6 +1721,7 @@ dependencies = [
  "axvmconfig",
  "cfg-if",
  "log",
+ "riscv_vcpu",
  "riscv_vplic",
  "vm-interrupt",
  "x86_vlapic",
@@ -1832,6 +1833,7 @@ dependencies = [
  "ax-percpu",
  "ax-plat",
  "axklib",
+ "fdt-parser",
  "heapless 0.9.3",
  "log",
  "rdrive",
@@ -2009,6 +2011,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
+ "riscv_aia",
  "riscv_vcpu",
  "riscv_vplic",
  "spin 0.12.0",
@@ -7025,6 +7028,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3f2ad9f15a07f4a0e1677124f9120ce7e83ab7e1ca7186af0ca9da529b62e80"
 
 [[package]]
+name = "riscv_aia"
+version = "0.1.0"
+
+[[package]]
 name = "riscv_goldfish"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7036,8 +7043,10 @@ version = "0.5.9"
 dependencies = [
  "ax-crate-interface",
  "ax-errno 0.6.0",
+ "ax-kspin",
  "ax-memory-addr",
  "ax-page-table-entry",
+ "ax-percpu",
  "axaddrspace",
  "axvcpu",
  "axvisor_api",
@@ -7050,6 +7059,7 @@ dependencies = [
  "riscv",
  "riscv-decode",
  "riscv-h",
+ "riscv_aia",
  "rustsbi",
  "sbi-rt",
  "sbi-spec",

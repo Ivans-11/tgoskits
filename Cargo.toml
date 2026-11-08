@@ -267,6 +267,7 @@ eth-intel = { version = "0.1.2", path = "drivers/net/eth-intel" }
 loongarch_vcpu = { version = "0.5.3", path = "virtualization/loongarch_vcpu" }
 mingo = { version = "0.8.3", path = "os/arceos/tools/raspi4/chainloader" }
 riscv-h = { version = "0.4.7", path = "virtualization/riscv-h" }
+riscv_aia = { version = "0.1.0", path = "virtualization/riscv_aia" }
 riscv_vcpu = { version = "0.5.9", path = "virtualization/riscv_vcpu" }
 riscv_vplic = { version = "0.4.12", path = "virtualization/riscv_vplic" }
 vm-interrupt = { version = "0.1.0", path = "virtualization/vm-interrupt" }

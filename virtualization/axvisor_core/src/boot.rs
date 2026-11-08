@@ -144,6 +144,8 @@ fn enable_virtualization_on_all_cores() {
             },
             move || {
                 host::init_percpu();
+                #[cfg(all(target_arch = "riscv64", feature = "aia-hw"))]
+                crate::arch::riscv64::imsic::init_on_cpu();
                 info!("Core {cpu_id} is initializing hardware virtualization support...");
                 info!("Enabling hardware virtualization support on core {cpu_id}");
 

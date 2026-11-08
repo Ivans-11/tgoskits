@@ -23,19 +23,20 @@ use axvisor_api::{
 };
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use kvm_uapi::KvmIrqLevel;
-use kvm_uapi::{KvmMsi, x86::decode_msi_route};
+use kvm_uapi::KvmMsi;
+#[cfg(not(target_arch = "riscv64"))]
+use kvm_uapi::x86::decode_msi_route;
 #[cfg(target_arch = "x86_64")]
 use vm_interrupt::InterruptTriggerMode;
 
 use super::{CONTROL_FILES, ControlFileState};
-use crate::{
-    kvm::{
-        abi::raw as abi,
-        state::{GsiRoute, IoEventFd, IoEventFdKey, IrqFd, IrqFdKey, KvmIoEventFd, KvmIrqFd},
-        util::{access_width_bytes, access_width_mask, checked_add, read_u32_user},
-    },
-    vmm::interrupt::{InterruptRoute, VirtualInterrupt, deliver_interrupt},
+use crate::kvm::{
+    abi::raw as abi,
+    state::{GsiRoute, IoEventFd, IoEventFdKey, IrqFd, IrqFdKey, KvmIoEventFd, KvmIrqFd},
+    util::{access_width_bytes, access_width_mask, checked_add, read_u32_user},
 };
+#[cfg(not(target_arch = "riscv64"))]
+use crate::vmm::interrupt::{InterruptRoute, VirtualInterrupt, deliver_interrupt};
 
 // KVM IRQFD/IOEVENTFD payloads are plain UAPI data. The registered listeners and
 // host file references are runtime state and are kept in axvisor_core::kvm.
@@ -163,6 +164,14 @@ pub(in crate::kvm) fn update_irqfd(
     irqfd: KvmIrqFd,
 ) -> AxResult {
     validate_irqfd(irqfd)?;
+    #[cfg(target_arch = "riscv64")]
+    if irqfd.flags & abi::KVM_IRQFD_FLAG_DEASSIGN == 0 {
+        let files = CONTROL_FILES.lock();
+        if !matches!(files.get(&control_file), Some(ControlFileState::Vm(vm)) if vm.irqchip_created)
+        {
+            return ax_err!(InvalidInput);
+        }
+    }
 
     let key = IrqFdKey {
         gsi: irqfd.gsi,
@@ -269,32 +278,47 @@ pub(in crate::kvm) fn signal_msi(
     control_file: api_control::ControlFileId,
     arg: usize,
 ) -> AxResult<isize> {
-    if !cfg!(target_arch = "x86_64") {
+    if !cfg!(any(target_arch = "x86_64", target_arch = "riscv64")) {
         return ax_err!(Unsupported);
     }
     let msi = read_msi(arg)?;
-    let (vm_id, active_vcpu_mask) = {
-        let mut control_files = CONTROL_FILES.lock();
-        let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
-            return ax_err!(NotFound);
-        };
-        let active_vcpu_mask = vm
-            .vcpu_files
-            .keys()
-            .filter(|vcpu_id| **vcpu_id < u64::BITS)
-            .fold(0u64, |mask, vcpu_id| mask | (1u64 << vcpu_id));
-        #[cfg(target_arch = "x86_64")]
-        {
-            let route =
-                decode_msi_route(msi, active_vcpu_mask).map_err(|_| AxError::Unsupported)?;
-            if route.level_triggered {
-                vm.userspace_eoi_vectors.insert(route.vector);
-            }
+    #[cfg(target_arch = "riscv64")]
+    {
+        if msi.flags != 0 {
+            return ax_err!(InvalidInput);
         }
-        (vm.vm.id(), active_vcpu_mask)
-    };
-    deliver_msi(vm_id, active_vcpu_mask, msi)?;
-    Ok(0)
+        super::aia::inject_msi(
+            control_file,
+            (u64::from(msi.address_hi) << 32) | u64::from(msi.address_lo),
+            msi.data,
+        )?;
+        return Ok(1);
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let (vm_id, active_vcpu_mask) = {
+            let mut control_files = CONTROL_FILES.lock();
+            let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
+                return ax_err!(NotFound);
+            };
+            let active_vcpu_mask = vm
+                .vcpu_files
+                .keys()
+                .filter(|vcpu_id| **vcpu_id < u64::BITS)
+                .fold(0u64, |mask, vcpu_id| mask | (1u64 << vcpu_id));
+            #[cfg(target_arch = "x86_64")]
+            {
+                let route =
+                    decode_msi_route(msi, active_vcpu_mask).map_err(|_| AxError::Unsupported)?;
+                if route.level_triggered {
+                    vm.userspace_eoi_vectors.insert(route.vector);
+                }
+            }
+            (vm.vm.id(), active_vcpu_mask)
+        };
+        deliver_msi(vm_id, active_vcpu_mask, msi)?;
+        Ok(0)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -429,71 +453,100 @@ fn irqfd_listener_loop(
 }
 
 fn inject_irqfd_gsi(control_file: api_control::ControlFileId, gsi: u32) -> AxResult {
-    let (vm, route, active_vcpu_mask) = {
-        let control_files = CONTROL_FILES.lock();
-        let Some(ControlFileState::Vm(vm)) = control_files.get(&control_file) else {
-            return ax_err!(NotFound);
-        };
-        let route = vm
-            .gsi_routes
-            .get(&gsi)
-            .copied()
-            .unwrap_or(GsiRoute::IrqChip { pin: gsi });
-        let active_vcpu_mask = vm
-            .vcpu_files
-            .keys()
-            .filter(|vcpu_id| **vcpu_id < u64::BITS)
-            .fold(0u64, |mask, vcpu_id| mask | (1u64 << vcpu_id));
-        (vm.vm.clone(), route, active_vcpu_mask)
-    };
-
-    match route {
-        #[cfg(target_arch = "x86_64")]
-        GsiRoute::IrqChip { pin } => {
-            let Some(irq) = vm.get_devices().x86_ioapic_assert_gsi(pin as usize) else {
-                return Ok(());
+    #[cfg(target_arch = "riscv64")]
+    {
+        let route = {
+            let files = CONTROL_FILES.lock();
+            let Some(ControlFileState::Vm(vm)) = files.get(&control_file) else {
+                return ax_err!(NotFound);
             };
-            deliver_interrupt(InterruptRoute::new(
-                vm.id(),
-                irq.target_vcpu,
-                VirtualInterrupt::with_trigger(
-                    irq.vector as usize,
-                    if irq.level_triggered {
-                        InterruptTriggerMode::LevelTriggered
-                    } else {
-                        InterruptTriggerMode::EdgeTriggered
-                    },
-                ),
-            ));
-            Ok(())
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        GsiRoute::IrqChip { pin } => {
-            deliver_interrupt(InterruptRoute::new(
-                vm.id(),
-                0,
-                VirtualInterrupt::edge(legacy_gsi_vector(pin) as usize),
-            ));
-            Ok(())
-        }
-        GsiRoute::Msi {
-            address_lo,
-            address_hi,
-            data,
-        } => deliver_msi(
-            vm.id(),
-            active_vcpu_mask,
-            KvmMsi {
+            vm.gsi_routes
+                .get(&gsi)
+                .copied()
+                .unwrap_or(GsiRoute::IrqChip { pin: gsi })
+        };
+        return match route {
+            GsiRoute::IrqChip { pin } => super::aia::pulse(control_file, pin),
+            GsiRoute::Msi {
                 address_lo,
                 address_hi,
                 data,
-                flags: 0,
-                devid: 0,
-            },
-        ),
+            } => super::aia::inject_msi(
+                control_file,
+                (u64::from(address_hi) << 32) | u64::from(address_lo),
+                data,
+            ),
+        };
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let (vm, route, active_vcpu_mask) = {
+            let control_files = CONTROL_FILES.lock();
+            let Some(ControlFileState::Vm(vm)) = control_files.get(&control_file) else {
+                return ax_err!(NotFound);
+            };
+            let route = vm
+                .gsi_routes
+                .get(&gsi)
+                .copied()
+                .unwrap_or(GsiRoute::IrqChip { pin: gsi });
+            let active_vcpu_mask = vm
+                .vcpu_files
+                .keys()
+                .filter(|vcpu_id| **vcpu_id < u64::BITS)
+                .fold(0u64, |mask, vcpu_id| mask | (1u64 << vcpu_id));
+            (vm.vm.clone(), route, active_vcpu_mask)
+        };
+
+        match route {
+            #[cfg(target_arch = "x86_64")]
+            GsiRoute::IrqChip { pin } => {
+                let Some(irq) = vm.get_devices().x86_ioapic_assert_gsi(pin as usize) else {
+                    return Ok(());
+                };
+                deliver_interrupt(InterruptRoute::new(
+                    vm.id(),
+                    irq.target_vcpu,
+                    VirtualInterrupt::with_trigger(
+                        irq.vector as usize,
+                        if irq.level_triggered {
+                            InterruptTriggerMode::LevelTriggered
+                        } else {
+                            InterruptTriggerMode::EdgeTriggered
+                        },
+                    ),
+                ));
+                Ok(())
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            GsiRoute::IrqChip { pin } => {
+                deliver_interrupt(InterruptRoute::new(
+                    vm.id(),
+                    0,
+                    VirtualInterrupt::edge(legacy_gsi_vector(pin) as usize),
+                ));
+                Ok(())
+            }
+            GsiRoute::Msi {
+                address_lo,
+                address_hi,
+                data,
+            } => deliver_msi(
+                vm.id(),
+                active_vcpu_mask,
+                KvmMsi {
+                    address_lo,
+                    address_hi,
+                    data,
+                    flags: 0,
+                    devid: 0,
+                },
+            ),
+        }
     }
 }
 
+#[cfg(not(target_arch = "riscv64"))]
 fn deliver_msi(vm_id: usize, active_vcpu_mask: u64, msi: KvmMsi) -> AxResult {
     let route = decode_msi_route(msi, active_vcpu_mask).map_err(|_| AxError::Unsupported)?;
     #[cfg(target_arch = "x86_64")]
@@ -514,7 +567,7 @@ fn deliver_msi(vm_id: usize, active_vcpu_mask: u64, msi: KvmMsi) -> AxResult {
     Ok(())
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
 fn legacy_gsi_vector(gsi: u32) -> u8 {
     0x20u8.saturating_add(gsi.min(0xdf) as u8)
 }

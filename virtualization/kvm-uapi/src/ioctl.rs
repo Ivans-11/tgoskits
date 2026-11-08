@@ -148,6 +148,8 @@ pub mod public {
     pub const KVM_CREATE_DEVICE: u32 = iowr(KVMIO, 0xe0, KVM_CREATE_DEVICE_SIZE);
     /// Sets an attribute on a KVM device fd.
     pub const KVM_SET_DEVICE_ATTR: u32 = iow(KVMIO, 0xe1, KVM_DEVICE_ATTR_SIZE);
+    /// Gets an attribute from a KVM device fd.
+    pub const KVM_GET_DEVICE_ATTR: u32 = iow(KVMIO, 0xe2, KVM_DEVICE_ATTR_SIZE);
     /// Checks whether a KVM device fd supports an attribute.
     pub const KVM_HAS_DEVICE_ATTR: u32 = iow(KVMIO, 0xe3, KVM_DEVICE_ATTR_SIZE);
 

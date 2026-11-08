@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use ax_errno::{AxResult, ax_err};
-#[cfg(target_arch = "x86_64")]
 use axaddrspace::device::AccessWidth;
 use axvcpu::AxVCpuExitReason;
 use axvisor_api::control as api_control;
@@ -49,6 +48,28 @@ pub(super) fn kvm_exit_reason(exit_reason: &AxVCpuExitReason) -> u32 {
     }
 }
 
+// The MMIO payload is contiguous in kvm_run. Publish it with one lookup and
+// host write, without touching the surrounding union or run control fields.
+fn write_mmio_exit(
+    control_file: api_control::ControlFileId,
+    addr: u64,
+    width: AccessWidth,
+    data: Option<u64>,
+) -> AxResult {
+    const BASE: usize = abi::KVM_RUN_MMIO_PHYS_ADDR_OFFSET;
+    const DATA: usize = abi::KVM_RUN_MMIO_DATA_OFFSET - BASE;
+    const LEN: usize = abi::KVM_RUN_MMIO_LEN_OFFSET - BASE;
+    const IS_WRITE: usize = abi::KVM_RUN_MMIO_IS_WRITE_OFFSET - BASE;
+    let mut payload = [0u8; IS_WRITE + 1];
+    payload[..8].copy_from_slice(&addr.to_ne_bytes());
+    // For reads, userspace supplies the data before the next KVM_RUN.
+    payload[DATA..DATA + 8].copy_from_slice(&data.unwrap_or_default().to_ne_bytes());
+    payload[LEN..LEN + 4].copy_from_slice(&access_width_bytes(width).to_ne_bytes());
+    payload[IS_WRITE] = u8::from(data.is_some());
+    let mmap_area = control_file_mmap_area(control_file)?;
+    api_control::write_mmap_area(mmap_area, BASE, &payload)
+}
+
 pub(super) fn prepare_userspace_exit(
     control_file: api_control::ControlFileId,
     exit_reason: &AxVCpuExitReason,
@@ -61,17 +82,7 @@ pub(super) fn prepare_userspace_exit(
             reg_width,
             signed_ext,
         } => {
-            write_vcpu_run_u64(
-                control_file,
-                abi::KVM_RUN_MMIO_PHYS_ADDR_OFFSET,
-                addr.as_usize() as u64,
-            )?;
-            write_vcpu_run_u32(
-                control_file,
-                abi::KVM_RUN_MMIO_LEN_OFFSET,
-                access_width_bytes(*width),
-            )?;
-            write_vcpu_run_u8(control_file, abi::KVM_RUN_MMIO_IS_WRITE_OFFSET, 0)?;
+            write_mmio_exit(control_file, addr.as_usize() as u64, *width, None)?;
 
             let mut control_files = CONTROL_FILES.lock();
             let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
@@ -85,23 +96,7 @@ pub(super) fn prepare_userspace_exit(
             });
         }
         AxVCpuExitReason::MmioWrite { addr, width, data } => {
-            let mmap_area = control_file_mmap_area(control_file)?;
-            write_vcpu_run_u64(
-                control_file,
-                abi::KVM_RUN_MMIO_PHYS_ADDR_OFFSET,
-                addr.as_usize() as u64,
-            )?;
-            api_control::write_mmap_area(
-                mmap_area,
-                abi::KVM_RUN_MMIO_DATA_OFFSET,
-                &data.to_ne_bytes(),
-            )?;
-            write_vcpu_run_u32(
-                control_file,
-                abi::KVM_RUN_MMIO_LEN_OFFSET,
-                access_width_bytes(*width),
-            )?;
-            write_vcpu_run_u8(control_file, abi::KVM_RUN_MMIO_IS_WRITE_OFFSET, 1)?;
+            write_mmio_exit(control_file, addr.as_usize() as u64, *width, Some(*data))?;
         }
         AxVCpuExitReason::IoRead { port, width } => {
             write_vcpu_run_u8(

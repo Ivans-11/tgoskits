@@ -68,7 +68,7 @@ const HVIP_VSSIP: usize = 1 << 2;
 const HVIP_VSEIP: usize = 1 << 10;
 const S_SOFT_CAUSE: usize = 1;
 const S_EXT_CAUSE: usize = 9;
-#[cfg(feature = "sstc")]
+#[cfg(any(feature = "sstc", feature = "aia"))]
 const SYSTEM_OPCODE: u32 = 0x73;
 #[cfg(feature = "sstc")]
 const CSR_STIMECMP: u16 = 0x14d;
@@ -85,6 +85,10 @@ pub struct RISCVVCpu {
     fp: FpDState,
     sbi: RISCVVCpuSbi,
     queued_hvip: AtomicUsize,
+    #[cfg(feature = "aia")]
+    pub aia: Option<crate::aia::Context>,
+    #[cfg(feature = "control")]
+    translation: crate::vmid::TranslationContext,
     #[cfg(feature = "m-mode")]
     machine_state: host::MachineState,
 }
@@ -105,7 +109,7 @@ struct RISCVVCpuSbi {
     forward: Forward,
 }
 
-#[cfg(feature = "sstc")]
+#[cfg(any(feature = "sstc", feature = "aia"))]
 /// Result of reading an instruction for virtual-instruction emulation.
 enum VirtualInstructionRead {
     Instruction(u32),
@@ -189,6 +193,10 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             fp: FpDState::default(),
             sbi: RISCVVCpuSbi::default(),
             queued_hvip: AtomicUsize::new(0),
+            #[cfg(feature = "aia")]
+            aia: None,
+            #[cfg(feature = "control")]
+            translation: crate::vmid::TranslationContext::default(),
             #[cfg(feature = "m-mode")]
             machine_state: host::MachineState::default(),
         })
@@ -263,6 +271,8 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         }
         let mode = crate::max_guest_page_table_levels() + 5;
         self.regs.virtual_hs_csrs.hgatp = mode << 60 | usize::from(ept_root) >> 12;
+        #[cfg(feature = "control")]
+        self.translation.invalidate();
         Ok(())
     }
 
@@ -286,6 +296,13 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
                 sie::set_stimer();
             }
         }
+        #[cfg(feature = "aia")]
+        let host_aia = self.aia.as_mut().map(|aia| unsafe { aia.enter() });
+        #[cfg(feature = "aia")]
+        if let Some(saved) = &host_aia {
+            self.regs.guest_regs.hstatus =
+                (self.regs.guest_regs.hstatus & !(63 << 12)) | (saved.vgein << 12);
+        }
         unsafe {
             _axvisor_save_fpu_context_d(&mut host_fp);
             _axvisor_load_fpu_context_d(&self.fp);
@@ -298,6 +315,10 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         // A host interrupt can overwrite these CSRs as soon as interrupts
         // are restored. Decode the saved exit, as in the KVM run loop.
         self.regs.trap_csrs.load_from_hw();
+        #[cfg(feature = "aia")]
+        if let (Some(aia), Some(saved)) = (&mut self.aia, host_aia) {
+            unsafe { aia.leave(saved) };
+        }
         let scause = scause::Scause::from_bits(self.regs.trap_csrs.scause);
         #[cfg(feature = "m-mode")]
         {
@@ -333,8 +354,12 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         unsafe {
             #[cfg(feature = "m-mode")]
             self.machine_state.bind();
-            let vsatp = Vsatp::from_bits(self.regs.vs_csrs.vsatp);
-            vsatp.write();
+            // Prevent speculative VS translations from crossing VMID or
+            // henvcfg changes. Restore the guest's vsatp only after binding.
+            #[cfg(feature = "control")]
+            Vsatp::from_bits(0).write();
+            #[cfg(not(feature = "control"))]
+            Vsatp::from_bits(self.regs.vs_csrs.vsatp).write();
             let vstvec = Vstvec::from_bits(self.regs.vs_csrs.vstvec);
             vstvec.write();
             let vsepc = self.regs.vs_csrs.vsepc;
@@ -363,12 +388,16 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             hgeie::write(self.regs.virtual_hs_csrs.hgeie);
             self.regs.hyp_regs.henvcfg = henvcfg::read();
             henvcfg::write(self.regs.hyp_regs.henvcfg | self.regs.virtual_hs_csrs.henvcfg);
-            core::arch::asm!(
-                "csrw hgatp, {hgatp}",
-                hgatp = in(reg) self.regs.virtual_hs_csrs.hgatp,
-            );
-            core::arch::riscv64::hfence_gvma_all();
-            core::arch::riscv64::hfence_vvma_all();
+            #[cfg(feature = "control")]
+            self.translation.bind(self.regs.virtual_hs_csrs.hgatp);
+            #[cfg(not(feature = "control"))]
+            {
+                core::arch::asm!("csrw hgatp, {root}", root = in(reg) self.regs.virtual_hs_csrs.hgatp);
+                core::arch::riscv64::hfence_gvma_all();
+                core::arch::riscv64::hfence_vvma_all();
+            }
+            #[cfg(feature = "control")]
+            Vsatp::from_bits(self.regs.vs_csrs.vsatp).write();
         }
         self.sbi.pmu.backend_bind();
         Ok(())
@@ -403,11 +432,14 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             // previous guest's virtual IRQs into later host/guest execution.
             hvip::Hvip::from_bits(0).write();
             hgeie::write(0);
+            #[cfg(feature = "control")]
+            Vsatp::from_bits(0).write();
             henvcfg::write(self.regs.hyp_regs.henvcfg);
             #[cfg(feature = "sstc")]
             vstimecmp::write(usize::MAX);
             core::arch::asm!("csrw hgatp, x0");
-            core::arch::riscv64::hfence_gvma_all();
+            // Host execution does not use G-stage translation. VMID-tagged
+            // translations remain available to a validated later binding.
         }
         #[cfg(feature = "m-mode")]
         unsafe {
@@ -902,6 +934,7 @@ impl RISCVVCpu {
                                 return Ok(AxVCpuExitReason::Nothing);
                             }
                         }
+                        axaddrspace::invalidate_guest_tlbs();
                         axvisor_api::arch::remote_hfence_vvma_all();
                         self.sbi_return(RET_SUCCESS, 0);
                         return Ok(AxVCpuExitReason::Nothing);
@@ -1008,7 +1041,7 @@ impl RISCVVCpu {
         self.advance_pc(4);
     }
 
-    #[cfg(feature = "sstc")]
+    #[cfg(any(feature = "sstc", feature = "aia"))]
     fn handle_virtual_instruction(&mut self) -> AxResult<AxVCpuExitReason> {
         let instr = match self.read_virtual_instruction()? {
             VirtualInstructionRead::Instruction(instr) => instr,
@@ -1016,88 +1049,122 @@ impl RISCVVCpu {
         };
         let csr = ((instr >> 20) & 0xfff) as u16;
 
-        if csr != CSR_STIMECMP {
-            self.sbi.pmu.record_illegal_insn();
-            return Err(ax_errno::ax_err_type!(
-                Unsupported,
-                alloc::format!(
-                    "Unhandled virtual instruction csr={csr:#x}, sepc: {:#x}, stval: {:#x}, \
-                     htval: {:#x}, htinst: {:#x}",
-                    self.regs.guest_regs.sepc,
-                    self.regs.trap_csrs.stval,
-                    self.regs.trap_csrs.htval,
-                    self.regs.trap_csrs.htinst,
-                )
-            ));
+        #[cfg(feature = "aia")]
+        if self.aia.is_some() && matches!(csr, 0x150 | 0x151 | 0x15c) {
+            let funct3 = ((instr >> 12) & 7) as u8;
+            let rd = ((instr >> 7) & 31) as u8;
+            let rs1 = ((instr >> 15) & 31) as u8;
+            if !matches!(funct3, 1..=3 | 5..=7) {
+                return Err(AxError::Unsupported);
+            }
+            let source = if funct3 & 4 != 0 {
+                rs1 as usize
+            } else {
+                self.read_gpr_raw(rs1)
+            };
+            let write = funct3 & 3 == 1 || rs1 != 0;
+            let value = self
+                .aia
+                .as_mut()
+                .unwrap()
+                .csr(csr, funct3, source, write)
+                .ok_or(AxError::Unsupported)?;
+            self.write_gpr_raw(rd, value);
+            self.advance_pc(4);
+            return Ok(AxVCpuExitReason::Nothing);
         }
 
-        let funct3 = ((instr >> 12) & 0x7) as u8;
-        let rd = ((instr >> 7) & 0x1f) as u8;
-        let rs1 = ((instr >> 15) & 0x1f) as u8;
-        let old_value = self.regs.vs_csrs.vstimecmp;
-        let rs1_value = self.read_gpr_raw(rs1);
-        let zimm = rs1 as usize;
+        #[cfg(not(feature = "sstc"))]
+        {
+            self.sbi.pmu.record_illegal_insn();
+            Err(AxError::Unsupported)
+        }
 
-        let new_value = match funct3 {
-            0b001 => Some(rs1_value),
-            0b010 => {
-                if rs1 == 0 {
-                    None
-                } else {
-                    Some(old_value | rs1_value)
-                }
-            }
-            0b011 => {
-                if rs1 == 0 {
-                    None
-                } else {
-                    Some(old_value & !rs1_value)
-                }
-            }
-            0b101 => Some(zimm),
-            0b110 => {
-                if zimm == 0 {
-                    None
-                } else {
-                    Some(old_value | zimm)
-                }
-            }
-            0b111 => {
-                if zimm == 0 {
-                    None
-                } else {
-                    Some(old_value & !zimm)
-                }
-            }
-            _ => {
+        #[cfg(feature = "sstc")]
+        {
+            if csr != CSR_STIMECMP {
                 self.sbi.pmu.record_illegal_insn();
                 return Err(ax_errno::ax_err_type!(
                     Unsupported,
                     alloc::format!(
-                        "Unhandled virtual instruction funct3={funct3:#x} for csr={csr:#x}, sepc: \
-                         {:#x}",
+                        "Unhandled virtual instruction csr={csr:#x}, sepc: {:#x}, stval: {:#x}, \
+                         htval: {:#x}, htinst: {:#x}",
                         self.regs.guest_regs.sepc,
+                        self.regs.trap_csrs.stval,
+                        self.regs.trap_csrs.htval,
+                        self.regs.trap_csrs.htinst,
                     )
                 ));
             }
-        };
 
-        if rd != 0 {
-            self.write_gpr_raw(rd, old_value);
+            let funct3 = ((instr >> 12) & 0x7) as u8;
+            let rd = ((instr >> 7) & 0x1f) as u8;
+            let rs1 = ((instr >> 15) & 0x1f) as u8;
+            let old_value = self.regs.vs_csrs.vstimecmp;
+            let rs1_value = self.read_gpr_raw(rs1);
+            let zimm = rs1 as usize;
+
+            let new_value = match funct3 {
+                0b001 => Some(rs1_value),
+                0b010 => {
+                    if rs1 == 0 {
+                        None
+                    } else {
+                        Some(old_value | rs1_value)
+                    }
+                }
+                0b011 => {
+                    if rs1 == 0 {
+                        None
+                    } else {
+                        Some(old_value & !rs1_value)
+                    }
+                }
+                0b101 => Some(zimm),
+                0b110 => {
+                    if zimm == 0 {
+                        None
+                    } else {
+                        Some(old_value | zimm)
+                    }
+                }
+                0b111 => {
+                    if zimm == 0 {
+                        None
+                    } else {
+                        Some(old_value & !zimm)
+                    }
+                }
+                _ => {
+                    self.sbi.pmu.record_illegal_insn();
+                    return Err(ax_errno::ax_err_type!(
+                        Unsupported,
+                        alloc::format!(
+                            "Unhandled virtual instruction funct3={funct3:#x} for csr={csr:#x}, \
+                             sepc: {:#x}",
+                            self.regs.guest_regs.sepc,
+                        )
+                    ));
+                }
+            };
+
+            if rd != 0 {
+                self.write_gpr_raw(rd, old_value);
+            }
+
+            if let Some(new_value) = new_value {
+                // Emulate stimecmp when the environment traps this access despite
+                // the requested STCE setting, updating the comparator and clearing
+                // any software-injected pending timer interrupt.
+                self.program_guest_timer(new_value);
+            }
+
+            self.advance_pc(4);
+            Ok(AxVCpuExitReason::Nothing)
         }
-
-        if let Some(new_value) = new_value {
-            // Emulate stimecmp when the environment traps this access despite
-            // the requested STCE setting, updating the comparator and clearing
-            // any software-injected pending timer interrupt.
-            self.program_guest_timer(new_value);
-        }
-
-        self.advance_pc(4);
-        Ok(AxVCpuExitReason::Nothing)
     }
 
-    #[cfg(not(feature = "sstc"))]
+    #[cfg(not(any(feature = "sstc", feature = "aia")))]
     fn handle_virtual_instruction(&mut self) -> AxResult<AxVCpuExitReason> {
         self.sbi.pmu.record_illegal_insn();
         Err(ax_errno::ax_err_type!(
@@ -1113,7 +1180,7 @@ impl RISCVVCpu {
         ))
     }
 
-    #[cfg(feature = "sstc")]
+    #[cfg(any(feature = "sstc", feature = "aia"))]
     fn read_virtual_instruction(&mut self) -> AxResult<VirtualInstructionRead> {
         let instr = self.regs.trap_csrs.stval as u32;
         if instr & 0x7f == SYSTEM_OPCODE {
@@ -1135,14 +1202,14 @@ impl RISCVVCpu {
         }
     }
 
-    #[cfg(feature = "sstc")]
+    #[cfg(any(feature = "sstc", feature = "aia"))]
     fn read_gpr_raw(&self, index: u8) -> usize {
         GprIndex::from_raw(index as u32)
             .map(|gpr| self.get_gpr(gpr))
             .unwrap_or(0)
     }
 
-    #[cfg(feature = "sstc")]
+    #[cfg(any(feature = "sstc", feature = "aia"))]
     fn write_gpr_raw(&mut self, index: u8, value: usize) {
         if let Some(gpr) = GprIndex::from_raw(index as u32) {
             self.set_gpr_from_gpr_index(gpr, value);

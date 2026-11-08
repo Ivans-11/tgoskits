@@ -292,6 +292,26 @@ impl AxVmDevices {
                         );
                     }
                 }
+                EmulatedDeviceType::RiscvImsic => {
+                    #[cfg(all(target_arch = "riscv64", feature = "aia"))]
+                    {
+                        let ids = match config.cfg_list.as_slice() {
+                            [] => 63,
+                            [ids] => *ids,
+                            _ => panic!("IMSIC expects only the maximum interrupt identity"),
+                        };
+                        let device = crate::imsic::Imsic::new(
+                            config.base_gpa,
+                            config.length,
+                            ids,
+                            vcpu_topology.len(),
+                        )
+                        .expect("invalid IMSIC configuration or unavailable AIA");
+                        this.add_mmio_dev(Arc::new(device));
+                    }
+                    #[cfg(not(all(target_arch = "riscv64", feature = "aia")))]
+                    panic!("IMSIC requires RISC-V and the aia feature");
+                }
                 EmulatedDeviceType::PPPTGlobal => {
                     #[cfg(target_arch = "riscv64")]
                     {

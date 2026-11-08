@@ -69,11 +69,15 @@ pub const KVM_RISCV_ISA_EXT_D: u64 = 2;
 pub const KVM_RISCV_ISA_EXT_F: u64 = 3;
 pub const KVM_RISCV_ISA_EXT_I: u64 = 5;
 pub const KVM_RISCV_ISA_EXT_M: u64 = 6;
+pub const KVM_RISCV_ISA_EXT_SSTC: u64 = 8;
+pub const KVM_RISCV_ISA_EXT_SSAIA: u64 = 14;
 pub const KVM_RISCV_ISA_EXT_ZICSR: u64 = 20;
 pub const KVM_RISCV_ISA_EXT_ZIFENCEI: u64 = 21;
 
 /// Register IDs reported by `KVM_GET_REG_LIST` for the supported RISC-V subset.
-pub const RISCV_REG_IDS: [u64; 119] = [
+pub const RISCV_REG_IDS: [u64; 121] = [
+    KVM_REG_RISCV | KVM_REG_SIZE_U64 | KVM_REG_RISCV_ISA_EXT | KVM_RISCV_ISA_EXT_SSTC,
+    KVM_REG_RISCV | KVM_REG_SIZE_U64 | KVM_REG_RISCV_ISA_EXT | KVM_RISCV_ISA_EXT_SSAIA,
     riscv_config_reg_id(KVM_REG_RISCV_CONFIG_ISA),
     riscv_config_reg_id(KVM_REG_RISCV_CONFIG_MVENDORID),
     riscv_config_reg_id(KVM_REG_RISCV_CONFIG_MARCHID),

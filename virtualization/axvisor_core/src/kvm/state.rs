@@ -55,6 +55,8 @@ pub(in crate::kvm) enum ControlFileState {
     Vcpu(VcpuFileState),
     #[cfg(target_arch = "aarch64")]
     Device(DeviceFileState),
+    #[cfg(target_arch = "riscv64")]
+    AiaDevice(api_control::ControlFileId),
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -87,6 +89,10 @@ pub(in crate::kvm) struct VmFileState {
     /// reachable while vCPU file descriptors are still open, matching Linux
     /// KVM's reference-counted VM lifetime.
     pub(in crate::kvm) vm_fd_closed: bool,
+    #[cfg(target_arch = "riscv64")]
+    pub(in crate::kvm) aia: Option<Arc<ax_kspin::SpinNoIrq<super::aia::Aia>>>,
+    #[cfg(target_arch = "riscv64")]
+    pub(in crate::kvm) aia_device: Option<api_control::ControlFileId>,
     pub(in crate::kvm) memory_slots: BTreeMap<u32, MemorySlot>,
     pub(in crate::kvm) ioeventfds: BTreeMap<IoEventFdKey, IoEventFd>,
     pub(in crate::kvm) irqfds: BTreeMap<IrqFdKey, IrqFd>,
@@ -175,7 +181,7 @@ impl ArmRunState {
 
     pub(in crate::kvm) fn enter(&self) -> bool {
         self.active_cpu
-            .store(api_control::current_cpu_id(), Ordering::SeqCst);
+            .store(axvisor_api::arch::current_cpu_id(), Ordering::SeqCst);
         if self.entry_blocked.load(Ordering::SeqCst) {
             self.leave();
             false
@@ -192,7 +198,7 @@ impl ArmRunState {
     pub(in crate::kvm) fn kick(&self) -> ax_errno::AxResult {
         let cpu = self.active_cpu.load(Ordering::SeqCst);
         if cpu != Self::OUTSIDE {
-            api_control::kick_cpu_wait(cpu)?;
+            axvisor_api::arch::kick_cpu_wait(cpu)?;
         }
         Ok(())
     }
@@ -210,6 +216,16 @@ pub(in crate::kvm) struct VcpuOperationLock {
 }
 
 impl VcpuOperationLock {
+    #[cfg(target_arch = "riscv64")]
+    pub(in crate::kvm) fn try_lock(self: &Arc<Self>) -> Option<VcpuOperationGuard> {
+        self.held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| VcpuOperationGuard {
+                lock: Arc::clone(self),
+            })
+    }
+
     pub(in crate::kvm) fn new() -> Arc<Self> {
         Arc::new(Self {
             held: AtomicBool::new(false),

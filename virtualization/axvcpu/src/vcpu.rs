@@ -279,10 +279,33 @@ impl<A: AxArchVCpu> AxVCpu<A> {
 
     /// Run the VCpu.
     pub fn run(&self) -> AxResult<AxVCpuExitReason> {
-        self.transition_state(VCpuState::Ready, VCpuState::Running)?;
-        self.manipulate_arch_vcpu(VCpuState::Running, VCpuState::Ready, |arch_vcpu| {
-            arch_vcpu.run()
-        })
+        self.with_running(|arch_vcpu| arch_vcpu.run())
+    }
+
+    /// Runs a bounded operation while keeping this vCPU registered as current.
+    ///
+    /// The caller retains the CPU binding and its interrupt/preemption guard.
+    /// The operation may handle backend exits and reenter the guest without
+    /// repeating task registration or exposing a transient `Ready` state.
+    /// It must return for exits that need host processing or may block.
+    pub fn with_running<F, T>(&self, f: F) -> AxResult<T>
+    where
+        F: FnOnce(&mut A) -> AxResult<T>,
+    {
+        {
+            let mut inner = self.inner_mut.lock();
+            if inner.state != VCpuState::Ready {
+                return ax_err!(BadState, "vCPU is not ready to run");
+            }
+            inner.state = VCpuState::Running;
+        }
+        let result = self.with_current_cpu_set(|| f(self.get_arch_vcpu()));
+        self.inner_mut.lock().state = if result.is_ok() {
+            VCpuState::Ready
+        } else {
+            VCpuState::Invalid
+        };
+        result
     }
 
     /// Decodes an unresolved nested page fault while this vCPU remains bound.

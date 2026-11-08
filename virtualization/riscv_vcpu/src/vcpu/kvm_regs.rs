@@ -130,7 +130,11 @@ impl RISCVVCpu {
             KVM_REG_RISCV_CSR_SCAUSE => self.regs.vs_csrs.vscause = value as usize,
             KVM_REG_RISCV_CSR_STVAL => self.regs.vs_csrs.vstval = value as usize,
             KVM_REG_RISCV_CSR_SIP => self.regs.virtual_hs_csrs.hvip = value as usize,
-            KVM_REG_RISCV_CSR_SATP => self.regs.vs_csrs.vsatp = value as usize,
+            KVM_REG_RISCV_CSR_SATP => {
+                self.regs.vs_csrs.vsatp = value as usize;
+                #[cfg(feature = "control")]
+                self.translation.invalidate();
+            }
             KVM_REG_RISCV_CSR_SCOUNTEREN => self.regs.guest_regs.scounteren = value as usize,
             KVM_REG_RISCV_CSR_SENVCFG if value == 0 => {}
             KVM_REG_RISCV_CSR_SENVCFG => return Err(AxError::InvalidInput),
@@ -186,10 +190,33 @@ impl RISCVVCpu {
     }
 
     fn get_kvm_isa_ext_reg(&self, index: u64) -> AxResult<u64> {
+        if index == KVM_RISCV_ISA_EXT_SSTC {
+            return Ok(u64::from(cfg!(feature = "sstc")));
+        }
+        #[cfg(feature = "control")]
+        if index == KVM_RISCV_ISA_EXT_SSAIA {
+            return Ok(u64::from(crate::detect_aia()));
+        }
         Ok(u64::from(kvm_isa_ext_supported(index)))
     }
 
     fn set_kvm_isa_ext_reg(&mut self, index: u64, value: u64) -> AxResult {
+        // Sstc is selected at build time, so only an unchanged value is valid.
+        if index == KVM_RISCV_ISA_EXT_SSTC {
+            return if value == self.get_kvm_isa_ext_reg(index)? {
+                Ok(())
+            } else {
+                Err(AxError::Unsupported)
+            };
+        }
+        #[cfg(feature = "control")]
+        if index == KVM_RISCV_ISA_EXT_SSAIA {
+            return if value == self.get_kvm_isa_ext_reg(index)? {
+                Ok(())
+            } else {
+                Err(AxError::Unsupported)
+            };
+        }
         match (kvm_isa_ext_supported(index), value) {
             (true, 0 | 1) => Ok(()),
             (true, _) => Err(AxError::InvalidInput),

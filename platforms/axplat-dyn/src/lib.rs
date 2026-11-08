@@ -27,6 +27,13 @@ fn somehal_handle_irq(_irq: somehal::irq::IrqId) {}
 
 pub use boot::boot_stack_bounds;
 pub use generic_timer::try_init_epoch_offset;
+
+/// Returns the hardware ID corresponding to a logical CPU index.
+#[cfg(target_arch = "riscv64")]
+pub fn cpu_hardware_id(cpu_index: usize) -> Option<usize> {
+    somehal::smp::cpu_idx_to_id(cpu_index)
+}
+
 #[cfg(all(feature = "irq", target_arch = "riscv64", feature = "hv"))]
 pub use irq::register_virtual_irq_injector;
 

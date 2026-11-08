@@ -21,6 +21,8 @@
 extern crate log;
 extern crate alloc;
 
+#[cfg(feature = "aia")]
+pub mod aia;
 mod consts;
 /// The Control and Status Registers (CSRs) for a RISC-V hypervisor.
 mod detect;
@@ -31,8 +33,12 @@ mod regs;
 mod sbi_console;
 mod trap;
 mod vcpu;
+#[cfg(feature = "control")]
+mod vmid;
 mod vpmu;
 
+#[cfg(feature = "aia")]
+pub use detect::{detect_aia, detect_stateen};
 pub use detect::{detect_h_extension as has_hardware_support, max_guest_page_table_levels};
 pub use regs::GprIndex;
 

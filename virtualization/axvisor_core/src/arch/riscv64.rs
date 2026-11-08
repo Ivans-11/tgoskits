@@ -18,6 +18,9 @@ use axdevice_base::map_device_of_type;
 
 use crate::vmm::vm_list::get_vm_by_id;
 
+#[cfg(feature = "aia-hw")]
+pub(crate) mod imsic;
+
 const GUEST_PLIC_PADDR: usize = 0x0c00_0000;
 
 pub fn hardware_check() {

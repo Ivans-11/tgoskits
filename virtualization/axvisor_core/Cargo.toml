@@ -9,7 +9,9 @@ repository = "https://github.com/rcore-os/tgoskits"
 
 [features]
 default = ["vmx", "shell"]
-control = ["axvisor_api/control"]
+control = ["axvisor_api/control", "riscv_vcpu/control", "dep:riscv_aia"]
+aia = ["axvm/aia"]
+aia-hw = ["aia", "riscv_vcpu/aia-hw"]
 posted-interrupt = ["vmx", "axvm/posted-interrupt"]
 ept-level-4 = []
 fs = ["axvisor_api/fs"]
@@ -52,6 +54,7 @@ toml = "0.9"
 anyhow = "1.0"
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv_aia = { workspace = true, optional = true }
 riscv_vplic = { workspace = true }
 riscv_vcpu = { workspace = true }
 

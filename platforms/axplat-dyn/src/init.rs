@@ -45,6 +45,8 @@ impl InitIf for InitIfImpl {
     /// initialization (e.g, logging, memory management), and finalized the rest of
     /// platform configuration and initialization.
     fn init_later(_cpu_id: usize, _dtb: usize) {
+        #[cfg(all(target_arch = "riscv64", feature = "hv"))]
+        crate::mem::map_interrupt_controllers();
         somehal::post_paging();
         somehal::timer::irq_enable();
     }

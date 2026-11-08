@@ -15,6 +15,8 @@
 //! AxVisor KVM-compatible host control endpoint callbacks.
 
 mod abi;
+#[cfg(target_arch = "riscv64")]
+mod aia;
 mod cpuid;
 #[cfg(target_arch = "aarch64")]
 mod device;
@@ -108,7 +110,11 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 // VM fd can be dropped before vCPU fds during process exit.
                 let has_vcpus = match control_files.get_mut(&control_file) {
                     Some(ControlFileState::Vm(vm)) => {
-                        if !vm.vcpu_files.is_empty() {
+                        #[cfg(target_arch = "riscv64")]
+                        let has_device = vm.aia_device.is_some();
+                        #[cfg(not(target_arch = "riscv64"))]
+                        let has_device = false;
+                        if !vm.vcpu_files.is_empty() || has_device {
                             vm.vm_fd_closed = true;
                             true
                         } else {
@@ -142,7 +148,11 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 let cleanup_vm =
                     if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file) {
                         vm.vcpu_files.remove(&vcpu.vcpu_id);
-                        vm.vm_fd_closed && vm.vcpu_files.is_empty()
+                        #[cfg(target_arch = "riscv64")]
+                        let has_device = vm.aia_device.is_some();
+                        #[cfg(not(target_arch = "riscv64"))]
+                        let has_device = false;
+                        vm.vm_fd_closed && vm.vcpu_files.is_empty() && !has_device
                     } else {
                         false
                     };
@@ -173,6 +183,23 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                     vm.device_files.retain(|_, file| *file != control_file);
                 }
                 CloseAction::None
+            }
+            #[cfg(target_arch = "riscv64")]
+            ControlFileState::AiaDevice(vm_file) => {
+                let vm_file = *vm_file;
+                control_files.remove(&control_file);
+                let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
+                    return ax_err!(NotFound);
+                };
+                vm.aia_device = None;
+                if vm.vm_fd_closed && vm.vcpu_files.is_empty() {
+                    CloseAction::Vm {
+                        control_file: vm_file,
+                        irqfds: core::mem::take(&mut vm.irqfds).into_values().collect(),
+                    }
+                } else {
+                    CloseAction::None
+                }
             }
             ControlFileState::System => {
                 control_files.remove(&control_file);
@@ -501,6 +528,8 @@ fn ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> AxRe
         ControlFileState::Vcpu(_) => vcpu_ioctl(control_file, cmd, arg),
         #[cfg(target_arch = "aarch64")]
         ControlFileState::Device(_) => device_ioctl(control_file, cmd, arg),
+        #[cfg(target_arch = "riscv64")]
+        ControlFileState::AiaDevice(vm_file) => aia::device_ioctl(vm_file, cmd, arg),
     }
 }
 
@@ -538,6 +567,8 @@ fn vm_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> A
         KVM_CREATE_VCPU => create_vcpu_file(control_file, arg),
         #[cfg(target_arch = "aarch64")]
         KVM_CREATE_DEVICE => create_device(control_file, arg),
+        #[cfg(target_arch = "riscv64")]
+        KVM_CREATE_DEVICE => aia::create_device(control_file, arg),
         #[cfg(target_arch = "aarch64")]
         KVM_ARM_PREFERRED_TARGET => get_preferred_target(arg),
         KVM_SET_USER_MEMORY_REGION => {
@@ -703,6 +734,14 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
 }
 
 fn check_extension(capability: usize) -> usize {
+    #[cfg(target_arch = "riscv64")]
+    match capability {
+        KVM_CAP_IRQCHIP | KVM_CAP_IRQFD | KVM_CAP_DEVICE_CTRL | KVM_CAP_SIGNAL_MSI => {
+            return usize::from(aia::available());
+        }
+        KVM_CAP_IRQ_ROUTING => return usize::from(aia::available()) * KVM_MAX_IRQ_ROUTES,
+        _ => {}
+    }
     match capability {
         KVM_CAP_IRQCHIP => usize::from(cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))),
         KVM_CAP_USER_MEMORY => 1,

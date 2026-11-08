@@ -54,6 +54,24 @@ use super::memory::PhysAddr;
 /// host system or HAL layer.
 #[crate::api_def]
 pub trait ArchIf {
+    /// Returns the current physical CPU. The caller must prevent migration
+    /// throughout publication and guest entry, not merely during this call.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    fn current_cpu_id() -> usize;
+
+    /// Forces `cpu` out of guest execution and waits for its host IPI handler.
+    /// Call with interrupts enabled and without holding Core locks. This does
+    /// not inject a guest interrupt or wait for the target KVM_RUN to return.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    fn kick_cpu_wait(cpu: usize) -> ax_errno::AxResult;
+
+    /// Returns the current physical hart ID, if the host can identify it.
+    ///
+    /// This is the hardware ID used in the host FDT, not a logical CPU index.
+    /// Callers must prevent migration while associating it with per-CPU state.
+    #[cfg(target_arch = "riscv64")]
+    fn current_hart_id() -> Option<usize>;
+
     /// Returns the physical address of the host-provided FDT blob, if any.
     #[cfg(any(
         target_arch = "aarch64",

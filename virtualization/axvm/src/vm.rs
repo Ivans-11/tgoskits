@@ -25,6 +25,8 @@ use axaddrspace::{
     AddrSpace, GuestPhysAddr, HostPhysAddr, HostVirtAddr, MappingFlags, device::AccessWidth,
 };
 use axdevice::{AxVmDeviceConfig, AxVmDevices};
+#[cfg(not(feature = "svm"))]
+use axvcpu::AxArchVCpu;
 use axvcpu::{AxVCpu, AxVCpuExitReason, VCpuState};
 use axvisor_api::vmm::InterruptVector;
 use spin::Once;
@@ -46,6 +48,12 @@ const VM_ASPACE_BASE: usize = 0x0;
 const VM_ASPACE_SIZE: usize = 1 << 48;
 #[cfg(not(target_arch = "x86_64"))]
 const VM_ASPACE_SIZE: usize = 0x7fff_ffff_f000;
+
+// RISC-V's inexpensive in-kernel exits can reuse their loaded CSRs and
+// translations. Keep a finite entry budget as well as the elapsed-time check
+// below, so immediate-exit/signal processing still gets regular opportunities.
+#[cfg(not(feature = "svm"))]
+const BACKEND_EXIT_LIMIT: usize = if cfg!(target_arch = "riscv64") { 32 } else { 8 };
 
 /// A vCPU with architecture-independent interface.
 type VCpu = AxVCpu<AxArchVCpuImpl>;
@@ -434,6 +442,29 @@ impl AxVM {
             }
         }
 
+        #[cfg(all(target_arch = "riscv64", feature = "aia"))]
+        for device in devices.iter_mmio_dev() {
+            if let Some(result) = axdevice_base::map_device_of_type(
+                device,
+                |imsic: &axdevice::imsic::Imsic| -> AxResult {
+                    let stateen = riscv_vcpu::detect_stateen();
+                    for vcpu in &vcpu_list {
+                        let arch = vcpu.get_arch_vcpu();
+                        if arch.aia.is_some() {
+                            return ax_err!(InvalidInput, "multiple IMSICs cover the same vCPU");
+                        }
+                        let file = imsic.file(vcpu.id()).ok_or_else(|| {
+                            ax_err_type!(InvalidInput, "missing IMSIC file for vCPU")
+                        })?;
+                        arch.aia = Some(riscv_vcpu::aia::Context::new(file, stateen));
+                    }
+                    Ok(())
+                },
+            ) {
+                result?;
+            }
+        }
+
         self.inner_const.call_once(|| AxVMInnerConst {
             phys_cpu_ls: inner_mut.config.phys_cpu_ls.clone(),
             vcpu_list: vcpu_list.into_boxed_slice(),
@@ -668,10 +699,22 @@ impl AxVM {
         limit: usize,
         mut run: impl FnMut() -> AxResult<ControlFlow<AxVCpuExitReason, AxVCpuExitReason>>,
     ) -> AxResult<AxVCpuExitReason> {
-        for _ in 0..limit {
+        #[cfg(target_arch = "riscv64")]
+        let started = axvisor_api::time::current_time_nanos();
+        for _completed in 1..=limit {
             match run()? {
                 ControlFlow::Continue(AxVCpuExitReason::Nothing) => {}
                 ControlFlow::Continue(exit) | ControlFlow::Break(exit) => return Ok(exit),
+            }
+            // Check once per original eight-entry batch, avoiding a clock
+            // query on every lightweight SBI exit. Host interrupts and all
+            // exits requiring upper-layer work return immediately above.
+            #[cfg(target_arch = "riscv64")]
+            if _completed < limit
+                && _completed % 8 == 0
+                && axvisor_api::time::current_time_nanos().saturating_sub(started) >= 16_000
+            {
+                break;
             }
         }
         Ok(AxVCpuExitReason::Nothing)
@@ -728,20 +771,19 @@ impl AxVM {
             loop {
                 let exit_reason = Self::with_bound_vcpu(&vcpu, || {
                     vcpu.set_hlt_exiting(true)?;
-                    Self::run_vcpu_batch(8, || {
-                        let exit_reason = vcpu.run()?;
-                        if let AxVCpuExitReason::NestedPageFault { addr, access_flags } =
-                            exit_reason
-                            && !access_flags.contains(MappingFlags::EXECUTE)
-                            && is_mmio(addr)?
-                            && !self.inner_mut.lock().address_space.has_memory_region(addr)
-                        {
-                            return Ok(ControlFlow::Break(
-                                vcpu.decode_nested_page_fault()?.unwrap_or(exit_reason),
-                            ));
-                        }
-                        Ok(ControlFlow::Continue(exit_reason))
-                    })
+                    let exit_reason = vcpu.with_running(|arch| {
+                        Self::run_vcpu_batch(BACKEND_EXIT_LIMIT, || {
+                            arch.run().map(ControlFlow::Continue)
+                        })
+                    })?;
+                    if let AxVCpuExitReason::NestedPageFault { addr, access_flags } = exit_reason
+                        && !access_flags.contains(MappingFlags::EXECUTE)
+                        && is_mmio(addr)?
+                        && !self.inner_mut.lock().address_space.has_memory_region(addr)
+                    {
+                        return Ok(vcpu.decode_nested_page_fault()?.unwrap_or(exit_reason));
+                    }
+                    Ok(exit_reason)
                 })?;
                 match exit_reason {
                     AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
@@ -882,9 +924,15 @@ impl AxVM {
                     // Route x86 HLT through host halt polling and blocking.
                     vcpu.set_hlt_exiting(cfg!(target_arch = "x86_64"))?;
                     // VMX already batches inside its backend. Keep the direct
-                    // entry budget unchanged for the other architectures too.
-                    let limit = if cfg!(target_arch = "riscv64") { 8 } else { 1 };
-                    Self::run_vcpu_batch(limit, || vcpu.run().map(ControlFlow::Continue))
+                    // entry budget unchanged for the other architectures.
+                    let limit = if cfg!(target_arch = "riscv64") {
+                        BACKEND_EXIT_LIMIT
+                    } else {
+                        1
+                    };
+                    vcpu.with_running(|arch| {
+                        Self::run_vcpu_batch(limit, || arch.run().map(ControlFlow::Continue))
+                    })
                 })?;
                 trace!("{exit_reason:#x?}");
                 let exit_reason = match exit_reason {

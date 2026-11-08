@@ -13,6 +13,7 @@ readme = "README.md"
 license = "Apache-2.0"
 
 [features]
+aia = ["dep:riscv_vcpu"]
 
 [dependencies]
 log = "0.4"
@@ -31,6 +32,7 @@ arm_vgic = { workspace = true, features = ["vgicv3"] }
 axvisor_api = { workspace = true }
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv_vplic = { workspace = true }
+riscv_vcpu = { workspace = true, features = ["aia"], optional = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_vlapic = { workspace = true }
 
