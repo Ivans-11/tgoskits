@@ -707,8 +707,8 @@ impl AxVM {
                 ControlFlow::Continue(exit) | ControlFlow::Break(exit) => return Ok(exit),
             }
             // Check once per original eight-entry batch, avoiding a clock
-            // query on every lightweight SBI exit. Host interrupts and all
-            // exits requiring upper-layer work return immediately above.
+            // query on every lightweight SBI exit. Unconsumed host interrupts
+            // and exits requiring upper-layer work return immediately above.
             #[cfg(target_arch = "riscv64")]
             if _completed < limit
                 && _completed % 8 == 0
@@ -772,8 +772,19 @@ impl AxVM {
                 let exit_reason = Self::with_bound_vcpu(&vcpu, || {
                     vcpu.set_hlt_exiting(true)?;
                     let exit_reason = vcpu.with_running(|arch| {
+                        let mut resumed_irq = false;
                         Self::run_vcpu_batch(BACKEND_EXIT_LIMIT, || {
-                            arch.run().map(ControlFlow::Continue)
+                            let exit = arch.run()?;
+                            // A pending guest IRQ can be delivered without
+                            // tearing down this binding and task association.
+                            // Permit only one such retry per batch: a second
+                            // host IRQ returns to the normal scheduler and
+                            // stop/signal checks, as does every timer exit.
+                            if !resumed_irq && arch.handle_pending_irq_exit(&exit) {
+                                resumed_irq = true;
+                                return Ok(ControlFlow::Continue(AxVCpuExitReason::Nothing));
+                            }
+                            Ok(ControlFlow::Continue(exit))
                         })
                     })?;
                     if let AxVCpuExitReason::NestedPageFault { addr, access_flags } = exit_reason

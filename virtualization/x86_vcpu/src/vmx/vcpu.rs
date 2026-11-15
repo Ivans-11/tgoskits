@@ -2600,6 +2600,21 @@ impl AxArchVCpu for VmxVcpu {
         !self.pending_events.is_empty() || self.vlapic.has_pending_interrupt()
     }
 
+    #[cfg(feature = "posted-interrupt")]
+    fn handle_pending_irq_exit(&mut self, exit: &AxVCpuExitReason) -> bool {
+        if let AxVCpuExitReason::ExternalInterrupt { vector } = *exit
+            && vector as usize == super::posted_interrupt::NOTIFICATION_VECTOR
+            && self.posted_interrupt.is_some()
+            && self.has_pending_event()
+        {
+            // run() has reclaimed PIR and restored host FP/MSR state. This
+            // reserved vector only needs host EOI; retain the current VMCS
+            // and launch state for VMRESUME instead of VMCLEAR/VMLAUNCH.
+            return axvisor_api::irq::handle_irq(vector as usize);
+        }
+        false
+    }
+
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
         if self.host_state_dirty {
             self.setup_vmcs_host()?;

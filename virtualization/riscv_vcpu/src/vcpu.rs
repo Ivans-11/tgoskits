@@ -506,6 +506,23 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         }
     }
 
+    #[cfg(feature = "control")]
+    fn handle_pending_irq_exit(&mut self, exit: &AxVCpuExitReason) -> bool {
+        if let AxVCpuExitReason::ExternalInterrupt { vector } = *exit
+            && matches!(vector as usize, S_SOFT | S_EXT)
+        {
+            let pending = self
+                .aia
+                .as_ref()
+                .is_some_and(|aia| aia.file.state.lock().imsic.external_pending());
+            // IRQ callbacks may access the interrupt file too.
+            if pending {
+                return axvisor_api::irq::handle_irq(vector as usize);
+            }
+        }
+        false
+    }
+
     fn set_return_value(&mut self, val: usize) {
         self.set_gpr_from_gpr_index(GprIndex::A0, val);
     }

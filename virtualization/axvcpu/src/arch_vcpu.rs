@@ -88,6 +88,18 @@ pub trait AxArchVCpu: Sized {
     /// hypervisor intervention.
     fn run(&mut self) -> AxResult<AxVCpuExitReason>;
 
+    /// Handles a notification exit that permits immediate guest reentry.
+    ///
+    /// The vCPU remains bound and registered as current, with local interrupts
+    /// disabled. Implementations must restore host state before dispatching
+    /// the physical IRQ and must not sleep, schedule, or require upper-layer
+    /// device handling. Returning `true` consumes the exit; `false` leaves it
+    /// to the normal run loop. The caller must bound consecutive retries and
+    /// return timer and scheduling exits to the host.
+    fn handle_pending_irq_exit(&mut self, _exit: &AxVCpuExitReason) -> bool {
+        false
+    }
+
     /// Decodes the current unresolved nested page fault as an MMIO access.
     ///
     /// Memory resolvers must be given the first opportunity to satisfy the fault. This method is
