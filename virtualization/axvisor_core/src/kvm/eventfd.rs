@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::{collections::BTreeMap, format, sync::Arc};
+use alloc::{boxed::Box, collections::BTreeMap, format, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use ax_errno::{AxError, AxErrorKind, AxResult, ax_err};
 use axaddrspace::device::AccessWidth;
 use axvisor_api::{
     control as api_control,
-    task::{self as api_task, TaskHandle, TaskOptions},
+    task::{self as api_task, TaskOptions},
 };
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use kvm_uapi::KvmIrqLevel;
@@ -32,7 +32,10 @@ use vm_interrupt::InterruptTriggerMode;
 use super::{CONTROL_FILES, ControlFileState};
 use crate::kvm::{
     abi::raw as abi,
-    state::{GsiRoute, IoEventFd, IoEventFdKey, IrqFd, IrqFdKey, KvmIoEventFd, KvmIrqFd},
+    state::{
+        GsiRoute, IoEventFd, IoEventFdKey, IrqFd, IrqFdKey, IrqFdNotification, KvmIoEventFd,
+        KvmIrqFd,
+    },
     util::{access_width_bytes, access_width_mask, checked_add, read_u32_user},
 };
 #[cfg(not(target_arch = "riscv64"))]
@@ -206,7 +209,7 @@ pub(in crate::kvm) fn update_irqfd(
         }
 
         let user_fd_ref = user_fd_ref.unwrap();
-        let (cancel, task) = start_irqfd_listener(control_file, irqfd.gsi, user_fd_ref);
+        let (cancel, notification) = start_irqfd_notification(control_file, irqfd.gsi, user_fd_ref);
 
         let mut control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
@@ -214,7 +217,7 @@ pub(in crate::kvm) fn update_irqfd(
             stop_irqfd(IrqFd {
                 user_fd_ref,
                 cancel,
-                _task: task,
+                notification,
             });
             return ax_err!(NotFound);
         };
@@ -224,7 +227,7 @@ pub(in crate::kvm) fn update_irqfd(
             IrqFd {
                 user_fd_ref,
                 cancel,
-                _task: task,
+                notification,
             },
         );
         old_irqfd
@@ -385,12 +388,34 @@ fn read_gsi_routes(arg: usize) -> AxResult<BTreeMap<u32, GsiRoute>> {
     Ok(routes)
 }
 
-fn start_irqfd_listener(
+fn start_irqfd_notification(
     vm_file: api_control::ControlFileId,
     gsi: u32,
     user_fd_ref: api_control::UserFdRefId,
-) -> (Arc<AtomicBool>, TaskHandle) {
+) -> (Arc<AtomicBool>, IrqFdNotification) {
     let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(ops) = api_control::eventfd_ops() {
+        let cancelled = cancel.clone();
+        let callback = Box::new(move || {
+            if !cancelled.load(Ordering::Acquire)
+                && let Err(err) = inject_irqfd_gsi(vm_file, gsi)
+            {
+                warn!("KVM irqfd injection failed for GSI {gsi}: {err:?}");
+            }
+        });
+        match (ops.register)(user_fd_ref, callback) {
+            Ok(id) => {
+                return (
+                    cancel,
+                    IrqFdNotification::Callback {
+                        id,
+                        unregister: ops.unregister,
+                    },
+                );
+            }
+            Err(err) => warn!("KVM irqfd callback registration failed; using listener: {err:?}"),
+        }
+    }
     let cancel_for_task = cancel.clone();
     let task = api_task::spawn_task(
         TaskOptions {
@@ -400,19 +425,21 @@ fn start_irqfd_listener(
         },
         move || irqfd_listener_loop(vm_file, gsi, user_fd_ref, cancel_for_task),
     );
-    (cancel, task)
+    (cancel, IrqFdNotification::Thread(task))
 }
 
 pub(in crate::kvm) fn stop_irqfd(irqfd: IrqFd) {
     irqfd.cancel.store(true, Ordering::Release);
-    let _ = api_control::write_user_fd_ref(irqfd.user_fd_ref, &1u64.to_ne_bytes());
-    // The listener owns a host task (and its kernel stack).  Wait for it to
-    // observe the cancellation and exit before dropping the VM state, so
-    // repeated VM create/destroy cycles do not leak tasks until spawn fails.
-    api_task::join_task(irqfd._task);
-    // Release the eventfd reference only after the listener has stopped.  It
-    // may still be reading the reference while cancellation is being
-    // observed, so releasing it before join races with the listener.
+    match irqfd.notification {
+        IrqFdNotification::Thread(task) => {
+            let _ = api_control::write_user_fd_ref(irqfd.user_fd_ref, &1u64.to_ne_bytes());
+            // The listener owns a host task (and its kernel stack). Wait for
+            // it to observe cancellation before dropping the VM state.
+            api_task::join_task(task);
+        }
+        IrqFdNotification::Callback { id, unregister } => unregister(id),
+    }
+    // Both implementations must finish using the retained fd before release.
     let _ = api_control::release_user_fd_ref(irqfd.user_fd_ref);
 }
 

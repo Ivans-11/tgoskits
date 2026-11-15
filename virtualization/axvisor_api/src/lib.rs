@@ -143,6 +143,7 @@
 //!
 
 #![no_std]
+#![cfg_attr(feature = "control", feature(linkage))]
 
 extern crate alloc;
 

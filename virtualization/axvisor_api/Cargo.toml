@@ -29,7 +29,7 @@ ax-cpumask = { workspace = true }
 
 [features]
 default = ["shell"]
-control = []
+control = ["ax-crate-interface/weak_default"]
 fs = []
 shell = []
 

@@ -45,6 +45,26 @@ pub type PinnedUserPagesId = u64;
 /// A host-provided identifier for a retained userspace address space.
 pub type UserAddressSpaceId = u64;
 
+/// Callback invoked after a host eventfd notification is consumed.
+pub type EventFdCallback = Box<dyn Fn() + Send + Sync>;
+
+/// Optional eventfd notification operations supplied by a host adapter.
+///
+/// The host consumes eventfd counts, coalescing writes as necessary. Existing
+/// pending counts also trigger a notification. Callbacks run in task context
+/// with local interrupts enabled and without host eventfd/queue locks held;
+/// they must not sleep. Register failure leaves no callbacks or consumed events.
+/// The retained fd must remain valid until `unregister` returns.
+#[derive(Clone, Copy)]
+pub struct EventFdOps {
+    /// Registers a callback for a retained eventfd reference.
+    pub register: fn(UserFdRefId, EventFdCallback) -> AxResult<u64>,
+    /// Removes a callback and waits for all queued/running callbacks to finish.
+    /// Called once, in sleepable context, without core locks held. No callback
+    /// may start or remain running after this operation returns.
+    pub unregister: fn(u64),
+}
+
 /// Host physical pages backing pinned userspace memory.
 pub struct PinnedUserPages {
     /// Host-owned identifier used to release the pinned pages.
@@ -112,6 +132,12 @@ pub trait ControlIf {
     /// arrange to wake a waiting reader when cancelling it, and wait for the
     /// read to finish before releasing the retained fd.
     fn read_user_fd_ref(user_fd_ref: UserFdRefId, buf: &mut [u8]) -> AxResult<usize>;
+
+    /// Returns optional eventfd callback operations. Hosts without this
+    /// capability may omit this method and use the listener-task implementation.
+    fn eventfd_ops() -> Option<EventFdOps> {
+        None
+    }
 
     /// Releases a previously retained userspace fd.
     fn release_user_fd_ref(user_fd_ref: UserFdRefId) -> AxResult;

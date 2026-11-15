@@ -365,7 +365,13 @@ pub(in crate::kvm) struct IrqFdKey {
 pub(in crate::kvm) struct IrqFd {
     pub(in crate::kvm) user_fd_ref: api_control::UserFdRefId,
     pub(in crate::kvm) cancel: Arc<AtomicBool>,
-    pub(in crate::kvm) _task: TaskHandle,
+    pub(in crate::kvm) notification: IrqFdNotification,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::kvm) enum IrqFdNotification {
+    Thread(TaskHandle),
+    Callback { id: u64, unregister: fn(u64) },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
