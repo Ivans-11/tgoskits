@@ -20,6 +20,9 @@ use ax_lazyinit::LazyInit;
 use ax_timer_list::{TimeValue, TimerEvent, TimerList};
 
 static TOKEN: AtomicUsize = AtomicUsize::new(0);
+// Count only queued events. Mutations happen while holding their queue lock;
+// callbacks may register new events after the expired event is removed.
+static QUEUED_EVENTS: AtomicUsize = AtomicUsize::new(0);
 // const PERIODIC_INTERVAL_NANOS: u64 =
 //     axvisor_api::time::NANOS_PER_SEC / ax_config::TICKS_PER_SEC as u64;
 
@@ -81,6 +84,7 @@ where
         let timer_list = unsafe { TIMER_LIST.current_ref_raw() };
         let mut timers = timer_list.lock();
         let event = VmmTimerEvent::new(token, handler);
+        QUEUED_EVENTS.fetch_add(1, Ordering::Release);
         timers.set(TimeValue::from_nanos(deadline), event);
     }
     rearm_host_timer(global_next_deadline());
@@ -96,19 +100,38 @@ pub fn cancel_timer(token: usize) {
         // SAFETY: Every host CPU initializes its timer list before VM execution starts.
         let timer_list = unsafe { TIMER_LIST.remote_ref_raw(cpu_id) };
         let mut timers = timer_list.lock();
-        timers.cancel(|event| event.token == token);
+        timers.cancel(|event| {
+            if event.token == token {
+                QUEUED_EVENTS.fetch_sub(1, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        });
     }
     rearm_host_timer(global_next_deadline());
 }
 
 /// Check and process any pending timer events
 pub fn check_events() {
+    // A concurrent registration rearms its own host timer, so an empty
+    // observation here cannot lose a newly queued event.
+    if QUEUED_EVENTS.load(Ordering::Acquire) == 0 {
+        return;
+    }
     for cpu_id in 0..axvisor_api::host::get_host_cpu_num() {
         // SAFETY: Every host CPU initializes its timer list before VM execution starts.
         let timer_list = unsafe { TIMER_LIST.remote_ref_raw(cpu_id) };
         loop {
             let now = axvisor_api::time::current_time();
-            let event = timer_list.lock().expire_one(now);
+            let event = {
+                let mut timers = timer_list.lock();
+                let event = timers.expire_one(now);
+                if event.is_some() {
+                    QUEUED_EVENTS.fetch_sub(1, Ordering::Release);
+                }
+                event
+            };
             if let Some((_deadline, event)) = event {
                 trace!("pick one {_deadline:#?} to handle!!!");
                 event.callback(now);
