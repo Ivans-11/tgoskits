@@ -2172,7 +2172,7 @@ impl VmxVcpu {
             0 if self.cpuid.is_empty() => self.cpuid_leaf0,
             // Linux derives its LAPIC rate from the crystal in leaf 0x15.
             // Match the emulated 1 GHz timer, preserving the physical TSC ratio.
-            0x15 => super::timer_cpuid::virtual_timer_leaf(self.cpuid_cache.host(0x15, 0)),
+            0x15 => super::timer_cpuid::virtual_timer_leaf(self.cpuid_cache.host(0x15, 0), crate::host_tsc_frequency_mhz()),
             LEAF_FEATURE_INFO => {
                 const FEATURE_VMX: u32 = 1 << 5;
                 const FEATURE_HYPERVISOR: u32 = 1 << 31;
