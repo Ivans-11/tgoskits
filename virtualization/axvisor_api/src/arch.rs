@@ -54,6 +54,14 @@ use super::memory::PhysAddr;
 /// host system or HAL layer.
 #[crate::api_def]
 pub trait ArchIf {
+    /// Stable identity of the CPU executing a translation synchronization.
+    /// Caller must prevent migration through the subsequent guest access.
+    /// None preserves conservative unconditional flushing on existing adapters.
+    #[cfg(target_arch = "x86_64")]
+    fn translation_cpu_id() -> Option<usize> {
+        None
+    }
+
     /// Returns the current physical CPU. The caller must prevent migration
     /// throughout publication and guest entry, not merely during this call.
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]

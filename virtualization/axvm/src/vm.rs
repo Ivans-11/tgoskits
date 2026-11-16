@@ -676,8 +676,15 @@ impl AxVM {
         let _access = self.guest_access.enter()?;
         vcpu.bind()?;
         let result = if self.guest_access.enabled() {
-            vcpu.with_running(|arch| arch.invalidate_guest_translation())
-                .and_then(|()| f())
+            vcpu.with_running(|arch| {
+                let flushed = arch.sync_guest_translation(self.guest_access.generation())?;
+                #[cfg(feature = "revocable-test")]
+                self.guest_access.record_sync(flushed);
+                #[cfg(not(feature = "revocable-test"))]
+                let _ = flushed;
+                Ok(())
+            })
+            .and_then(|()| f())
         } else {
             f()
         };

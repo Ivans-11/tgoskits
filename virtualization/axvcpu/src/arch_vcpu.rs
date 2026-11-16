@@ -129,9 +129,11 @@ pub trait AxArchVCpu: Sized {
     /// to prepare the VCpu for execution on the current physical CPU.
     fn bind(&mut self) -> AxResult;
 
-    /// Invalidate this VM's translations on the bound CPU before access resumes.
+    /// Synchronize translations to this generation on the bound CPU before access.
+    /// Return whether hardware invalidation was needed. A backend may skip it only
+    /// with proof that this CPU has already observed this mapping generation.
     /// Required only by hosts enabling notified backing; unsupported by default.
-    fn invalidate_guest_translation(&mut self) -> AxResult {
+    fn sync_guest_translation(&mut self, _generation: u64) -> AxResult<bool> {
         Err(ax_errno::AxError::Unsupported)
     }
 

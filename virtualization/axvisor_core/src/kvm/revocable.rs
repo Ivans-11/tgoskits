@@ -21,6 +21,10 @@ struct State {
     epoch: u64,
     invalidating: usize,
     dead: bool,
+    #[cfg(feature = "revocable-test")]
+    published: usize,
+    #[cfg(feature = "revocable-test")]
+    revoked: usize,
 }
 /// One subscription per VM, bound to its creating userspace address space.
 pub(super) struct RevocableMemory {
@@ -70,7 +74,7 @@ impl RevocableMemory {
         this.subscription.store(id, Ordering::Release);
         Ok(Some(this))
     }
-    fn begin(&self, start: usize, end: usize) {
+    fn block_access(&self) {
         {
             let mut state = self.state.lock();
             state.invalidating += 1;
@@ -79,30 +83,56 @@ impl RevocableMemory {
         }
         (self.ops.kick)();
         self.vm.guest_access.drain();
+    }
+    /// Revoke page-aligned GPA coverage. All areas are individual 4 KiB pages:
+    /// range unmap can remove them, including holes, without splitting/allocating.
+    fn revoke(&self, slot: &mut Slot, first: u64, last: u64) -> AxResult<usize> {
+        let count = slot.pages.range(first..=last).count();
+        if count != 0 {
+            self.vm.unmap_region(
+                GuestPhysAddr::from(first as usize),
+                (last - first + 4096) as usize,
+            )?;
+            slot.pages.retain(|&gpa, _| gpa < first || gpa > last);
+            self.vm.guest_access.translation_changed();
+        }
+        Ok(count)
+    }
+    fn fail_closed(&self, state: &mut State) {
+        if !state.dead {
+            state.dead = true;
+            self.vm.guest_access.block();
+            error!("revocable backing: unmap failed, VM access permanently disabled");
+        }
+    }
+    fn begin(&self, start: usize, end: usize) {
+        self.block_access();
         let mut state = self.state.lock();
-        // Whole intersecting slots are revoked. Since each mapped MemoryArea is
-        // a page contained in its slot, removal does not allocate/split areas.
         let mut failed = false;
+        let mut removed = 0;
+        // Examine every aliasing slot. Translate the HVA intersection to GPA,
+        // rounding outwards to the 4 KiB mapping granule (also for partial ranges).
         for slot in state.slots.values_mut() {
             let r = slot.region;
-            if (start as u64) < r.userspace_addr + r.memory_size && r.userspace_addr < end as u64 {
-                if self
-                    .vm
-                    .unmap_region(
-                        GuestPhysAddr::from(r.guest_phys_addr as usize),
-                        r.memory_size as usize,
-                    )
-                    .is_err()
-                {
-                    failed = true;
+            let lo = (start as u64).max(r.userspace_addr);
+            let hi = (end as u64).min(r.userspace_addr + r.memory_size);
+            if lo < hi {
+                let first = r.guest_phys_addr + ((lo - r.userspace_addr) & !4095);
+                let last = r.guest_phys_addr + ((hi - 1 - r.userspace_addr) & !4095);
+                match self.revoke(slot, first, last) {
+                    Ok(n) => removed += n,
+                    Err(_) => failed = true,
                 }
-                slot.pages.clear();
             }
         }
-        if failed && !state.dead {
-            state.dead = true;
-            self.vm.guest_access.block(); // fail closed; never resume stale mappings
-            error!("revocable backing: unmap failed, VM access permanently disabled");
+        #[cfg(feature = "revocable-test")]
+        {
+            state.revoked += removed;
+        }
+        #[cfg(not(feature = "revocable-test"))]
+        let _ = removed;
+        if failed {
+            self.fail_closed(&mut state);
         }
     }
     fn end(&self) {
@@ -127,6 +157,19 @@ impl RevocableMemory {
         while self.resolving.load(Ordering::Acquire) != 0 {
             axvisor_api::task::yield_now();
         }
+        #[cfg(feature = "revocable-test")]
+        {
+            let state = self.state.lock();
+            let (checks, flushes) = self.vm.guest_access.sync_stats();
+            warn!(
+                "REVOCABLE_STATS vm={} published={} revoked={} checks={} flushes={}",
+                self.vm.id(),
+                state.published,
+                state.revoked,
+                checks,
+                flushes
+            );
+        }
         let id = self.subscription.swap(0, Ordering::AcqRel);
         if id != 0 {
             (self.ops.unregister)(id);
@@ -142,7 +185,7 @@ impl RevocableMemory {
         state.slots.clear();
     }
     pub fn set_slot(&self, region: UserspaceMemoryRegion) -> AxResult {
-        self.begin(0, usize::MAX);
+        self.block_access();
         let result = (|| {
             let mut state = self.state.lock();
             if state.dead {
@@ -156,6 +199,28 @@ impl RevocableMemory {
                 })
             {
                 return ax_err!(InvalidInput);
+            }
+            if let Some(slot) = state.slots.get_mut(&region.slot) {
+                let r = slot.region;
+                let result = self.revoke(
+                    slot,
+                    r.guest_phys_addr,
+                    r.guest_phys_addr + r.memory_size - 4096,
+                );
+                match result {
+                    Ok(n) => {
+                        #[cfg(feature = "revocable-test")]
+                        {
+                            state.revoked += n;
+                        }
+                        #[cfg(not(feature = "revocable-test"))]
+                        let _ = n;
+                    }
+                    Err(e) => {
+                        self.fail_closed(&mut state);
+                        return Err(e);
+                    }
+                }
             }
             state.slots.remove(&region.slot);
             if region.memory_size != 0 {
@@ -232,13 +297,9 @@ impl RevocableMemory {
                     } else if mapped.is_some() {
                         // Permission upgrades must not free/rewrite page-table
                         // structures while another CPU is walking them.
-                        let r = slot.region;
                         (self.ops.finish)(page, false);
                         drop(state);
-                        self.begin(
-                            r.userspace_addr as usize,
-                            (r.userspace_addr + r.memory_size) as usize,
-                        );
+                        self.begin(hva, hva + 4096);
                         self.end();
                         Err(ax_errno::AxError::WouldBlock)
                     } else {
@@ -255,8 +316,15 @@ impl RevocableMemory {
                                 flags,
                             )?;
                             slot.pages.insert(gpa, page.writable);
+                            // Also version pure additions: no invalid translation is
+                            // allowed to survive a subsequent entry after publication.
+                            self.vm.guest_access.translation_changed();
                             Ok(true)
                         })();
+                        #[cfg(feature = "revocable-test")]
+                        if result.is_ok() {
+                            state.published += 1;
+                        }
                         (self.ops.finish)(page, result.is_ok());
                         result
                     }

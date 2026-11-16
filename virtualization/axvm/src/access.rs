@@ -1,7 +1,7 @@
 //! Short, non-sleeping guest-memory access intervals. Host MM fault resolution
 //! is deliberately outside these intervals, so notifier quiescence cannot wait
 //! for a reader blocked on the notifier caller's MM locks.
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use ax_errno::AxResult;
 
@@ -10,6 +10,11 @@ pub struct GuestAccess {
     enabled: AtomicBool,
     blockers: AtomicUsize,
     readers: AtomicUsize,
+    generation: AtomicU64,
+    #[cfg(feature = "revocable-test")]
+    sync_checks: AtomicU64,
+    #[cfg(feature = "revocable-test")]
+    sync_flushes: AtomicU64,
 }
 impl GuestAccess {
     pub fn enable(&self) {
@@ -32,6 +37,29 @@ impl GuestAccess {
             return Err(ax_errno::AxError::WouldBlock);
         }
         Ok(GuestAccessGuard(Some(self)))
+    }
+    /// Publish a page-table change before reopening access. Invalidation callers
+    /// hold the publication lock and have drained all guest access intervals.
+    /// Pure additions may also advance this generation without draining readers.
+    pub fn translation_changed(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    #[cfg(feature = "revocable-test")]
+    pub fn record_sync(&self, flushed: bool) {
+        self.sync_checks.fetch_add(1, Ordering::Relaxed);
+        if flushed {
+            self.sync_flushes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    #[cfg(feature = "revocable-test")]
+    pub fn sync_stats(&self) -> (u64, u64) {
+        (
+            self.sync_checks.load(Ordering::Relaxed),
+            self.sync_flushes.load(Ordering::Relaxed),
+        )
     }
     pub fn block(&self) {
         self.blockers.fetch_add(1, Ordering::SeqCst);
