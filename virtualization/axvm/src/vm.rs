@@ -218,6 +218,8 @@ const TEMP_MAX_VCPU_NUM: usize = 64;
 
 /// A Virtual Machine.
 pub struct AxVM {
+    /// Optional gate for host-notified backing. Disabled for retained VMs.
+    pub guest_access: crate::access::GuestAccess,
     id: usize,
     inner_const: Once<AxVMInnerConst>,
     inner_mut: Mutex<AxVMInnerMut>,
@@ -235,6 +237,7 @@ impl AxVM {
         )?;
 
         let result = Arc::new(Self {
+            guest_access: Default::default(),
             id: config.id(),
             inner_const: Once::new(),
             inner_mut: Mutex::new(AxVMInnerMut {
@@ -668,10 +671,16 @@ impl AxVM {
     }
 
     #[cfg(not(feature = "svm"))]
-    fn with_bound_vcpu<T>(vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
+    fn with_bound_vcpu<T>(&self, vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
         let _guard = ax_kernel_guard::IrqSave::new();
+        let _access = self.guest_access.enter()?;
         vcpu.bind()?;
-        let result = f();
+        let result = if self.guest_access.enabled() {
+            vcpu.with_running(|arch| arch.invalidate_guest_translation())
+                .and_then(|()| f())
+        } else {
+            f()
+        };
         let unbind_result = if vcpu.state() == VCpuState::Ready {
             vcpu.unbind()
         } else {
@@ -769,7 +778,7 @@ impl AxVM {
                 .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
             loop {
-                let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                let exit_reason = self.with_bound_vcpu(&vcpu, || {
                     vcpu.set_hlt_exiting(true)?;
                     let exit_reason = vcpu.with_running(|arch| {
                         let mut resumed_irq = false;
@@ -803,10 +812,9 @@ impl AxVM {
                         {
                             continue;
                         }
-                        return Ok(Self::with_bound_vcpu(&vcpu, || {
-                            vcpu.decode_nested_page_fault()
-                        })?
-                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
+                        return Ok(self
+                            .with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
                     }
                     exit_reason => return Ok(exit_reason),
                 }
@@ -835,7 +843,7 @@ impl AxVM {
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
         loop {
-            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+            let exit_reason = self.with_bound_vcpu(&vcpu, || {
                 vcpu.set_hlt_exiting(true)?;
                 Self::run_vcpu_batch(8, || {
                     if !enter() {
@@ -853,10 +861,9 @@ impl AxVM {
                     {
                         continue;
                     }
-                    return Ok(
-                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
-                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }),
-                    );
+                    return Ok(self
+                        .with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
                 }
                 exit_reason => return Ok(exit_reason),
             }
@@ -931,7 +938,7 @@ impl AxVM {
                 .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
             let exit_reason = loop {
-                let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                let exit_reason = self.with_bound_vcpu(&vcpu, || {
                     // Route x86 HLT through host halt polling and blocking.
                     vcpu.set_hlt_exiting(cfg!(target_arch = "x86_64"))?;
                     // VMX already batches inside its backend. Keep the direct
@@ -951,7 +958,7 @@ impl AxVM {
                         if self.handle_nested_page_fault(addr, access_flags) {
                             continue;
                         }
-                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                        self.with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
                             .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
                     }
                     exit_reason => exit_reason,
@@ -1297,6 +1304,25 @@ impl AxVM {
         }
 
         let g = self.inner_mut.lock();
+        let _access = self.guest_access.enter()?;
+        // CPU copies bypass EPT permission checks; enforce them explicitly
+        // while the publication lock and access gate protect the translation.
+        if self.guest_access.enabled() {
+            let end = gpa_ptr
+                .as_usize()
+                .checked_add(core::mem::size_of::<T>())
+                .ok_or(ax_errno::AxError::BadAddress)?;
+            for page in (gpa_ptr.as_usize() & !4095..end).step_by(4096) {
+                let (_, flags, _) = g
+                    .address_space
+                    .page_table()
+                    .query(GuestPhysAddr::from(page))
+                    .map_err(|_| ax_errno::AxError::BadAddress)?;
+                if !flags.contains(MappingFlags::READ) {
+                    return Err(ax_errno::AxError::BadAddress);
+                }
+            }
+        }
         match g.address_space.translated_byte_buffer(gpa_ptr, size) {
             Some(buffers) => {
                 let mut data_bytes = Vec::with_capacity(size);
@@ -1329,9 +1355,27 @@ impl AxVM {
 
     /// Writes an object of type `T` to the guest physical address.
     pub fn write_to_guest_of<T>(&self, gpa_ptr: GuestPhysAddr, data: &T) -> AxResult {
-        match self
-            .inner_mut
-            .lock()
+        let inner = self.inner_mut.lock();
+        let _access = self.guest_access.enter()?;
+        // CPU copies bypass EPT permission checks; enforce them explicitly
+        // while the publication lock and access gate protect the translation.
+        if self.guest_access.enabled() {
+            let end = gpa_ptr
+                .as_usize()
+                .checked_add(core::mem::size_of::<T>())
+                .ok_or(ax_errno::AxError::BadAddress)?;
+            for page in (gpa_ptr.as_usize() & !4095..end).step_by(4096) {
+                let (_, flags, _) = inner
+                    .address_space
+                    .page_table()
+                    .query(GuestPhysAddr::from(page))
+                    .map_err(|_| ax_errno::AxError::BadAddress)?;
+                if !flags.contains(MappingFlags::WRITE) {
+                    return Err(ax_errno::AxError::BadAddress);
+                }
+            }
+        }
+        match inner
             .address_space
             .translated_byte_buffer(gpa_ptr, core::mem::size_of::<T>())
         {

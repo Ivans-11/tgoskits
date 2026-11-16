@@ -3009,6 +3009,14 @@ impl AxArchVCpu for VmxVcpu {
         self.replay_dirty_entry_after_bind()
     }
 
+    fn invalidate_guest_translation(&mut self) -> AxResult {
+        let eptp = VmcsControl64::EPTP.read()?;
+        unsafe {
+            super::instructions::invept(super::instructions::InvEptType::SingleContext, eptp)
+                .map_err(as_axerr)
+        }
+    }
+
     fn unbind(&mut self) -> AxResult {
         self.launched = false;
         self.unbind_from_current_processor()

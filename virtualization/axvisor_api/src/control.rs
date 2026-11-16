@@ -65,6 +65,46 @@ pub struct EventFdOps {
     pub unregister: fn(u64),
 }
 
+/// One temporary reference obtained while resolving notified userspace RAM.
+pub struct ResolvedUserPage {
+    /// Host reference, returned exactly once through `finish`.
+    pub token: u64,
+    /// Backing physical page.
+    pub paddr: PhysAddr,
+    /// Whether a writable guest mapping is permitted.
+    pub writable: bool,
+}
+
+/// Notifications for a retained *address-space subscription*, not retained pages.
+/// Start/end may overlap. Start must synchronously revoke access, cannot fail,
+/// and must not fault, allocate, or wait for a thread doing host MM work.
+pub struct MemoryCallbacks {
+    /// Invalidate host virtual interval [start, end).
+    pub start: Box<dyn Fn(usize, usize) + Send + Sync>,
+    /// Finish one start notification.
+    pub end: Box<dyn Fn() + Send + Sync>,
+    /// Terminal address-space release; no new mappings may be published.
+    pub release: Box<dyn Fn() + Send + Sync>,
+}
+
+/// Optional revocable anonymous RAM support. Retained providers need no changes.
+#[derive(Clone, Copy)]
+pub struct RevocableMemoryOps {
+    /// Subscribe to the current address space before publishing any mapping.
+    pub register: fn(MemoryCallbacks) -> AxResult<u64>,
+    /// Remove subscription and drain callbacks, without core locks held.
+    pub unregister: fn(u64),
+    /// Resolve one page; may fault/sleep. Result owns a temporary reference.
+    pub resolve: fn(u64, usize, bool) -> AxResult<ResolvedUserPage>,
+    /// Release a temporary reference; used/writable require accessed/dirty
+    /// accounting. Must not sleep; called under the mapping publication lock.
+    pub finish: fn(ResolvedUserPage, bool),
+    /// Asynchronously interrupt guest execution on all possible host CPUs.
+    /// Must be callable from a non-sleeping notifier, with no core locks held.
+    /// The core separately waits for its bounded guest-access readers to drain.
+    pub kick: fn(),
+}
+
 /// Host physical pages backing pinned userspace memory.
 pub struct PinnedUserPages {
     /// Host-owned identifier used to release the pinned pages.
@@ -92,6 +132,12 @@ pub struct ControlOps {
 /// The host control endpoint API required by AxVisor.
 #[crate::api_def]
 pub trait ControlIf {
+    /// Select notified backing for newly created control VMs. This is an
+    /// explicit provider policy; returning None preserves retained backing.
+    fn revocable_memory_ops() -> Option<RevocableMemoryOps> {
+        None
+    }
+
     // Endpoint publication.
 
     /// Registers a host-visible control endpoint.

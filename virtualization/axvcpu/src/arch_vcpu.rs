@@ -129,6 +129,12 @@ pub trait AxArchVCpu: Sized {
     /// to prepare the VCpu for execution on the current physical CPU.
     fn bind(&mut self) -> AxResult;
 
+    /// Invalidate this VM's translations on the bound CPU before access resumes.
+    /// Required only by hosts enabling notified backing; unsupported by default.
+    fn invalidate_guest_translation(&mut self) -> AxResult {
+        Err(ax_errno::AxError::Unsupported)
+    }
+
     /// Unbinds the VCpu from the current physical CPU.
     ///
     /// This method performs cleanup and state preservation when moving

@@ -46,6 +46,9 @@ pub(in crate::kvm) fn set_user_memory_region(
     region: UserspaceMemoryRegion,
 ) -> AxResult {
     validate_memory_region(region)?;
+    if let Some(memory) = super::revocable::for_vm(control_file) {
+        return memory.set_slot(region);
+    }
 
     let mut control_files = CONTROL_FILES.lock();
     let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
@@ -148,6 +151,9 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
     fault_addr: GuestPhysAddr,
     access_flags: MappingFlags,
 ) -> AxResult<bool> {
+    if let Some(memory) = super::revocable::for_vm(vm_file) {
+        return memory.fault(fault_addr, access_flags);
+    }
     handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false)
 }
 
@@ -157,6 +163,9 @@ pub(in crate::kvm) fn outside_memory_slots(
     vm_file: api_control::ControlFileId,
     addr: GuestPhysAddr,
 ) -> AxResult<bool> {
+    if let Some(memory) = super::revocable::for_vm(vm_file) {
+        return Ok(!memory.contains(addr));
+    }
     let files = CONTROL_FILES.lock();
     let Some(ControlFileState::Vm(vm)) = files.get(&vm_file) else {
         return ax_err!(NotFound);

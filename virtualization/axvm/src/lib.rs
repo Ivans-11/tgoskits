@@ -23,6 +23,7 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
+pub mod access;
 mod hal;
 mod vcpu;
 mod vm;
