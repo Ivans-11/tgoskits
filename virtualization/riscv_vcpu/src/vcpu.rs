@@ -356,10 +356,7 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             self.machine_state.bind();
             // Prevent speculative VS translations from crossing VMID or
             // henvcfg changes. Restore the guest's vsatp only after binding.
-            #[cfg(feature = "control")]
             Vsatp::from_bits(0).write();
-            #[cfg(not(feature = "control"))]
-            Vsatp::from_bits(self.regs.vs_csrs.vsatp).write();
             let vstvec = Vstvec::from_bits(self.regs.vs_csrs.vstvec);
             vstvec.write();
             let vsepc = self.regs.vs_csrs.vsepc;
@@ -396,7 +393,6 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
                 core::arch::riscv64::hfence_gvma_all();
                 core::arch::riscv64::hfence_vvma_all();
             }
-            #[cfg(feature = "control")]
             Vsatp::from_bits(self.regs.vs_csrs.vsatp).write();
         }
         self.sbi.pmu.backend_bind();
@@ -432,7 +428,6 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             // previous guest's virtual IRQs into later host/guest execution.
             hvip::Hvip::from_bits(0).write();
             hgeie::write(0);
-            #[cfg(feature = "control")]
             Vsatp::from_bits(0).write();
             henvcfg::write(self.regs.hyp_regs.henvcfg);
             #[cfg(feature = "sstc")]
