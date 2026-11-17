@@ -51,7 +51,7 @@ pub(super) fn kvm_exit_reason(exit_reason: &AxVCpuExitReason) -> u32 {
 // The MMIO payload is contiguous in kvm_run. Publish it with one lookup and
 // host write, without touching the surrounding union or run control fields.
 fn write_mmio_exit(
-    control_file: api_control::ControlFileId,
+    mmap_area: api_control::MmapAreaId,
     addr: u64,
     width: AccessWidth,
     data: Option<u64>,
@@ -66,12 +66,12 @@ fn write_mmio_exit(
     payload[DATA..DATA + 8].copy_from_slice(&data.unwrap_or_default().to_ne_bytes());
     payload[LEN..LEN + 4].copy_from_slice(&access_width_bytes(width).to_ne_bytes());
     payload[IS_WRITE] = u8::from(data.is_some());
-    let mmap_area = control_file_mmap_area(control_file)?;
     api_control::write_mmap_area(mmap_area, BASE, &payload)
 }
 
 pub(super) fn prepare_userspace_exit(
     control_file: api_control::ControlFileId,
+    mmap_area: api_control::MmapAreaId,
     exit_reason: &AxVCpuExitReason,
 ) -> AxResult {
     match exit_reason {
@@ -82,7 +82,7 @@ pub(super) fn prepare_userspace_exit(
             reg_width,
             signed_ext,
         } => {
-            write_mmio_exit(control_file, addr.as_usize() as u64, *width, None)?;
+            write_mmio_exit(mmap_area, addr.as_usize() as u64, *width, None)?;
 
             let mut control_files = CONTROL_FILES.lock();
             let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
@@ -96,7 +96,7 @@ pub(super) fn prepare_userspace_exit(
             });
         }
         AxVCpuExitReason::MmioWrite { addr, width, data } => {
-            write_mmio_exit(control_file, addr.as_usize() as u64, *width, Some(*data))?;
+            write_mmio_exit(mmap_area, addr.as_usize() as u64, *width, Some(*data))?;
         }
         AxVCpuExitReason::IoRead { port, width } => {
             write_vcpu_run_u8(

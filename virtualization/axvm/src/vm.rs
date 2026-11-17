@@ -27,7 +27,9 @@ use axaddrspace::{
 use axdevice::{AxVmDeviceConfig, AxVmDevices};
 #[cfg(not(feature = "svm"))]
 use axvcpu::AxArchVCpu;
-use axvcpu::{AxVCpu, AxVCpuExitReason, VCpuState};
+#[cfg(feature = "svm")]
+use axvcpu::VCpuState;
+use axvcpu::{AxVCpu, AxVCpuExitReason};
 use axvisor_api::vmm::InterruptVector;
 use spin::Once;
 use vm_interrupt::{InterruptControllerRoute, InterruptLineLevel, VmInterruptRouter};
@@ -668,25 +670,12 @@ impl AxVM {
     }
 
     #[cfg(not(feature = "svm"))]
-    fn with_bound_vcpu<T>(vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
+    fn with_bound_vcpu<T>(
+        vcpu: &AxVCpuRef,
+        f: impl FnOnce(&mut axvcpu::BoundVCpu<'_, AxArchVCpuImpl>) -> AxResult<T>,
+    ) -> AxResult<T> {
         let _guard = ax_kernel_guard::IrqSave::new();
-        vcpu.bind()?;
-        let result = f();
-        let unbind_result = if vcpu.state() == VCpuState::Ready {
-            vcpu.unbind()
-        } else {
-            Ok(())
-        };
-        match result {
-            Ok(value) => {
-                unbind_result?;
-                Ok(value)
-            }
-            Err(err) => {
-                let _ = unbind_result;
-                Err(err)
-            }
-        }
+        vcpu.with_binding(f)
     }
 
     /// Reuse a bound vCPU for exits fully handled by its backend.
@@ -769,7 +758,7 @@ impl AxVM {
                 .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
             loop {
-                let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                let exit_reason = Self::with_bound_vcpu(&vcpu, |vcpu| {
                     vcpu.set_hlt_exiting(true)?;
                     let exit_reason = vcpu.with_running(|arch| {
                         let mut resumed_irq = false;
@@ -803,7 +792,7 @@ impl AxVM {
                         {
                             continue;
                         }
-                        return Ok(Self::with_bound_vcpu(&vcpu, || {
+                        return Ok(Self::with_bound_vcpu(&vcpu, |vcpu| {
                             vcpu.decode_nested_page_fault()
                         })?
                         .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
@@ -835,7 +824,7 @@ impl AxVM {
             .vcpu(vcpu_id)
             .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
         loop {
-            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+            let exit_reason = Self::with_bound_vcpu(&vcpu, |vcpu| {
                 vcpu.set_hlt_exiting(true)?;
                 Self::run_vcpu_batch(8, || {
                     if !enter() {
@@ -853,10 +842,10 @@ impl AxVM {
                     {
                         continue;
                     }
-                    return Ok(
-                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
-                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }),
-                    );
+                    return Ok(Self::with_bound_vcpu(&vcpu, |vcpu| {
+                        vcpu.decode_nested_page_fault()
+                    })?
+                    .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
                 }
                 exit_reason => return Ok(exit_reason),
             }
@@ -931,7 +920,7 @@ impl AxVM {
                 .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
 
             let exit_reason = loop {
-                let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                let exit_reason = Self::with_bound_vcpu(&vcpu, |vcpu| {
                     // Route x86 HLT through host halt polling and blocking.
                     vcpu.set_hlt_exiting(cfg!(target_arch = "x86_64"))?;
                     // VMX already batches inside its backend. Keep the direct
@@ -951,7 +940,7 @@ impl AxVM {
                         if self.handle_nested_page_fault(addr, access_flags) {
                             continue;
                         }
-                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                        Self::with_bound_vcpu(&vcpu, |vcpu| vcpu.decode_nested_page_fault())?
                             .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags })
                     }
                     exit_reason => exit_reason,

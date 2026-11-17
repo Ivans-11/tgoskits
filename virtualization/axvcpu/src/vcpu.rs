@@ -75,6 +75,36 @@ pub struct AxVCpuInnerMut {
     state: VCpuState,
 }
 
+/// Operations on a vCPU whose binding and current-task association are retained.
+///
+/// Constructed only by [`AxVCpu::with_binding`]. The caller must keep the CPU
+/// pinned and local interrupts disabled for the entire scope.
+pub struct BoundVCpu<'a, A: AxArchVCpu> {
+    vcpu: &'a AxVCpu<A>,
+}
+
+impl<A: AxArchVCpu> BoundVCpu<'_, A> {
+    /// Run one backend batch without registering the current vCPU again.
+    pub fn with_running<T>(&mut self, f: impl FnOnce(&mut A) -> AxResult<T>) -> AxResult<T> {
+        self.vcpu.with_running_inner(f)
+    }
+
+    /// Run the architecture backend once.
+    pub fn run(&mut self) -> AxResult<AxVCpuExitReason> {
+        self.with_running(|arch| arch.run())
+    }
+
+    /// Decode an unresolved fault using the retained guest address context.
+    pub fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
+        self.vcpu.get_arch_vcpu().decode_nested_page_fault()
+    }
+
+    /// Configure guest halt exits before entering the guest.
+    pub fn set_hlt_exiting(&mut self, enabled: bool) -> AxResult {
+        self.vcpu.get_arch_vcpu().set_hlt_exiting(enabled)
+    }
+}
+
 /// Architecture-independent virtual CPU implementation.
 ///
 /// This is the main VCpu abstraction that provides a unified interface for
@@ -292,6 +322,10 @@ impl<A: AxArchVCpu> AxVCpu<A> {
     where
         F: FnOnce(&mut A) -> AxResult<T>,
     {
+        self.with_current_cpu_set(|| self.with_running_inner(f))
+    }
+
+    fn with_running_inner<T>(&self, f: impl FnOnce(&mut A) -> AxResult<T>) -> AxResult<T> {
         {
             let mut inner = self.inner_mut.lock();
             if inner.state != VCpuState::Ready {
@@ -299,13 +333,41 @@ impl<A: AxArchVCpu> AxVCpu<A> {
             }
             inner.state = VCpuState::Running;
         }
-        let result = self.with_current_cpu_set(|| f(self.get_arch_vcpu()));
+        let result = f(self.get_arch_vcpu());
         self.inner_mut.lock().state = if result.is_ok() {
             VCpuState::Ready
         } else {
             VCpuState::Invalid
         };
         result
+    }
+
+    /// Bind, operate on, and unbind a vCPU under one current-task association.
+    ///
+    /// The caller must prevent migration and keep interrupts disabled throughout
+    /// the scope. An ordinary error from `f` still unbinds a ready vCPU, while
+    /// backend errors preserve the existing invalid-state behavior.
+    pub fn with_binding<T>(
+        &self,
+        f: impl FnOnce(&mut BoundVCpu<'_, A>) -> AxResult<T>,
+    ) -> AxResult<T> {
+        self.with_current_cpu_set(|| {
+            self.with_state_transition(VCpuState::Free, VCpuState::Ready, || {
+                self.get_arch_vcpu().bind()
+            })?;
+            let result = f(&mut BoundVCpu { vcpu: self });
+            let unbind = if self.state() == VCpuState::Ready {
+                self.with_state_transition(VCpuState::Ready, VCpuState::Free, || {
+                    self.get_arch_vcpu().unbind()
+                })
+            } else {
+                Ok(())
+            };
+            match result {
+                Ok(value) => unbind.map(|()| value),
+                Err(err) => Err(err),
+            }
+        })
     }
 
     /// Decodes an unresolved nested page fault while this vCPU remains bound.

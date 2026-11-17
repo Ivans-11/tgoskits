@@ -306,10 +306,20 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         unsafe {
             _axvisor_save_fpu_context_d(&mut host_fp);
             _axvisor_load_fpu_context_d(&self.fp);
+            // The saved guest FP image is now resident. Track writes made by
+            // the guest through the HS/M FS field, independently of VS FS.
+            // Always restore the image to prevent exposing host FP registers.
+            const FS_MASK: usize = 3 << 13;
+            const FS_CLEAN: usize = 2 << 13;
+            if self.regs.guest_regs.sstatus & FS_MASK != 0 {
+                self.regs.guest_regs.sstatus = (self.regs.guest_regs.sstatus & !FS_MASK) | FS_CLEAN;
+            }
             // Safe to run the guest as it only touches memory assigned to it by being owned
             // by its page table
             _run_guest(&mut self.regs);
-            _axvisor_save_fpu_context_d(&mut self.fp);
+            if self.regs.guest_regs.sstatus & FS_MASK == FS_MASK {
+                _axvisor_save_fpu_context_d(&mut self.fp);
+            }
             _axvisor_load_fpu_context_d(&host_fp);
         }
         // A host interrupt can overwrite these CSRs as soon as interrupts

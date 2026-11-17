@@ -52,11 +52,19 @@ pub(in crate::kvm) fn checked_add(base: usize, offset: usize) -> AxResult<usize>
     base.checked_add(offset).ok_or(AxError::InvalidInput)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(in crate::kvm) fn read_vcpu_run_u8(
     control_file: api_control::ControlFileId,
     offset: usize,
 ) -> AxResult<u8> {
     let mmap_area = control_file_mmap_area(control_file)?;
+    read_mmap_area_u8(mmap_area, offset)
+}
+
+pub(in crate::kvm) fn read_mmap_area_u8(
+    mmap_area: api_control::MmapAreaId,
+    offset: usize,
+) -> AxResult<u8> {
     let mut value = [0u8; 1];
     api_control::read_mmap_area(mmap_area, offset, &mut value)?;
     Ok(value[0])
@@ -77,6 +85,14 @@ pub(in crate::kvm) fn write_vcpu_run_u32(
     value: u32,
 ) -> AxResult {
     let mmap_area = control_file_mmap_area(control_file)?;
+    write_mmap_area_u32(mmap_area, offset, value)
+}
+
+pub(in crate::kvm) fn write_mmap_area_u32(
+    mmap_area: api_control::MmapAreaId,
+    offset: usize,
+    value: u32,
+) -> AxResult {
     api_control::write_mmap_area(mmap_area, offset, &value.to_ne_bytes())
 }
 
