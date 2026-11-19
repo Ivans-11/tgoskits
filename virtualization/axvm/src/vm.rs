@@ -670,6 +670,11 @@ impl AxVM {
         &self.inner_const().devices
     }
 
+    /// Reject unsupported notified-backing combinations before subscribing.
+    pub fn supports_notified_backing(&self) -> bool {
+        <AxArchVCpuImpl as axvcpu::AxArchVCpu>::SUPPORTS_NOTIFIED_BACKING
+    }
+
     #[cfg(not(feature = "svm"))]
     fn with_bound_vcpu<T>(&self, vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
         let _guard = ax_kernel_guard::IrqSave::new();

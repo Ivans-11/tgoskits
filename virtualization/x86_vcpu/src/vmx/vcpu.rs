@@ -3017,6 +3017,8 @@ impl AxArchVCpu for VmxVcpu {
         self.replay_dirty_entry_after_bind()
     }
 
+    const SUPPORTS_NOTIFIED_BACKING: bool = true;
+
     fn sync_guest_translation(&mut self, generation: u64) -> AxResult<bool> {
         // AxVM holds an IRQ/preemption guard and the access gate here.
         let stamp = axvisor_api::arch::translation_cpu_id().map(|cpu| (cpu, generation));

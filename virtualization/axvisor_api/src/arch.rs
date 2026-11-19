@@ -57,7 +57,6 @@ pub trait ArchIf {
     /// Stable identity of the CPU executing a translation synchronization.
     /// Caller must prevent migration through the subsequent guest access.
     /// None preserves conservative unconditional flushing on existing adapters.
-    #[cfg(target_arch = "x86_64")]
     fn translation_cpu_id() -> Option<usize> {
         None
     }

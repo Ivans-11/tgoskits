@@ -36,12 +36,13 @@ pub(super) struct RevocableMemory {
 }
 impl RevocableMemory {
     pub fn new(vm: AxVMRef) -> AxResult<Option<Arc<Self>>> {
-        if !cfg!(all(target_arch = "x86_64", feature = "vmx")) {
-            return Ok(None);
-        }
         let Some(ops) = api::revocable_memory_ops() else {
             return Ok(None);
         };
+        if !vm.supports_notified_backing() {
+            // An explicit request must not silently degrade to retained memory.
+            return ax_err!(Unsupported);
+        }
         let this = Arc::new(Self {
             vm,
             ops,
@@ -93,7 +94,13 @@ impl RevocableMemory {
                 GuestPhysAddr::from(first as usize),
                 (last - first + 4096) as usize,
             )?;
-            slot.pages.retain(|&gpa, _| gpa < first || gpa > last);
+            // Remove only the invalidated interval. Scanning every resident
+            // page for a one-page permission upgrade makes demand-mapped RAM
+            // quadratic in the VM's working set (visible during Linux boot).
+            // BTreeMap::remove needs no new allocation in notifier context.
+            while let Some(gpa) = slot.pages.range(first..=last).next().map(|(&gpa, _)| gpa) {
+                slot.pages.remove(&gpa);
+            }
             self.vm.guest_access.translation_changed();
         }
         Ok(count)
@@ -237,6 +244,7 @@ impl RevocableMemory {
         self.end();
         result
     }
+    #[cfg(not(target_arch = "aarch64"))]
     pub fn contains(&self, addr: GuestPhysAddr) -> bool {
         let gpa = addr.as_usize() as u64;
         self.state.lock().slots.values().any(|s| {
@@ -295,13 +303,52 @@ impl RevocableMemory {
                         (self.ops.finish)(page, false);
                         Err(ax_errno::AxError::BadAddress)
                     } else if mapped.is_some() {
-                        // Permission upgrades must not free/rewrite page-table
-                        // structures while another CPU is walking them.
-                        (self.ops.finish)(page, false);
+                        // Keep the resolved writable page across quiescence and
+                        // publish the upgrade before reopening guest access. An
+                        // unmap-and-retry can livelock when the next instruction
+                        // fetch remaps this same code/data page read-only.
                         drop(state);
-                        self.begin(hva, hva + 4096);
+                        self.block_access();
+                        let mut state = self.state.lock();
+                        let result = if state.dead
+                            || state.epoch != epoch.wrapping_add(1)
+                            || state.invalidating != 1
+                        {
+                            Err(ax_errno::AxError::WouldBlock)
+                        } else {
+                            let slot = state
+                                .slots
+                                .get_mut(&id)
+                                .expect("epoch protects slot identity");
+                            let result = (|| {
+                                self.revoke(slot, gpa, gpa)?;
+                                self.vm.map_region(
+                                    GuestPhysAddr::from(gpa as usize),
+                                    HostPhysAddr::from(page.paddr.as_usize()),
+                                    4096,
+                                    MappingFlags::READ
+                                        | MappingFlags::WRITE
+                                        | MappingFlags::EXECUTE
+                                        | MappingFlags::USER,
+                                )?;
+                                slot.pages.insert(gpa, true);
+                                self.vm.guest_access.translation_changed();
+                                Ok(true)
+                            })();
+                            #[cfg(feature = "revocable-test")]
+                            if result.is_ok() {
+                                state.revoked += 1;
+                                state.published += 1;
+                            }
+                            if result.is_err() {
+                                self.fail_closed(&mut state);
+                            }
+                            result
+                        };
+                        (self.ops.finish)(page, result.is_ok());
+                        drop(state);
                         self.end();
-                        Err(ax_errno::AxError::WouldBlock)
+                        result
                     } else {
                         let mut flags =
                             MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;

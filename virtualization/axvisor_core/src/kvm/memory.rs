@@ -145,7 +145,11 @@ pub(in crate::kvm) fn set_user_memory_region(
 /// commit their entire userspace range. In particular, gVisor registers sparse
 /// ranges that are several GiB large. Resolve only the faulting page and retain
 /// its host pin until the slot is removed.
-#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 pub(in crate::kvm) fn handle_memory_slot_page_fault(
     vm_file: api_control::ControlFileId,
     fault_addr: GuestPhysAddr,
@@ -154,7 +158,10 @@ pub(in crate::kvm) fn handle_memory_slot_page_fault(
     if let Some(memory) = super::revocable::for_vm(vm_file) {
         return memory.fault(fault_addr, access_flags);
     }
-    handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false)
+    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+    return handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false);
+    #[cfg(target_arch = "aarch64")]
+    Ok(false)
 }
 
 /// Classifies a fault without pinning or allocating pages while a vCPU is bound.

@@ -240,28 +240,21 @@ impl PagingMetaData for A64HVPagingMetaDataL3 {
 
     type VirtAddr = GuestPhysAddr;
 
-    fn flush_tlb(vaddr: Option<Self::VirtAddr>) {
+    fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {
+        invalidate_guest_tlbs();
+        // Both stage-2 tables and cached combined translations must be retired
+        // before a broken mapping can be remade or table pages reused. The
+        // generic page-table interface has no VMID, so invalidate all EL1
+        // regimes, including stage 2, throughout the inner-shareable domain.
+        // VAE2 targets the host stage 1 and is not a stage-2 invalidation.
         unsafe {
-            if let Some(vaddr) = vaddr {
-                #[cfg(not(feature = "arm-el2"))]
-                {
-                    asm!("tlbi vaae1is, {}; dsb sy; isb", in(reg) vaddr.as_usize())
-                }
-                #[cfg(feature = "arm-el2")]
-                {
-                    asm!("tlbi vae2is, {}; dsb sy; isb", in(reg) vaddr.as_usize())
-                }
-            } else {
-                // flush the entire TLB
-                #[cfg(not(feature = "arm-el2"))]
-                {
-                    asm!("tlbi vmalle1; dsb sy; isb")
-                }
-                #[cfg(feature = "arm-el2")]
-                {
-                    asm!("tlbi alle2is; dsb sy; isb")
-                }
-            }
+            asm!(
+                "dsb ishst",
+                "tlbi alle1is",
+                "dsb ish",
+                "isb",
+                options(nostack)
+            );
         }
     }
 }
@@ -280,28 +273,34 @@ impl PagingMetaData for A64HVPagingMetaDataL4 {
 
     type VirtAddr = GuestPhysAddr;
 
-    fn flush_tlb(vaddr: Option<Self::VirtAddr>) {
+    fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {
+        invalidate_guest_tlbs();
+        // Both stage-2 tables and cached combined translations must be retired
+        // before a broken mapping can be remade or table pages reused. The
+        // generic page-table interface has no VMID, so invalidate all EL1
+        // regimes, including stage 2, throughout the inner-shareable domain.
+        // VAE2 targets the host stage 1 and is not a stage-2 invalidation.
         unsafe {
-            if let Some(vaddr) = vaddr {
-                #[cfg(not(feature = "arm-el2"))]
-                {
-                    asm!("tlbi vaae1is, {}; dsb sy; isb", in(reg) vaddr.as_usize())
-                }
-                #[cfg(feature = "arm-el2")]
-                {
-                    asm!("tlbi vae2is, {}; dsb sy; isb", in(reg) vaddr.as_usize())
-                }
-            } else {
-                // flush the entire TLB
-                #[cfg(not(feature = "arm-el2"))]
-                {
-                    asm!("tlbi vmalle1; dsb sy; isb")
-                }
-                #[cfg(feature = "arm-el2")]
-                {
-                    asm!("tlbi alle2is; dsb sy; isb")
-                }
-            }
+            asm!(
+                "dsb ishst",
+                "tlbi alle1is",
+                "dsb ish",
+                "isb",
+                options(nostack)
+            );
         }
     }
+}
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+static GUEST_TLB_GENERATION: AtomicUsize = AtomicUsize::new(1);
+/// Generation of stage-2 mapping changes, including changes by another CPU.
+pub fn guest_tlb_generation() -> usize {
+    GUEST_TLB_GENERATION.load(Ordering::Acquire)
+}
+/// Invalidate retained context stamps. Saturation forces conservative flushing.
+pub fn invalidate_guest_tlbs() {
+    let _ = GUEST_TLB_GENERATION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+        Some(v.saturating_add(1))
+    });
 }
