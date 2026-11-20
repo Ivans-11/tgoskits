@@ -161,6 +161,10 @@ impl api_vmm::VmmIf for VmmIfImpl {
         if let Some(mask) = crate::kvm::control_vcpu_mask(vm_id) {
             return Some(mask);
         }
+        #[cfg(all(target_arch = "x86_64", feature = "bhyve"))]
+        if let Some(mask) = crate::bhyve::active_vcpus(vm_id) {
+            return Some(mask);
+        }
 
         with_vm(vm_id, |vm| {
             let vcpu_num = vm.vcpu_num();

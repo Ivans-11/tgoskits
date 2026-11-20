@@ -64,7 +64,7 @@ pub(in crate::kvm) fn create_device(
         control_files.insert(device_file, ControlFileState::Device(state));
     }
 
-    let fd = match api_control::create_user_fd(device_file, KVM_CONTROL_OPS, None) {
+    let fd = match api_control::create_user_fd(device_file, KVM_CONTROL_OPS) {
         Ok(fd) => fd,
         Err(err) => {
             let _ = close(device_file);

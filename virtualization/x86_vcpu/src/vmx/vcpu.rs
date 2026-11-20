@@ -123,8 +123,8 @@ fn switched_msr_slot(index: u32) -> Option<usize> {
 }
 pub const X86_APIC_ACCESS_GPA: usize = 0xfee0_0000;
 
+mod control_regs;
 mod fp_state;
-mod kvm_regs;
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum VmCpuMode {
@@ -201,7 +201,7 @@ pub struct VmxVcpu {
     /// Number of vCPUs exposed in CPUID topology leaves.
     vcpu_count: usize,
     /// Whether this vCPU exposes KVM-compatible hypervisor CPUID leaves.
-    expose_kvm_hypervisor: bool,
+    kvm_pv: bool,
     /// Userspace-configured CPUID results.
     cpuid: Vec<AxVCpuCpuidEntry>,
     /// Stable vendor and maximum basic leaf for this virtual CPU's lifetime.
@@ -287,7 +287,7 @@ impl VmxVcpu {
             ept_root: None,
             vcpu_id,
             vcpu_count: config.vcpu_count.max(1),
-            expose_kvm_hypervisor: false,
+            kvm_pv: false,
             cpuid: Vec::new(),
             cpuid_leaf0: raw_cpuid::cpuid!(0, 0),
             cpuid_cache: super::cpuid::CpuidCache::new(),
@@ -803,7 +803,7 @@ impl VmxVcpu {
         unsafe {
             vmx::vmclear(paddr).map_err(as_axerr)?;
         }
-        self.expose_kvm_hypervisor = config.expose_kvm_hypervisor;
+        self.kvm_pv = config.kvm_pv;
         self.cpuid_results.clear();
         self.bind_to_current_processor()?;
         self.setup_msr_bitmap()?;
@@ -1599,6 +1599,13 @@ impl VmxVcpu {
     }
 
     fn take_pending_cpu_up_exit(&self) -> Option<AxVCpuExitReason> {
+        if let Some((target_mask, delivery_mode, vector)) = self.vlapic.take_pending_init_sipi() {
+            return Some(AxVCpuExitReason::InitSipi {
+                target_mask,
+                delivery_mode,
+                vector,
+            });
+        }
         self.vlapic
             .take_pending_cpu_up()
             .map(|cpu_up| AxVCpuExitReason::CpuUp {
@@ -2172,7 +2179,23 @@ impl VmxVcpu {
             0 if self.cpuid.is_empty() => self.cpuid_leaf0,
             // Linux derives its LAPIC rate from the crystal in leaf 0x15.
             // Match the emulated 1 GHz timer, preserving the physical TSC ratio.
-            0x15 => super::timer_cpuid::virtual_timer_leaf(self.cpuid_cache.host(0x15, 0)),
+            0x15 => {
+                let mut host = self.cpuid_cache.host(0x15, 0);
+                // Nested VMX and some CPUs omit the crystal leaf. The host
+                // already calibrates the physical TSC used by this backend.
+                if (host.eax == 0 || host.ebx == 0 || host.ecx == 0)
+                    && let Some(mhz) = crate::host_tsc_frequency_mhz()
+                    && mhz != 0
+                {
+                    host = CpuIdResult {
+                        eax: 1,
+                        ebx: mhz,
+                        ecx: 1_000_000,
+                        edx: 0,
+                    };
+                }
+                super::timer_cpuid::virtual_timer_leaf(host)
+            }
             LEAF_FEATURE_INFO => {
                 const FEATURE_VMX: u32 = 1 << 5;
                 const FEATURE_HYPERVISOR: u32 = 1 << 31;
@@ -2271,7 +2294,7 @@ impl VmxVcpu {
                 self.xstate.guest_xss(),
             ),
             crate::kvm::KVM_HYPERVISOR_INFO_LEAF | crate::kvm::KVM_HYPERVISOR_FEATURE_LEAF => {
-                if self.expose_kvm_hypervisor {
+                if self.kvm_pv {
                     crate::kvm::kvm_hypervisor_cpuid(function).expect("known KVM CPUID leaf")
                 } else {
                     crate::kvm::rustvisor_hypervisor_cpuid(function)
@@ -2390,7 +2413,7 @@ impl VmxVcpu {
     fn handle_state_msr(&mut self, write: bool) -> AxResult {
         let index = self.regs().rcx as u32;
         if write {
-            self.set_kvm_msr(index, self.read_edx_eax())?;
+            self.set_msr(index, self.read_edx_eax())?;
             // Syscall MSRs stay guest-owned until the batch ends. WRMSR is
             // intercepted, so apply the new value before re-entering guest.
             if let Some(slot) = SWITCHED_MSR_INDICES.iter().position(|&msr| msr == index)
@@ -2399,7 +2422,7 @@ impl VmxVcpu {
                 unsafe { SWITCHED_HOST_MSRS[slot].write(self.msr_switch.guest_value(slot)) };
             }
         } else {
-            self.write_edx_eax(self.get_kvm_msr(index)?);
+            self.write_edx_eax(self.get_msr(index)?);
         }
         self.advance_rip(2)
     }
@@ -2560,6 +2583,27 @@ impl Debug for VmxVcpu {
 }
 
 impl AxArchVCpu for VmxVcpu {
+    fn exit_instruction(&self) -> AxResult<axvcpu::x86_regs::ExitInstruction> {
+        let exit = self.cached_exit.ok_or(ax_errno::AxError::BadState)?;
+        Ok(axvcpu::x86_regs::ExitInstruction {
+            rip: exit.guest_rip as u64,
+            len: exit.exit_instruction_length,
+        })
+    }
+
+    fn set_init_sipi_exiting(&mut self, enabled: bool) -> AxResult {
+        self.vlapic.set_init_sipi_exiting(enabled);
+        Ok(())
+    }
+
+    fn get_arch_reg(&self, reg: u64) -> AxResult<u64> {
+        self.read_control_reg(reg)
+    }
+
+    fn set_arch_reg(&mut self, reg: u64, value: u64) -> AxResult {
+        self.write_control_reg(reg, value)
+    }
+
     type CreateConfig = X86VCpuCreateConfig;
 
     type SetupConfig = X86VCpuSetupConfig;
@@ -3037,7 +3081,7 @@ impl AxArchVCpu for VmxVcpu {
         self.regs_mut().set_reg_of_index(reg as u8, val as u64);
     }
 
-    fn get_kvm_msr(&self, index: u32) -> AxResult<u64> {
+    fn get_msr(&self, index: u32) -> AxResult<u64> {
         if let Some(slot) = switched_msr_slot(index) {
             return Ok(self.msr_switch.guest_value(slot));
         }
@@ -3060,7 +3104,7 @@ impl AxArchVCpu for VmxVcpu {
         }
     }
 
-    fn set_kvm_msr(&mut self, index: u32, value: u64) -> AxResult {
+    fn set_msr(&mut self, index: u32, value: u64) -> AxResult {
         if let Some(slot) = switched_msr_slot(index) {
             self.msr_switch.set_guest_value(slot, value);
             return Ok(());
@@ -3106,36 +3150,12 @@ impl AxArchVCpu for VmxVcpu {
         }
     }
 
-    fn get_kvm_debugregs(&self, buf: &mut [u8]) -> AxResult {
-        self.encode_kvm_debugregs(buf)
-    }
-
-    fn set_kvm_debugregs(&mut self, buf: &[u8]) -> AxResult {
-        self.decode_kvm_debugregs(buf)
-    }
-
-    fn get_kvm_regs(&self, buf: &mut [u8]) -> AxResult {
-        self.encode_kvm_regs(buf)
-    }
-
-    fn get_kvm_lapic(&self, buf: &mut [u8]) -> AxResult {
+    fn get_lapic_state(&self, buf: &mut [u8]) -> AxResult {
         self.vlapic.get_state(buf)
     }
 
-    fn set_kvm_lapic(&mut self, buf: &[u8]) -> AxResult {
+    fn set_lapic_state(&mut self, buf: &[u8]) -> AxResult {
         self.vlapic.set_state(buf)
-    }
-
-    fn set_kvm_regs(&mut self, buf: &[u8]) -> AxResult {
-        self.decode_kvm_regs(buf)
-    }
-
-    fn get_kvm_sregs(&self, buf: &mut [u8]) -> AxResult {
-        self.encode_kvm_sregs(buf)
-    }
-
-    fn set_kvm_sregs(&mut self, buf: &[u8]) -> AxResult {
-        self.decode_kvm_sregs(buf)
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {

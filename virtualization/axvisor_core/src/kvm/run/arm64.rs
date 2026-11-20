@@ -27,10 +27,7 @@ use crate::{
     },
     kvm::{
         abi::raw as abi,
-        util::{
-            access_width_mask, control_file_mmap_area, sign_extend_value, write_vcpu_run_u32,
-            write_vcpu_run_u64,
-        },
+        util::{access_width_mask, sign_extend_value, write_mmap_area_u32, write_mmap_area_u64},
     },
     vmm::{
         interrupt::{VcpuInterruptTarget, VirtualInterrupt, deliver_targeted_interrupt},
@@ -54,6 +51,7 @@ pub(super) fn apply_pending_arm_reset(
 
 pub(super) fn handle_psci_hypercall(
     control_file: api_control::ControlFileId,
+    mmap_area: &api_control::MmapArea,
     vm: &AxVMRef,
     vcpu: &axvm::AxVCpuRef,
     function: u64,
@@ -85,15 +83,14 @@ pub(super) fn handle_psci_hypercall(
             // Native KVM preloads an error in case userspace resumes this
             // stopped context without reinitializing the guest.
             vcpu.set_gpr(0, PSCI_INTERNAL_FAILURE as usize);
-            let area = control_file_mmap_area(control_file)?;
             api_control::write_mmap_area(
-                area,
+                mmap_area,
                 abi::KVM_RUN_SYSTEM_EVENT_OFFSET,
                 &[0; abi::KVM_RUN_SYSTEM_EVENT_SIZE],
             )?;
-            write_vcpu_run_u32(control_file, abi::KVM_RUN_SYSTEM_EVENT_TYPE_OFFSET, kind)?;
-            write_vcpu_run_u32(control_file, abi::KVM_RUN_SYSTEM_EVENT_NDATA_OFFSET, 1)?;
-            write_vcpu_run_u64(control_file, abi::KVM_RUN_SYSTEM_EVENT_DATA_OFFSET, 0)?;
+            write_mmap_area_u32(mmap_area, abi::KVM_RUN_SYSTEM_EVENT_TYPE_OFFSET, kind)?;
+            write_mmap_area_u32(mmap_area, abi::KVM_RUN_SYSTEM_EVENT_NDATA_OFFSET, 1)?;
+            write_mmap_area_u64(mmap_area, abi::KVM_RUN_SYSTEM_EVENT_DATA_OFFSET, 0)?;
             return Ok(Some(ArmPsciOutcome::SystemEvent { kind }));
         }
         PsciCall::Unsupported => PSCI_NOT_SUPPORTED,

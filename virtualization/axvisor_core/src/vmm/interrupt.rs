@@ -135,11 +135,9 @@ pub(crate) fn deliver_interrupt(route: InterruptRoute) {
         return;
     }
 
-    if !queue_control_interrupt(route) {
-        if vmm::with_vm(route.vm_id, |vm| vm.stopping() || vm.stopped()).unwrap_or(true) {
-            return;
-        }
-
+    if !queue_control_interrupt(route)
+        && !vmm::with_vm(route.vm_id, |vm| vm.stopping() || vm.stopped()).unwrap_or(true)
+    {
         #[cfg(not(feature = "control"))]
         warn!(
             "Failed to queue interrupt {:?} to VM[{}] VCpu[{}]: VM vCPU resources not found",
@@ -158,6 +156,10 @@ fn queue_control_interrupt(route: InterruptRoute) -> bool {
     match crate::kvm::queue_control_vcpu_interrupt(route) {
         Ok(()) => true,
         Err(err) => {
+            #[cfg(all(target_arch = "x86_64", feature = "bhyve"))]
+            if err == ax_errno::AxError::NotFound && crate::bhyve::queue_interrupt(route) {
+                return true;
+            }
             warn!(
                 "Failed to queue interrupt {:?} to VM[{}] VCpu[{}]: {err:?}",
                 route.interrupt, route.vm_id, route.vcpu_id

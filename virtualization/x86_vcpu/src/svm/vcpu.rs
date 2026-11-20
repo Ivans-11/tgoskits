@@ -102,7 +102,7 @@ const X2APIC_MSR_BASE: u32 = 0x800;
 // Match the current VMX/vLAPIC path, which handles x2APIC register offsets 0x00..=0x3f.
 const X2APIC_MSR_END: u32 = 0x83f;
 
-mod kvm_regs;
+mod control_regs;
 
 const SVM_INT_CTL_V_IRQ: u32 = 1 << 8;
 const SVM_INT_CTL_V_INTR_PRIO_SHIFT: u32 = 16;
@@ -221,7 +221,7 @@ pub struct SvmVcpu {
     /// Number of vCPUs exposed in CPUID topology leaves.
     vcpu_count: usize,
     /// Whether this vCPU exposes KVM-compatible hypervisor CPUID leaves.
-    expose_kvm_hypervisor: bool,
+    kvm_pv: bool,
     /// Userspace-configured CPUID results.
     cpuid: Vec<AxVCpuCpuidEntry>,
     /// The guest VMCB.
@@ -267,7 +267,7 @@ impl SvmVcpu {
             npt_root: None,
             vcpu_id,
             vcpu_count: config.vcpu_count.max(1),
-            expose_kvm_hypervisor: false,
+            kvm_pv: false,
             cpuid: Vec::new(),
             vmcb: VmcbFrame::new()?,
             load_save_states: VmLoadSaveStates::new()?,
@@ -298,7 +298,7 @@ impl SvmVcpu {
     ) -> AxResult {
         self.filter_pci_config = config.filter_pci_config;
         self.pci_config_max_bus = config.pci_config_max_bus;
-        self.expose_kvm_hypervisor = config.expose_kvm_hypervisor;
+        self.kvm_pv = config.kvm_pv;
         self.setup_io_bitmap(config)?;
         self.setup_msr_bitmap()?;
         self.setup_vmcb_guest(entry)?;
@@ -793,6 +793,13 @@ impl SvmVcpu {
     }
 
     fn take_pending_cpu_up_exit(&self) -> Option<AxVCpuExitReason> {
+        if let Some((target_mask, delivery_mode, vector)) = self.vlapic.take_pending_init_sipi() {
+            return Some(AxVCpuExitReason::InitSipi {
+                target_mask,
+                delivery_mode,
+                vector,
+            });
+        }
         self.vlapic
             .take_pending_cpu_up()
             .map(|cpu_up| AxVCpuExitReason::CpuUp {
@@ -1037,7 +1044,7 @@ impl SvmVcpu {
                     edx: 0,
                 },
                 crate::kvm::KVM_HYPERVISOR_INFO_LEAF | crate::kvm::KVM_HYPERVISOR_FEATURE_LEAF => {
-                    if self.expose_kvm_hypervisor {
+                    if self.kvm_pv {
                         crate::kvm::kvm_hypervisor_cpuid(function).expect("known KVM CPUID leaf")
                     } else {
                         crate::kvm::rustvisor_hypervisor_cpuid(function)
@@ -2118,7 +2125,20 @@ impl AxArchVCpu for SvmVcpu {
         self.regs_mut().set_reg_of_index(reg as u8, val as u64);
     }
 
-    fn get_kvm_msr(&self, index: u32) -> AxResult<u64> {
+    fn set_init_sipi_exiting(&mut self, enabled: bool) -> AxResult {
+        self.vlapic.set_init_sipi_exiting(enabled);
+        Ok(())
+    }
+
+    fn get_arch_reg(&self, reg: u64) -> AxResult<u64> {
+        self.read_control_reg(reg)
+    }
+
+    fn set_arch_reg(&mut self, reg: u64, value: u64) -> AxResult {
+        self.write_control_reg(reg, value)
+    }
+
+    fn get_msr(&self, index: u32) -> AxResult<u64> {
         let vmcb = unsafe { self.vmcb.as_vmcb_ref() };
         match index {
             IA32_TSC => {
@@ -2146,7 +2166,7 @@ impl AxArchVCpu for SvmVcpu {
         }
     }
 
-    fn set_kvm_msr(&mut self, index: u32, value: u64) -> AxResult {
+    fn set_msr(&mut self, index: u32, value: u64) -> AxResult {
         match index {
             IA32_TSC => unsafe {
                 self.vmcb
@@ -2203,36 +2223,12 @@ impl AxArchVCpu for SvmVcpu {
         }
     }
 
-    fn get_kvm_debugregs(&self, buf: &mut [u8]) -> AxResult {
-        self.encode_kvm_debugregs(buf)
-    }
-
-    fn set_kvm_debugregs(&mut self, buf: &[u8]) -> AxResult {
-        self.decode_kvm_debugregs(buf)
-    }
-
-    fn get_kvm_regs(&self, buf: &mut [u8]) -> AxResult {
-        self.encode_kvm_regs(buf)
-    }
-
-    fn get_kvm_lapic(&self, buf: &mut [u8]) -> AxResult {
+    fn get_lapic_state(&self, buf: &mut [u8]) -> AxResult {
         self.vlapic.get_state(buf)
     }
 
-    fn set_kvm_lapic(&mut self, buf: &[u8]) -> AxResult {
+    fn set_lapic_state(&mut self, buf: &[u8]) -> AxResult {
         self.vlapic.set_state(buf)
-    }
-
-    fn set_kvm_regs(&mut self, buf: &[u8]) -> AxResult {
-        self.decode_kvm_regs(buf)
-    }
-
-    fn get_kvm_sregs(&self, buf: &mut [u8]) -> AxResult {
-        self.encode_kvm_sregs(buf)
-    }
-
-    fn set_kvm_sregs(&mut self, buf: &[u8]) -> AxResult {
-        self.decode_kvm_sregs(buf)
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {

@@ -38,6 +38,8 @@ mod exit; // VM exit reason enumeration and handling
 mod percpu; // Per-CPU virtualization state management
 mod test; // Unit tests for VCpu functionality
 mod vcpu; // Main VCpu implementation and state management
+#[cfg(target_arch = "x86_64")]
+pub mod x86_regs;
 
 // Public API exports
 pub use arch_vcpu::{AxArchVCpu, AxVCpuCpuidEntry, InterruptTriggerMode}; /* Architecture-specific VCpu trait */

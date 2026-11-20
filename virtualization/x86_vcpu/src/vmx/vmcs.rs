@@ -232,6 +232,7 @@ pub enum VmcsControlNW {
 define_vmcs_fields_rw!(VmcsControlNW, usize);
 
 /// 16-Bit Guest-State Fields. (SDM Vol. 3D, Appendix B.1.2)
+#[derive(Clone, Copy, Debug)]
 pub enum VmcsGuest16 {
     /// Guest ES selector.
     ES_SELECTOR      = 0x800,

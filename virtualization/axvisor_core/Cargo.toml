@@ -10,6 +10,7 @@ repository = "https://github.com/rcore-os/tgoskits"
 [features]
 default = ["vmx", "shell"]
 control = ["axvisor_api/control", "riscv_vcpu/control", "dep:riscv_aia"]
+bhyve = ["control", "dep:x86_vlapic", "x86_vlapic/rtc"]
 aia = ["axvm/aia"]
 aia-hw = ["aia", "riscv_vcpu/aia-hw"]
 posted-interrupt = ["vmx", "axvm/posted-interrupt"]
@@ -60,3 +61,6 @@ riscv_vcpu = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu-ext = "0.1"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_vlapic = { workspace = true, optional = true }

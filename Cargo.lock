@@ -1910,6 +1910,7 @@ name = "axvcpu"
 version = "0.5.9"
 dependencies = [
  "ax-errno 0.6.0",
+ "ax-kernel-guard",
  "ax-kspin",
  "ax-memory-addr",
  "ax-percpu",
@@ -2018,6 +2019,7 @@ dependencies = [
  "syn 2.0.117",
  "toml 0.9.12+spec-1.1.0",
  "vm-interrupt",
+ "x86_vlapic",
 ]
 
 [[package]]
@@ -10259,6 +10261,7 @@ dependencies = [
  "axdevice_base",
  "axvisor_api",
  "bit",
+ "chrono",
  "log",
  "paste",
  "tock-registers 0.10.1",

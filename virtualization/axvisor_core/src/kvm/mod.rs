@@ -22,6 +22,7 @@ mod cpuid;
 mod device;
 mod eventfd;
 mod memory;
+mod registers;
 mod run;
 mod state;
 mod util;
@@ -58,7 +59,12 @@ static NEXT_CONTROL_FILE_ID: AtomicU64 = AtomicU64::new(1);
 pub(in crate::kvm) static CONTROL_FILES: Mutex<
     BTreeMap<api_control::ControlFileId, ControlFileState>,
 > = Mutex::new(BTreeMap::new());
-const KVM_CONTROL_OPS: ControlOps = ControlOps { open, close, ioctl };
+const KVM_CONTROL_OPS: ControlOps = ControlOps {
+    open,
+    close,
+    ioctl,
+    mmap: Some(mmap),
+};
 
 /// Registers the host-visible KVM-compatible control endpoint.
 pub fn init() -> AxResult {
@@ -69,7 +75,7 @@ pub fn init() -> AxResult {
         return Ok(());
     }
 
-    if let Err(err) = api_control::register_endpoint(KVM_CONTROL_OPS) {
+    if let Err(err) = api_control::register_endpoint("kvm", 0, KVM_CONTROL_OPS) {
         REGISTERED.store(false, Ordering::Release);
         return Err(err);
     }
@@ -84,8 +90,38 @@ pub fn shutdown() -> AxResult {
     Ok(())
 }
 
-fn open() -> AxResult<api_control::ControlFileId> {
+fn open(_context: u64) -> AxResult<api_control::ControlFileId> {
     create_control_file(ControlFileState::System)
+}
+
+fn mmap(
+    control_file: api_control::ControlFileId,
+    offset: usize,
+    len: usize,
+    _protection: api_control::MmapProtection,
+    _shared: bool,
+) -> AxResult<(
+    alloc::sync::Arc<api_control::MmapArea>,
+    usize,
+    api_control::MmapProtection,
+)> {
+    if offset != 0 || len == 0 || len > abi::KVM_VCPU_MMAP_SIZE {
+        return ax_err!(InvalidInput);
+    }
+    let files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vcpu(vcpu)) = files.get(&control_file) else {
+        return ax_err!(NoSuchDevice);
+    };
+    Ok((
+        vcpu.mmap_area.clone(),
+        0,
+        // Preserve the existing control-area permission policy.
+        api_control::MmapProtection {
+            read: true,
+            write: true,
+            execute: true,
+        },
+    ))
 }
 
 fn close(control_file: api_control::ControlFileId) -> AxResult {
@@ -161,7 +197,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                     // `vm.vcpu_files`, so the VM cleanup loop below cannot
                     // release its mmap area. Release this last vCPU mapping
                     // explicitly before destroying the VM state.
-                    let _ = api_control::release_mmap_area(vcpu.mmap_area);
+                    drop(vcpu.mmap_area);
                     let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file)
                     else {
                         unreachable!()
@@ -239,12 +275,12 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
             for vcpu_file in vm.vcpu_files.into_values() {
                 if let Some(ControlFileState::Vcpu(vcpu)) = CONTROL_FILES.lock().remove(&vcpu_file)
                 {
-                    let _ = api_control::release_mmap_area(vcpu.mmap_area);
+                    drop(vcpu.mmap_area);
                 }
             }
         }
         CloseAction::Vcpu(vcpu) => {
-            let _ = api_control::release_mmap_area(vcpu.mmap_area);
+            drop(vcpu.mmap_area);
         }
         CloseAction::None => {}
     }
@@ -546,7 +582,7 @@ fn system_ioctl(cmd: u32, arg: usize) -> AxResult<isize> {
         }
         KVM_CREATE_VM => {
             let vm_file = create_vm_file()?;
-            match api_control::create_user_fd(vm_file, KVM_CONTROL_OPS, None) {
+            match api_control::create_user_fd(vm_file, KVM_CONTROL_OPS) {
                 Ok(fd) => Ok(fd as isize),
                 Err(err) => {
                     let _ = close(vm_file);
@@ -655,6 +691,8 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
             | KVM_SET_ONE_REG
             | KVM_GET_DEBUGREGS
             | KVM_SET_DEBUGREGS
+            | KVM_GET_LAPIC
+            | KVM_SET_LAPIC
     );
     #[cfg(target_arch = "aarch64")]
     let needs_operation_lock = needs_operation_lock || cmd == KVM_ARM_VCPU_INIT;

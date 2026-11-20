@@ -518,7 +518,7 @@ impl AxVM {
                     .map(|route| route[0])
                     .max()
                     .unwrap_or(0),
-                expose_kvm_hypervisor: inner_mut.config.host_controlled(),
+                kvm_pv: inner_mut.config.kvm_pv,
             };
 
             let entry = if vcpu.id() == 0 {

@@ -12,17 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! x86_vcpu's thin facade over host-neutral KVM UAPI helpers.
-//!
-//! vCPU code imports from this module to keep KVM wire-format details separate
-//! from VMX/SVM state access.
+//! Optional KVM-compatible hypervisor CPUID identity.
 
 pub(crate) use kvm_uapi::x86::{
-    KVM_DEBUGREGS_SIZE, KVM_HYPERVISOR_FEATURE_LEAF, KVM_HYPERVISOR_INFO_LEAF, KVM_REGS_SIZE,
-    KVM_SREGS_SIZE, KvmDebugregs, KvmDtable, KvmRegs, KvmSegment, KvmSregs, kvm_hypervisor_cpuid,
+    KVM_HYPERVISOR_FEATURE_LEAF, KVM_HYPERVISOR_INFO_LEAF, kvm_hypervisor_cpuid,
     rustvisor_hypervisor_cpuid,
 };
-
-pub(crate) fn map_kvm_uapi_error(_err: kvm_uapi::KvmUapiError) -> ax_errno::AxError {
-    ax_errno::AxError::InvalidInput
-}

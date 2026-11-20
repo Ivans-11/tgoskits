@@ -48,9 +48,7 @@ use crate::{
     kvm::{
         abi::raw as abi,
         eventfd::signal_matching_ioeventfd,
-        util::{
-            control_file_mmap_area, read_mmap_area_u8, write_mmap_area_u32, write_vcpu_run_u32,
-        },
+        util::{read_mmap_area_u8, write_mmap_area_u32},
     },
     vmm::interrupt::inject_virtual_interrupt,
 };
@@ -85,7 +83,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let pending_mmio_read = vcpu.pending_mmio_read;
         let pending_io_read = vcpu.pending_io_read;
         let signal_mask = vcpu.signal_mask.clone();
-        let mmap_area = vcpu.mmap_area;
+        let mmap_area = vcpu.mmap_area.clone();
         let Some(ControlFileState::Vcpu(vcpu_file_state)) = control_files.get_mut(&control_file)
         else {
             return ax_err!(NotFound);
@@ -126,13 +124,13 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
     // not leave a previous userspace exit visible when this invocation is
     // interrupted or otherwise returns before entering the guest.
     write_mmap_area_u32(
-        mmap_area,
+        &mmap_area,
         abi::KVM_RUN_EXIT_REASON_OFFSET,
         abi::KVM_EXIT_UNKNOWN,
     )?;
 
     if mp_state != abi::KVM_MP_STATE_RUNNABLE {
-        wait_until_vcpu_runnable(control_file, &vcpu, &signal_mask)?;
+        wait_until_vcpu_runnable(control_file, &mmap_area, &vcpu, &signal_mask)?;
     }
 
     if !vm.running() {
@@ -146,14 +144,14 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
     }
 
     if let Some(pending) = pending_mmio_read {
-        complete_mmio_read(control_file, &vcpu, pending)?;
+        complete_mmio_read(&mmap_area, &vcpu, pending)?;
     }
     if let Some(pending) = pending_io_read {
-        complete_io_read(control_file, &vm, &vcpu, pending)?;
+        complete_io_read(&mmap_area, &vm, &vcpu, pending)?;
     }
 
-    if read_mmap_area_u8(mmap_area, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
-        update_vcpu_run_interrupt_state(control_file, &vcpu)?;
+    if read_mmap_area_u8(&mmap_area, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
+        update_vcpu_run_interrupt_state(&mmap_area, &vcpu)?;
         return Err(AxErrorKind::Interrupted.into());
     }
 
@@ -162,22 +160,22 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         // is still open.  Stop KVM_RUN promptly so the last AxVM reference is
         // released before a subsequent VM is created.
         if vm.stopping() || vm.stopped() {
-            update_vcpu_run_interrupt_state(control_file, &vcpu)?;
+            update_vcpu_run_interrupt_state(&mmap_area, &vcpu)?;
             return Err(AxErrorKind::Interrupted.into());
         }
         if current_vcpu_mp_state(control_file)? != abi::KVM_MP_STATE_RUNNABLE {
-            wait_until_vcpu_runnable(control_file, &vcpu, &signal_mask)?;
+            wait_until_vcpu_runnable(control_file, &mmap_area, &vcpu, &signal_mask)?;
         }
         #[cfg(target_arch = "aarch64")]
         apply_pending_arm_reset(control_file, &vcpu)?;
         for interrupt in take_control_vcpu_interrupts(control_file) {
             inject_virtual_interrupt(interrupt, &vcpu)?;
         }
-        if vcpu_run_interrupted(mmap_area, &signal_mask)? {
-            update_vcpu_run_interrupt_state(control_file, &vcpu)?;
+        if vcpu_run_interrupted(&mmap_area, &signal_mask)? {
+            update_vcpu_run_interrupt_state(&mmap_area, &vcpu)?;
             return Err(AxErrorKind::Interrupted.into());
         }
-        if vcpu_run_irq_window_open(control_file, &vcpu)? {
+        if vcpu_run_irq_window_open(&mmap_area, &vcpu)? {
             break abi::KVM_EXIT_IRQ_WINDOW_OPEN;
         }
 
@@ -207,12 +205,12 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let exit_reason = match run_result {
             Ok(exit_reason) => exit_reason,
             Err(_) => {
-                write_vcpu_run_u32(
-                    control_file,
+                write_mmap_area_u32(
+                    &mmap_area,
                     abi::KVM_RUN_INTERNAL_SUBERROR_OFFSET,
                     abi::KVM_INTERNAL_ERROR_EMULATION,
                 )?;
-                write_vcpu_run_u32(control_file, abi::KVM_RUN_INTERNAL_NDATA_OFFSET, 0)?;
+                write_mmap_area_u32(&mmap_area, abi::KVM_RUN_INTERNAL_NDATA_OFFSET, 0)?;
                 break abi::KVM_EXIT_INTERNAL_ERROR;
             }
         };
@@ -243,8 +241,8 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                         if let Some(vector) = vector
                             && is_userspace_eoi_vector(vm_file, vector)
                         {
-                            crate::kvm::util::write_vcpu_run_u8(
-                                control_file,
+                            crate::kvm::util::write_mmap_area_u8(
+                                &mmap_area,
                                 abi::KVM_RUN_IOAPIC_EOI_VECTOR_OFFSET,
                                 vector,
                             )?;
@@ -258,6 +256,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             #[cfg(target_arch = "x86_64")]
             AxVCpuExitReason::Halt if irqchip_created => wait_for_halted_vcpu_wakeup(
                 control_file,
+                &mmap_area,
                 &vm,
                 &vcpu,
                 irqchip_created,
@@ -290,7 +289,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             }
             #[cfg(target_arch = "aarch64")]
             AxVCpuExitReason::Hypercall { nr, args } => {
-                match handle_psci_hypercall(control_file, &vm, &vcpu, nr, args)? {
+                match handle_psci_hypercall(control_file, &mmap_area, &vm, &vcpu, nr, args)? {
                     Some(ArmPsciOutcome::Continue) => {}
                     Some(ArmPsciOutcome::SystemEvent { kind }) => {
                         debug_assert!(
@@ -301,7 +300,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                     }
                     None => {
                         let reason = AxVCpuExitReason::Hypercall { nr, args };
-                        prepare_userspace_exit(control_file, mmap_area, &reason)?;
+                        prepare_userspace_exit(control_file, &mmap_area, &reason)?;
                         break kvm_exit_reason(&reason);
                     }
                 }
@@ -375,22 +374,22 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             }
             exit_reason => {
                 let kvm_reason = kvm_exit_reason(&exit_reason);
-                prepare_userspace_exit(control_file, mmap_area, &exit_reason)?;
+                prepare_userspace_exit(control_file, &mmap_area, &exit_reason)?;
                 break kvm_reason;
             }
         }
     };
-    update_vcpu_run_interrupt_state(control_file, &vcpu)?;
-    write_mmap_area_u32(mmap_area, abi::KVM_RUN_EXIT_REASON_OFFSET, exit_reason)?;
+    update_vcpu_run_interrupt_state(&mmap_area, &vcpu)?;
+    write_mmap_area_u32(&mmap_area, abi::KVM_RUN_EXIT_REASON_OFFSET, exit_reason)?;
     Ok(0)
 }
 
 fn wait_until_vcpu_runnable(
     control_file: api_control::ControlFileId,
+    mmap_area: &api_control::MmapArea,
     vcpu: &axvm::AxVCpuRef,
     signal_mask: &[u8],
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     loop {
         if vcpu_run_interrupted(mmap_area, signal_mask)? {
             return Err(AxErrorKind::Interrupted.into());
@@ -497,13 +496,13 @@ fn set_current_vcpu_mp_state(control_file: api_control::ControlFileId, mp_state:
 #[cfg(target_arch = "x86_64")]
 fn wait_for_halted_vcpu_wakeup(
     control_file: api_control::ControlFileId,
+    mmap_area: &api_control::MmapArea,
     vm: &axvm::AxVMRef,
     vcpu: &axvm::AxVCpuRef,
     irqchip_created: bool,
     pit2_created: bool,
     signal_mask: &[u8],
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     set_current_vcpu_halted(control_file, true)?;
     loop {
         if vcpu_run_interrupted(mmap_area, signal_mask)? {
@@ -526,7 +525,7 @@ fn wait_for_halted_vcpu_wakeup(
     }
 }
 
-fn vcpu_run_interrupted(mmap_area: api_control::MmapAreaId, signal_mask: &[u8]) -> AxResult<bool> {
+fn vcpu_run_interrupted(mmap_area: &api_control::MmapArea, signal_mask: &[u8]) -> AxResult<bool> {
     if read_mmap_area_u8(mmap_area, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
         return Ok(true);
     }

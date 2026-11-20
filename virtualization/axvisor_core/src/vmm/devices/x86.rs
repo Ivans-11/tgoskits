@@ -1,5 +1,13 @@
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(feature = "control")]
+use ax_errno::AxResult;
+#[cfg(feature = "control")]
+use axaddrspace::GuestPhysAddr;
+#[cfg(feature = "control")]
+use axdevice_base::EmuDeviceType;
+#[cfg(feature = "control")]
+use axvcpu::AxVCpuExitReason;
 use axvm::config::VMInterruptMode;
 use vm_interrupt::InterruptTriggerMode;
 
@@ -31,16 +39,16 @@ pub fn inject_due_pit_irq0(vm: &VMRef, vcpu: &VCpuRef) -> bool {
     if vm.interrupt_mode() != VMInterruptMode::Passthrough {
         return false;
     }
-    inject_due_pit_irq0_inner(vm, vcpu)
+    inject_due_pit_irq0_inner(vm, vcpu, PIT_TIMER_GSI)
 }
 
 #[cfg(feature = "control")]
-pub(crate) fn inject_due_pit_irq0_for_control(vm: &VMRef, vcpu: &VCpuRef) -> bool {
-    inject_due_pit_irq0_inner(vm, vcpu)
+pub(crate) fn inject_due_pit_irq_for_control(vm: &VMRef, vcpu: &VCpuRef, gsi: usize) -> bool {
+    inject_due_pit_irq0_inner(vm, vcpu, gsi)
 }
 
-fn inject_due_pit_irq0_inner(vm: &VMRef, vcpu: &VCpuRef) -> bool {
-    if !ioapic_gsi_targets_current_vcpu(vm, vcpu, PIT_TIMER_GSI) {
+fn inject_due_pit_irq0_inner(vm: &VMRef, vcpu: &VCpuRef, gsi: usize) -> bool {
+    if !ioapic_gsi_targets_current_vcpu(vm, vcpu, gsi) {
         return false;
     }
 
@@ -49,8 +57,8 @@ fn inject_due_pit_irq0_inner(vm: &VMRef, vcpu: &VCpuRef) -> bool {
         return false;
     }
 
-    let Some(irq) = vm.get_devices().x86_ioapic_assert_gsi(PIT_TIMER_GSI) else {
-        trace!("x86 PIT IRQ0 due but vIOAPIC GSI0 is not ready");
+    let Some(irq) = vm.get_devices().x86_ioapic_assert_gsi(gsi) else {
+        trace!("x86 PIT IRQ0 due but vIOAPIC GSI{gsi} is not ready");
         return false;
     };
 
@@ -289,4 +297,66 @@ fn ioapic_irq_forwarding_handler(vector: usize) {
             crate::vmm::vcpus::notify_vcpu_wakeup(vm_id, target);
         }
     });
+}
+
+#[cfg(feature = "control")]
+pub(crate) fn handle_in_kernel_device_exit(
+    vm: &VMRef,
+    vcpu: &axvm::AxVCpuRef,
+    irqchip_created: bool,
+    pit2_created: bool,
+    exit_reason: &AxVCpuExitReason,
+) -> AxResult<bool> {
+    match exit_reason {
+        AxVCpuExitReason::MmioRead {
+            addr,
+            width,
+            reg,
+            reg_width,
+            signed_ext,
+        } if irqchip_created && is_x86_ioapic_mmio(vm, *addr) => {
+            let raw = vm.get_devices().handle_mmio_read(*addr, *width)?;
+            let masked = raw & (usize::MAX >> (usize::BITS as usize - width.size() * 8));
+            let val = if *signed_ext {
+                ((masked << (usize::BITS as usize - width.size() * 8)) as isize
+                    >> (usize::BITS as usize - width.size() * 8)) as usize
+            } else {
+                masked & (usize::MAX >> (usize::BITS as usize - reg_width.size() * 8))
+            };
+            vcpu.set_gpr(*reg, val);
+            Ok(true)
+        }
+        AxVCpuExitReason::MmioWrite { addr, width, data }
+            if irqchip_created && is_x86_ioapic_mmio(vm, *addr) =>
+        {
+            vm.get_devices()
+                .handle_mmio_write(*addr, *width, *data as usize)?;
+            Ok(true)
+        }
+        AxVCpuExitReason::IoRead { port, width } if pit2_created && is_x86_pit_port(*port) => {
+            let val = vm.get_devices().handle_port_read(*port, *width)?;
+            vcpu.set_gpr(0, val);
+            Ok(true)
+        }
+        AxVCpuExitReason::IoWrite { port, width, data }
+            if pit2_created && is_x86_pit_port(*port) =>
+        {
+            vm.get_devices()
+                .handle_port_write(*port, *width, *data as usize)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+#[cfg(feature = "control")]
+fn is_x86_ioapic_mmio(vm: &VMRef, addr: GuestPhysAddr) -> bool {
+    vm.get_devices()
+        .find_mmio_dev(addr)
+        .is_some_and(|dev| dev.emu_type() == EmuDeviceType::X86IoApic)
+}
+
+#[cfg(feature = "control")]
+fn is_x86_pit_port(port: axaddrspace::device::Port) -> bool {
+    matches!(port.number(), 0x40..=0x43 | 0x61)
 }

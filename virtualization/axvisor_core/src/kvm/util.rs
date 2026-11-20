@@ -12,21 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ax_errno::{AxError, AxResult, ax_err};
+use ax_errno::{AxError, AxResult};
 use axaddrspace::device::AccessWidth;
 use axvisor_api::control as api_control;
-
-use super::{CONTROL_FILES, ControlFileState};
-
-pub(in crate::kvm) fn control_file_mmap_area(
-    control_file: api_control::ControlFileId,
-) -> AxResult<api_control::MmapAreaId> {
-    let control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    Ok(vcpu.mmap_area)
-}
 
 pub(in crate::kvm) fn write_u32_user(arg: usize, value: u32) -> AxResult {
     api_control::copy_to_user(arg, &value.to_ne_bytes())
@@ -52,17 +40,8 @@ pub(in crate::kvm) fn checked_add(base: usize, offset: usize) -> AxResult<usize>
     base.checked_add(offset).ok_or(AxError::InvalidInput)
 }
 
-#[cfg(target_arch = "x86_64")]
-pub(in crate::kvm) fn read_vcpu_run_u8(
-    control_file: api_control::ControlFileId,
-    offset: usize,
-) -> AxResult<u8> {
-    let mmap_area = control_file_mmap_area(control_file)?;
-    read_mmap_area_u8(mmap_area, offset)
-}
-
 pub(in crate::kvm) fn read_mmap_area_u8(
-    mmap_area: api_control::MmapAreaId,
+    mmap_area: &api_control::MmapArea,
     offset: usize,
 ) -> AxResult<u8> {
     let mut value = [0u8; 1];
@@ -70,47 +49,35 @@ pub(in crate::kvm) fn read_mmap_area_u8(
     Ok(value[0])
 }
 
-pub(in crate::kvm) fn write_vcpu_run_u16(
-    control_file: api_control::ControlFileId,
+pub(in crate::kvm) fn write_mmap_area_u16(
+    mmap_area: &api_control::MmapArea,
     offset: usize,
     value: u16,
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     api_control::write_mmap_area(mmap_area, offset, &value.to_ne_bytes())
-}
-
-pub(in crate::kvm) fn write_vcpu_run_u32(
-    control_file: api_control::ControlFileId,
-    offset: usize,
-    value: u32,
-) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
-    write_mmap_area_u32(mmap_area, offset, value)
 }
 
 pub(in crate::kvm) fn write_mmap_area_u32(
-    mmap_area: api_control::MmapAreaId,
+    mmap_area: &api_control::MmapArea,
     offset: usize,
     value: u32,
 ) -> AxResult {
     api_control::write_mmap_area(mmap_area, offset, &value.to_ne_bytes())
 }
 
-pub(in crate::kvm) fn write_vcpu_run_u64(
-    control_file: api_control::ControlFileId,
+pub(in crate::kvm) fn write_mmap_area_u64(
+    mmap_area: &api_control::MmapArea,
     offset: usize,
     value: u64,
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     api_control::write_mmap_area(mmap_area, offset, &value.to_ne_bytes())
 }
 
-pub(in crate::kvm) fn write_vcpu_run_u8(
-    control_file: api_control::ControlFileId,
+pub(in crate::kvm) fn write_mmap_area_u8(
+    mmap_area: &api_control::MmapArea,
     offset: usize,
     value: u8,
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     api_control::write_mmap_area(mmap_area, offset, &[value])
 }
 

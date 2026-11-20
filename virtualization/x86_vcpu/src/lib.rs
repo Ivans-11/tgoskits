@@ -46,7 +46,7 @@ pub struct X86VCpuSetupConfig {
     /// Highest PCI bus visible through legacy configuration space.
     pub pci_config_max_bus: u8,
     /// Expose KVM-compatible hypervisor CPUID leaves to the guest.
-    pub expose_kvm_hypervisor: bool,
+    pub kvm_pv: bool,
 }
 
 /// Standard ISA UART bases in COM1 through COM4 order.

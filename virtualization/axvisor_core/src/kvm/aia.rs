@@ -69,7 +69,7 @@ pub(super) fn create_device(vm_file: api::ControlFileId, arg: usize) -> AxResult
         vm.aia_device = Some(id);
         files.insert(id, ControlFileState::AiaDevice(vm_file));
     }
-    let fd = match api::create_user_fd(id, KVM_CONTROL_OPS, None) {
+    let fd = match api::create_user_fd(id, KVM_CONTROL_OPS) {
         Ok(fd) => fd,
         Err(err) => {
             let mut files = CONTROL_FILES.lock();

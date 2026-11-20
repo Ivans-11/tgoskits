@@ -382,7 +382,7 @@ impl<A: AxArchVCpu> AxVCpu<A> {
 
     /// Replaces the x86 CPUID values exposed to this vCPU.
     pub fn set_cpuid(&self, entries: &[AxVCpuCpuidEntry]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.set_cpuid(entries))
+        self.with_arch_access(|vcpu| vcpu.set_cpuid(entries))
     }
 
     /// Returns whether an architecture-specific event is waiting for delivery.
@@ -414,88 +414,105 @@ impl<A: AxArchVCpu> AxVCpu<A> {
         self.get_arch_vcpu().set_gpr(reg, val);
     }
 
-    /// Returns the value of an architecture-specific control register.
+    /// Reads one architectural register under the common access scope.
     pub fn get_arch_reg(&self, reg_id: u64) -> AxResult<u64> {
-        self.get_arch_vcpu().get_arch_reg(reg_id)
+        self.with_arch_access(|arch_vcpu| arch_vcpu.get_arch_reg(reg_id))
     }
 
-    /// Returns the architecture-specific register IDs supported by this VCpu.
+    /// Returns the register IDs supported by this vCPU.
     pub fn arch_reg_ids(&self) -> &'static [u64] {
         self.get_arch_vcpu().arch_reg_ids()
     }
 
-    /// Sets the value of an architecture-specific control register.
+    /// Writes one architectural register under the common access scope.
     pub fn set_arch_reg(&self, reg_id: u64, value: u64) -> AxResult {
-        self.get_arch_vcpu().set_arch_reg(reg_id, value)
+        self.with_arch_access(|arch_vcpu| arch_vcpu.set_arch_reg(reg_id, value))
     }
 
-    /// Returns an x86 KVM MSR value while the target vCPU is bound.
-    pub fn get_kvm_msr(&self, index: u32) -> AxResult<u64> {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_msr(index))
+    /// Reads register ID/value pairs, binding once on architectures that require it.
+    /// On error, preceding values have already been read.
+    pub fn get_arch_regs(&self, regs: &mut [(u64, u64)]) -> AxResult {
+        if regs.is_empty() {
+            return Ok(());
+        }
+        self.with_arch_access(|arch_vcpu| {
+            for (id, value) in regs {
+                *value = arch_vcpu.get_arch_reg(*id)?;
+            }
+            Ok(())
+        })
     }
 
-    /// Applies an x86 KVM MSR value while the target vCPU is bound.
-    pub fn set_kvm_msr(&self, index: u32, value: u64) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_msr(index, value))
+    /// Writes register ID/value pairs in order, with one binding on x86.
+    /// On error, preceding writes remain applied; this is not a transaction.
+    pub fn set_arch_regs(&self, regs: &[(u64, u64)]) -> AxResult {
+        if regs.is_empty() {
+            return Ok(());
+        }
+        self.with_arch_access(|arch_vcpu| {
+            for &(id, value) in regs {
+                arch_vcpu.set_arch_reg(id, value)?;
+            }
+            Ok(())
+        })
     }
 
-    /// Writes the x86 KVM debug-register state while the target vCPU is bound.
-    pub fn get_kvm_debugregs(&self, buf: &mut [u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_debugregs(buf))
+    /// Returns the cached instruction context of the last x86 VM exit.
+    #[cfg(target_arch = "x86_64")]
+    pub fn exit_instruction(&self) -> AxResult<crate::x86_regs::ExitInstruction> {
+        self.get_arch_vcpu().exit_instruction()
     }
 
-    /// Reads the x86 KVM debug-register state while the target vCPU is bound.
-    pub fn set_kvm_debugregs(&self, buf: &[u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_debugregs(buf))
+    /// Selects whether the frontend handles x86 INIT/SIPI requests.
+    #[cfg(target_arch = "x86_64")]
+    pub fn set_init_sipi_exiting(&self, enabled: bool) -> AxResult {
+        self.with_arch_access(|arch_vcpu| arch_vcpu.set_init_sipi_exiting(enabled))
+    }
+
+    /// Returns an x86 MSR value while the target vCPU is bound.
+    pub fn get_msr(&self, index: u32) -> AxResult<u64> {
+        self.with_arch_access(|vcpu| vcpu.get_msr(index))
+    }
+
+    /// Applies an x86 MSR value while the target vCPU is bound.
+    pub fn set_msr(&self, index: u32, value: u64) -> AxResult {
+        self.with_arch_access(|vcpu| vcpu.set_msr(index, value))
     }
 
     /// Reads the local APIC while holding the bound vCPU exclusively.
-    pub fn get_kvm_lapic(&self, buf: &mut [u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_lapic(buf))
+    pub fn get_lapic_state(&self, buf: &mut [u8]) -> AxResult {
+        self.with_arch_access(|vcpu| vcpu.get_lapic_state(buf))
     }
 
     /// Restores the local APIC while holding the bound vCPU exclusively.
-    pub fn set_kvm_lapic(&self, buf: &[u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_lapic(buf))
+    pub fn set_lapic_state(&self, buf: &[u8]) -> AxResult {
+        self.with_arch_access(|vcpu| vcpu.set_lapic_state(buf))
     }
 
-    /// Writes the KVM-compatible general register state into `buf`.
-    pub fn get_kvm_regs(&self, buf: &mut [u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_regs(buf))
-    }
-
-    /// Reads the KVM-compatible general register state from `buf`.
-    pub fn set_kvm_regs(&self, buf: &[u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_regs(buf))
-    }
-
-    /// Writes the KVM-compatible special register state into `buf`.
-    pub fn get_kvm_sregs(&self, buf: &mut [u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.get_kvm_sregs(buf))
-    }
-
-    /// Reads the KVM-compatible special register state from `buf`.
-    pub fn set_kvm_sregs(&self, buf: &[u8]) -> AxResult {
-        self.with_bound_arch_vcpu(|vcpu| vcpu.set_kvm_sregs(buf))
-    }
-
-    fn with_bound_arch_vcpu<F, T>(&self, operation: F) -> AxResult<T>
+    /// Runs state access with the current-vCPU context installed on every architecture.
+    /// Callers serialize access against execution. The x86 binding scope keeps
+    /// local interrupts disabled so no scheduler or interrupt handler can replace
+    /// the current VMCS between loading it, accessing its fields, and clearing it.
+    fn with_arch_access<F, T>(&self, operation: F) -> AxResult<T>
     where
         F: FnOnce(&mut A) -> AxResult<T>,
     {
+        #[cfg(target_arch = "x86_64")]
+        let _guard = ax_kernel_guard::IrqSave::new();
+        #[cfg(target_arch = "x86_64")]
         self.bind()?;
+
         let result = self.with_current_cpu_set(|| operation(self.get_arch_vcpu()));
-        let unbind_result = self.unbind();
-        match result {
-            Ok(value) => {
-                unbind_result?;
-                Ok(value)
-            }
-            Err(err) => {
-                let _ = unbind_result;
-                Err(err)
-            }
-        }
+
+        #[cfg(target_arch = "x86_64")]
+        let result = {
+            // Always unbind, including when the operation failed. Preserve the
+            // operation's error if both the operation and cleanup fail.
+            let unbind_result = self.unbind();
+            result.and_then(|value| unbind_result.map(|()| value))
+        };
+
+        result
     }
 
     /// Inject an interrupt to the VCpu.

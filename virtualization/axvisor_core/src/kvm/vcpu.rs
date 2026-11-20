@@ -23,6 +23,7 @@ use crate::kvm::run::apply_kvm_pv_msr_write;
 use crate::{
     kvm::{
         abi::raw as abi,
+        registers::KvmRegisters,
         util::{checked_add, read_u32_user, read_u64_user, write_u32_user, write_u64_user},
     },
     vmm::interrupt::VirtualInterrupt,
@@ -157,6 +158,9 @@ pub(in crate::kvm) fn get_one_reg(
     arg: usize,
 ) -> AxResult<isize> {
     let one_reg = read_one_reg(arg)?;
+    if cfg!(target_arch = "x86_64") {
+        return Err(AxError::Unsupported);
+    }
     let vcpu = get_vcpu(control_file)?;
     #[cfg(target_arch = "aarch64")]
     super::run::apply_pending_arm_reset(control_file, &vcpu)?;
@@ -183,6 +187,9 @@ pub(in crate::kvm) fn set_one_reg(
     arg: usize,
 ) -> AxResult<isize> {
     let one_reg = read_one_reg(arg)?;
+    if cfg!(target_arch = "x86_64") {
+        return Err(AxError::Unsupported);
+    }
     let vcpu = get_vcpu(control_file)?;
     #[cfg(target_arch = "aarch64")]
     super::run::apply_pending_arm_reset(control_file, &vcpu)?;
@@ -410,7 +417,7 @@ pub(in crate::kvm) fn set_msrs(
             processed += 1;
             continue;
         }
-        match vcpu.set_kvm_msr(index, data) {
+        match vcpu.set_msr(index, data) {
             Ok(()) => processed += 1,
             Err(AxError::Unsupported) => {
                 crate::println!("KVM_SET_MSRS stopped at unsupported MSR {index:#x}");
@@ -440,7 +447,7 @@ pub(in crate::kvm) fn get_msrs(
         let data = if is_emulated_msr(msr_index) {
             get_emulated_msr(control_file, msr_index)?
         } else {
-            match vcpu.get_kvm_msr(msr_index) {
+            match vcpu.get_msr(msr_index) {
                 Ok(data) => data,
                 Err(AxError::Unsupported) => break,
                 Err(err) => return Err(err),
@@ -471,7 +478,7 @@ pub(in crate::kvm) fn get_lapic(
     arg: usize,
 ) -> AxResult<isize> {
     let mut lapic = [0u8; abi::KVM_X86_LAPIC_STATE_SIZE as usize];
-    get_vcpu(control_file)?.get_kvm_lapic(&mut lapic)?;
+    get_vcpu(control_file)?.get_lapic_state(&mut lapic)?;
     api_control::copy_to_user(arg, &lapic)?;
     Ok(0)
 }
@@ -482,7 +489,7 @@ pub(in crate::kvm) fn set_lapic(
 ) -> AxResult<isize> {
     let mut bytes = [0u8; abi::KVM_X86_LAPIC_STATE_SIZE as usize];
     api_control::copy_from_user(arg, &mut bytes)?;
-    get_vcpu(control_file)?.set_kvm_lapic(&bytes)?;
+    get_vcpu(control_file)?.set_lapic_state(&bytes)?;
     Ok(0)
 }
 

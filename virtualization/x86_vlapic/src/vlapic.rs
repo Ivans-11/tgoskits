@@ -83,6 +83,8 @@ pub struct VirtualApicRegs {
     /// to maintain a coherent snapshot of the register (e.g. lvt_last)
     lvt_last: LocalVectorTable,
     pending_cpu_up: Option<VlapicCpuUp>,
+    init_sipi_exiting: bool,
+    pending_init_sipi: Option<(u64, u8, u8)>,
     init_targets: u64,
     started_targets: u64,
     apic_page: PhysFrame,
@@ -180,6 +182,8 @@ impl VirtualApicRegs {
             svr_last: SpuriousInterruptVectorRegisterLocal::new(RESET_SPURIOUS_INTERRUPT_VECTOR),
             lvt_last: LocalVectorTable::default(),
             pending_cpu_up: None,
+            init_sipi_exiting: false,
+            pending_init_sipi: None,
             init_targets: 0,
             started_targets: 0,
             isrv: 0,
@@ -414,7 +418,7 @@ impl VirtualApicRegs {
         } else if is_phys {
             // Physical mode: "dest" is local APIC ID.
             // Todo: distinguish between APIC ID and vCPU ID.
-            dmask = 1 << dest;
+            dmask = 1u64.checked_shl(dest).unwrap_or(0);
         } else if lowprio {
             // lowprio is not supported.
             // Refer to 11.6.2.4 Lowest Priority Delivery Mode.
@@ -537,6 +541,14 @@ impl VirtualApicRegs {
             !((self.regs().TMR[i * 2].get() as u64)
                 | ((self.regs().TMR[i * 2 + 1].get() as u64) << 32))
         })
+    }
+
+    pub fn set_init_sipi_exiting(&mut self, enabled: bool) {
+        self.init_sipi_exiting = enabled;
+    }
+
+    pub fn take_pending_init_sipi(&mut self) -> Option<(u64, u8, u8)> {
+        self.pending_init_sipi.take()
     }
 
     /// Takes the most recent startup IPI request, if any.
@@ -698,6 +710,21 @@ impl VirtualApicRegs {
                 vec
             );
             let dmask = self.calculate_dest(shorthand, is_broadcast, dest, is_phys, false)?;
+            if self.init_sipi_exiting
+                && matches!(mode, APICDeliveryMode::INIT | APICDeliveryMode::StartUp)
+            {
+                // Frontend-managed startup only reports active destinations.
+                let dmask = dmask & self.active_vcpu_mask();
+                // INIT deassert is synchronization, not a CPU reset request.
+                if dmask != 0
+                    && (mode != APICDeliveryMode::INIT
+                        || icr_low.get() & (1 << 15) == 0
+                        || icr_low.get() & (1 << 14) != 0)
+                {
+                    self.pending_init_sipi = Some((dmask, mode as u8, vec as u8));
+                }
+                return Ok(());
+            }
             for i in 0..u64::BITS {
                 if dmask & (1 << i) != 0 {
                     match mode {

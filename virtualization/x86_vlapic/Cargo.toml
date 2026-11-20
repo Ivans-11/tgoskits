@@ -12,11 +12,15 @@ license = "Apache-2.0"
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]
 
+[features]
+rtc = ["dep:chrono"]
+
 [dependencies]
 log = "0.4.19"
 paste = "1.0.15"
 tock-registers = "0.10.0"
 bit = "0.1.1"
+chrono = { workspace = true, optional = true }
 
 ax-memory-addr = { workspace = true }
 ax-errno = { workspace = true }

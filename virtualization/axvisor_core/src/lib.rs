@@ -46,8 +46,12 @@ macro_rules! println {
 }
 
 pub mod arch;
+#[cfg(all(feature = "bhyve", target_arch = "x86_64"))]
+pub mod bhyve;
 pub mod boot;
 pub mod context;
+#[cfg(feature = "control")]
+mod control;
 #[cfg(feature = "control")]
 pub mod kvm;
 #[cfg(feature = "shell")]

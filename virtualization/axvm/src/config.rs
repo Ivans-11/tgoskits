@@ -80,6 +80,9 @@ pub struct AxVMConfig {
     id: usize,
     name: String,
     host_controlled: bool,
+    /// Expose KVM paravirtual services only when the controlling frontend implements them.
+    #[cfg(target_arch = "x86_64")]
+    pub kvm_pv: bool,
     #[allow(dead_code)]
     vm_type: VMType,
     pub(crate) phys_cpu_ls: PhysCpuList,
@@ -105,6 +108,8 @@ impl From<AxVMCrateConfig> for AxVMConfig {
             id: cfg.base.id,
             name: cfg.base.name,
             host_controlled: false,
+            #[cfg(target_arch = "x86_64")]
+            kvm_pv: false,
             vm_type: VMType::from(cfg.base.vm_type),
             phys_cpu_ls: PhysCpuList {
                 cpu_num: cfg.base.cpu_num,
@@ -179,6 +184,8 @@ impl AxVMConfig {
             id,
             name,
             host_controlled: true,
+            #[cfg(target_arch = "x86_64")]
+            kvm_pv: true,
             vm_type: VMType::VMTLinux,
             phys_cpu_ls: PhysCpuList {
                 cpu_num: vcpu_count,

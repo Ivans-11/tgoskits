@@ -225,6 +225,15 @@ pub enum AxVCpuExitReason {
         arg: u64,
     },
 
+    /// An x86 INIT/SIPI request delegated to the frontend. CPU bits are vCPU IDs.
+    #[cfg(target_arch = "x86_64")]
+    InitSipi {
+        target_mask: u64,
+        /// APIC delivery mode: 5 = INIT, 6 = SIPI.
+        delivery_mode: u8,
+        vector: u8,
+    },
+
     /// The guest VCpu has been powered down.
     ///
     /// This indicates the VCpu has executed a power-down instruction or

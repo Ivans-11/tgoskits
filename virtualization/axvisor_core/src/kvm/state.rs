@@ -30,7 +30,9 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 use axaddrspace::GuestPhysAddr;
 use axaddrspace::device::AccessWidth;
-use axvisor_api::{control as api_control, sync::WaitQueue, task::TaskHandle};
+#[cfg(target_arch = "aarch64")]
+use axvisor_api::sync::WaitQueue;
+use axvisor_api::{control as api_control, task::TaskHandle};
 use axvm::AxVMRef;
 #[cfg(target_arch = "x86_64")]
 mod mapped_pages;
@@ -122,7 +124,7 @@ pub(in crate::kvm) struct VmFileState {
 pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) vm_file: api_control::ControlFileId,
     pub(in crate::kvm) vcpu_id: u32,
-    pub(in crate::kvm) mmap_area: api_control::MmapAreaId,
+    pub(in crate::kvm) mmap_area: alloc::sync::Arc<api_control::MmapArea>,
     pub(in crate::kvm) mp_state: u32,
     pub(in crate::kvm) halted: bool,
     pub(in crate::kvm) pending_interrupts: VecDeque<VirtualInterrupt>,
@@ -204,64 +206,7 @@ impl ArmRunState {
     }
 }
 
-/// Serializes stateful ioctls issued through one KVM vCPU file.
-///
-/// KVM userspace may hand a vCPU fd between host threads while interrupting an
-/// earlier `KVM_RUN`.  AxVCpu's architectural state is intentionally owned by
-/// only one host task at a time, so the control endpoint must provide the same
-/// per-vCPU serialization that Linux KVM provides around vCPU ioctls.
-pub(in crate::kvm) struct VcpuOperationLock {
-    held: AtomicBool,
-    wait_queue: WaitQueue,
-}
-
-impl VcpuOperationLock {
-    #[cfg(target_arch = "riscv64")]
-    pub(in crate::kvm) fn try_lock(self: &Arc<Self>) -> Option<VcpuOperationGuard> {
-        self.held
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| VcpuOperationGuard {
-                lock: Arc::clone(self),
-            })
-    }
-
-    pub(in crate::kvm) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            held: AtomicBool::new(false),
-            wait_queue: WaitQueue::new(),
-        })
-    }
-
-    pub(in crate::kvm) fn lock(self: &Arc<Self>) -> VcpuOperationGuard {
-        if self
-            .held
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            let lock = Arc::clone(self);
-            self.wait_queue.wait_until(move || {
-                lock.held
-                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-            });
-        }
-        VcpuOperationGuard {
-            lock: Arc::clone(self),
-        }
-    }
-}
-
-pub(in crate::kvm) struct VcpuOperationGuard {
-    lock: Arc<VcpuOperationLock>,
-}
-
-impl Drop for VcpuOperationGuard {
-    fn drop(&mut self) {
-        self.lock.held.store(false, Ordering::Release);
-        self.lock.wait_queue.wake_one();
-    }
-}
+pub(in crate::kvm) use crate::control::OperationLock as VcpuOperationLock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::kvm) struct PendingMmioRead {
@@ -294,7 +239,7 @@ pub(in crate::kvm) struct MemorySlot {
     pub(in crate::kvm) memory_size: u64,
     pub(in crate::kvm) userspace_addr: u64,
     pub(in crate::kvm) user_address_space: api_control::UserAddressSpaceId,
-    pub(in crate::kvm) pinned_pages: api_control::PinnedUserPagesId,
+    pub(in crate::kvm) pinned_pages: api_control::PinnedPagesId,
     pub(in crate::kvm) mapped_pages: MappedPages,
 }
 
@@ -306,13 +251,13 @@ pub(in crate::kvm) struct MappedMemoryPage {
 
 #[derive(Clone, Debug)]
 pub(in crate::kvm) struct PinnedPageGroup {
-    pub(in crate::kvm) id: api_control::PinnedUserPagesId,
+    pub(in crate::kvm) id: api_control::PinnedPagesId,
     remaining: Arc<AtomicUsize>,
 }
 
 impl PinnedPageGroup {
     #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
-    pub(in crate::kvm) fn new(id: api_control::PinnedUserPagesId, pages: usize) -> Self {
+    pub(in crate::kvm) fn new(id: api_control::PinnedPagesId, pages: usize) -> Self {
         Self {
             id,
             remaining: Arc::new(AtomicUsize::new(pages.max(1))),
@@ -321,7 +266,7 @@ impl PinnedPageGroup {
 
     pub(in crate::kvm) fn release(&self) {
         if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let _ = api_control::release_pinned_user_pages(self.id);
+            let _ = api_control::release_pinned_pages(self.id);
         }
     }
 }

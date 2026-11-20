@@ -16,3 +16,6 @@ ax-percpu = { workspace = true }
 axaddrspace = { workspace = true }
 axvisor_api = { workspace = true }
 ax-kspin = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+ax-kernel-guard = { workspace = true }

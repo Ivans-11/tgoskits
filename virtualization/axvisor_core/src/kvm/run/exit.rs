@@ -20,12 +20,14 @@ use axvisor_api::control as api_control;
 use kvm_uapi::x86::KvmRegs;
 
 use super::super::{CONTROL_FILES, ControlFileState};
+#[cfg(target_arch = "x86_64")]
+use crate::kvm::registers::KvmRegisters;
 use crate::kvm::{
     abi::raw as abi,
     state::{PendingIoRead, PendingMmioRead},
     util::{
-        access_width_bytes, access_width_mask, control_file_mmap_area, sign_extend_value,
-        write_vcpu_run_u8, write_vcpu_run_u16, write_vcpu_run_u32, write_vcpu_run_u64,
+        access_width_bytes, access_width_mask, sign_extend_value, write_mmap_area_u8,
+        write_mmap_area_u16, write_mmap_area_u32, write_mmap_area_u64,
     },
 };
 
@@ -51,7 +53,7 @@ pub(super) fn kvm_exit_reason(exit_reason: &AxVCpuExitReason) -> u32 {
 // The MMIO payload is contiguous in kvm_run. Publish it with one lookup and
 // host write, without touching the surrounding union or run control fields.
 fn write_mmio_exit(
-    mmap_area: api_control::MmapAreaId,
+    mmap_area: &api_control::MmapArea,
     addr: u64,
     width: AccessWidth,
     data: Option<u64>,
@@ -71,7 +73,7 @@ fn write_mmio_exit(
 
 pub(super) fn prepare_userspace_exit(
     control_file: api_control::ControlFileId,
-    mmap_area: api_control::MmapAreaId,
+    mmap_area: &api_control::MmapArea,
     exit_reason: &AxVCpuExitReason,
 ) -> AxResult {
     match exit_reason {
@@ -99,20 +101,20 @@ pub(super) fn prepare_userspace_exit(
             write_mmio_exit(mmap_area, addr.as_usize() as u64, *width, Some(*data))?;
         }
         AxVCpuExitReason::IoRead { port, width } => {
-            write_vcpu_run_u8(
-                control_file,
+            write_mmap_area_u8(
+                mmap_area,
                 abi::KVM_RUN_IO_DIRECTION_OFFSET,
                 abi::KVM_EXIT_IO_IN,
             )?;
-            write_vcpu_run_u8(
-                control_file,
+            write_mmap_area_u8(
+                mmap_area,
                 abi::KVM_RUN_IO_SIZE_OFFSET,
                 access_width_bytes(*width) as u8,
             )?;
-            write_vcpu_run_u16(control_file, abi::KVM_RUN_IO_PORT_OFFSET, port.number())?;
-            write_vcpu_run_u32(control_file, abi::KVM_RUN_IO_COUNT_OFFSET, 1)?;
-            write_vcpu_run_u64(
-                control_file,
+            write_mmap_area_u16(mmap_area, abi::KVM_RUN_IO_PORT_OFFSET, port.number())?;
+            write_mmap_area_u32(mmap_area, abi::KVM_RUN_IO_COUNT_OFFSET, 1)?;
+            write_mmap_area_u64(
+                mmap_area,
                 abi::KVM_RUN_IO_DATA_OFFSET_OFFSET,
                 abi::KVM_RUN_IO_DATA_OFFSET as u64,
             )?;
@@ -133,20 +135,20 @@ pub(super) fn prepare_userspace_exit(
             address_size,
             decrement,
         } => {
-            write_vcpu_run_u8(
-                control_file,
+            write_mmap_area_u8(
+                mmap_area,
                 abi::KVM_RUN_IO_DIRECTION_OFFSET,
                 abi::KVM_EXIT_IO_IN,
             )?;
-            write_vcpu_run_u8(
-                control_file,
+            write_mmap_area_u8(
+                mmap_area,
                 abi::KVM_RUN_IO_SIZE_OFFSET,
                 access_width_bytes(*width) as u8,
             )?;
-            write_vcpu_run_u16(control_file, abi::KVM_RUN_IO_PORT_OFFSET, port.number())?;
-            write_vcpu_run_u32(control_file, abi::KVM_RUN_IO_COUNT_OFFSET, 1)?;
-            write_vcpu_run_u64(
-                control_file,
+            write_mmap_area_u16(mmap_area, abi::KVM_RUN_IO_PORT_OFFSET, port.number())?;
+            write_mmap_area_u32(mmap_area, abi::KVM_RUN_IO_COUNT_OFFSET, 1)?;
+            write_mmap_area_u64(
+                mmap_area,
                 abi::KVM_RUN_IO_DATA_OFFSET_OFFSET,
                 abi::KVM_RUN_IO_DATA_OFFSET as u64,
             )?;
@@ -166,21 +168,20 @@ pub(super) fn prepare_userspace_exit(
             });
         }
         AxVCpuExitReason::IoWrite { port, width, data } => {
-            let mmap_area = control_file_mmap_area(control_file)?;
-            write_vcpu_run_u8(
-                control_file,
+            write_mmap_area_u8(
+                mmap_area,
                 abi::KVM_RUN_IO_DIRECTION_OFFSET,
                 abi::KVM_EXIT_IO_OUT,
             )?;
-            write_vcpu_run_u8(
-                control_file,
+            write_mmap_area_u8(
+                mmap_area,
                 abi::KVM_RUN_IO_SIZE_OFFSET,
                 access_width_bytes(*width) as u8,
             )?;
-            write_vcpu_run_u16(control_file, abi::KVM_RUN_IO_PORT_OFFSET, port.number())?;
-            write_vcpu_run_u32(control_file, abi::KVM_RUN_IO_COUNT_OFFSET, 1)?;
-            write_vcpu_run_u64(
-                control_file,
+            write_mmap_area_u16(mmap_area, abi::KVM_RUN_IO_PORT_OFFSET, port.number())?;
+            write_mmap_area_u32(mmap_area, abi::KVM_RUN_IO_COUNT_OFFSET, 1)?;
+            write_mmap_area_u64(
+                mmap_area,
                 abi::KVM_RUN_IO_DATA_OFFSET_OFFSET,
                 abi::KVM_RUN_IO_DATA_OFFSET as u64,
             )?;
@@ -193,8 +194,8 @@ pub(super) fn prepare_userspace_exit(
         AxVCpuExitReason::FailEntry {
             hardware_entry_failure_reason,
         } => {
-            write_vcpu_run_u64(
-                control_file,
+            write_mmap_area_u64(
+                mmap_area,
                 abi::KVM_RUN_FAIL_ENTRY_HARDWARE_REASON_OFFSET,
                 *hardware_entry_failure_reason,
             )?;
@@ -205,11 +206,10 @@ pub(super) fn prepare_userspace_exit(
 }
 
 pub(super) fn complete_mmio_read(
-    control_file: api_control::ControlFileId,
+    mmap_area: &api_control::MmapArea,
     vcpu: &axvm::AxVCpuRef,
     pending: PendingMmioRead,
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     let mut bytes = [0u8; 8];
     api_control::read_mmap_area(mmap_area, abi::KVM_RUN_MMIO_DATA_OFFSET, &mut bytes)?;
     let raw = u64::from_ne_bytes(bytes) as usize;
@@ -288,12 +288,11 @@ fn set_kvm_gpr(regs: &mut KvmRegs, index: usize, value: u64) -> AxResult {
 }
 
 pub(super) fn complete_io_read(
-    control_file: api_control::ControlFileId,
+    mmap_area: &api_control::MmapArea,
     _vm: &axvm::AxVMRef,
     vcpu: &axvm::AxVCpuRef,
     pending: PendingIoRead,
 ) -> AxResult {
-    let mmap_area = control_file_mmap_area(control_file)?;
     let mut bytes = [0u8; 8];
     let width = match pending {
         PendingIoRead::Accumulator { width } | PendingIoRead::String { width, .. } => width,

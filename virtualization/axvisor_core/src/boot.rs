@@ -82,11 +82,14 @@ fn init_runtime() -> ax_errno::AxResult {
     enable_virtualization_on_all_cores();
 
     #[cfg(feature = "control")]
-    return crate::kvm::init().inspect_err(|err| {
-        warn!("Failed to register AxVisor control endpoint: {err:?}");
-    });
+    {
+        crate::kvm::init().inspect_err(|err| {
+            warn!("Failed to register AxVisor control endpoint: {err:?}");
+        })?;
+        #[cfg(all(feature = "bhyve", target_arch = "x86_64"))]
+        crate::bhyve::init()?;
+    }
 
-    #[cfg(not(feature = "control"))]
     Ok(())
 }
 

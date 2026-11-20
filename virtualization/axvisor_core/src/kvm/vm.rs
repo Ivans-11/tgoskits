@@ -14,7 +14,9 @@
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
-    format, vec,
+    format,
+    sync::Arc,
+    vec,
     vec::Vec,
 };
 
@@ -36,7 +38,7 @@ use crate::kvm::{
 
 pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
     let control_file = next_control_file_id()?;
-    let vm_id = control_file_id_to_usize(control_file)?;
+    let vm_id = crate::control::next_vm_id()?;
     let config =
         AxVMConfig::new_host_controlled(vm_id, format!("kvm-vm-{vm_id}"), abi::KVM_MAX_VCPUS);
     let vm = AxVM::new(config)?;
@@ -85,7 +87,7 @@ pub(in crate::kvm) fn create_vcpu_file(
     vcpu_id: usize,
 ) -> AxResult<isize> {
     let vcpu_id = vcpu_id as u32;
-    let mmap_area = api_control::create_mmap_area(abi::KVM_VCPU_MMAP_SIZE)?;
+    let mmap_area = Arc::new(api_control::MmapArea::new(abi::KVM_VCPU_MMAP_SIZE)?);
 
     let vcpu_file = {
         let mut control_files = CONTROL_FILES.lock();
@@ -155,7 +157,7 @@ pub(in crate::kvm) fn create_vcpu_file(
         vcpu_file
     };
 
-    match api_control::create_user_fd(vcpu_file, KVM_CONTROL_OPS, Some(mmap_area)) {
+    match api_control::create_user_fd(vcpu_file, KVM_CONTROL_OPS) {
         Ok(fd) => Ok(fd as isize),
         Err(err) => {
             let _ = remove_vcpu_file(vcpu_file);
@@ -385,14 +387,6 @@ fn remove_vcpu_file(vcpu_file: api_control::ControlFileId) -> AxResult {
     if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file) {
         vm.vcpu_files.remove(&vcpu.vcpu_id);
     }
-    let _ = api_control::release_mmap_area(vcpu.mmap_area);
+    drop(vcpu.mmap_area);
     Ok(())
-}
-
-fn control_file_id_to_usize(control_file: api_control::ControlFileId) -> AxResult<usize> {
-    let value = control_file as usize;
-    if value as api_control::ControlFileId != control_file {
-        return ax_err!(OutOfRange);
-    }
-    Ok(value)
 }

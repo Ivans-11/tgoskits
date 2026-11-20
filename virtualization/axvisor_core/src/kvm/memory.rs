@@ -76,7 +76,7 @@ pub(in crate::kvm) fn set_user_memory_region(
         let pinned = match pinned_result {
             Ok(pinned) => {
                 if let Err(err) = release_result {
-                    let _ = api_control::release_pinned_user_pages(pinned.id);
+                    let _ = api_control::release_pinned_pages(pinned.id);
                     return Err(err);
                 }
                 pinned
@@ -88,7 +88,7 @@ pub(in crate::kvm) fn set_user_memory_region(
         };
         let pinned_pages = pinned.id;
         if let Err(err) = map_pinned_user_memory(&vm_ref, region, &pinned) {
-            let _ = api_control::release_pinned_user_pages(pinned_pages);
+            let _ = api_control::release_pinned_pages(pinned_pages);
             return Err(err);
         }
         let new_slot = MemorySlot {
@@ -228,7 +228,7 @@ fn handle_memory_slot_page_fault_inner(
         }
     };
     if pinned.pages.len() != 1 {
-        let _ = api_control::release_pinned_user_pages(pinned.id);
+        let _ = api_control::release_pinned_pages(pinned.id);
         return ax_err!(InvalidInput);
     }
     let page_hpa = pinned.pages[0];
@@ -238,17 +238,17 @@ fn handle_memory_slot_page_fault_inner(
         let mut control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) else {
             drop(control_files);
-            let _ = api_control::release_pinned_user_pages(pinned.id);
+            let _ = api_control::release_pinned_pages(pinned.id);
             return ax_err!(NotFound);
         };
         let Some(slot) = vm.memory_slots.get_mut(&snapshot.slot_id) else {
             drop(control_files);
-            let _ = api_control::release_pinned_user_pages(pinned.id);
+            let _ = api_control::release_pinned_pages(pinned.id);
             return Ok(true);
         };
         if !snapshot.matches(slot) {
             drop(control_files);
-            let _ = api_control::release_pinned_user_pages(pinned.id);
+            let _ = api_control::release_pinned_pages(pinned.id);
             return Ok(true);
         }
         if slot
@@ -257,7 +257,7 @@ fn handle_memory_slot_page_fault_inner(
             .is_some_and(|page| !writable || page.writable)
         {
             drop(control_files);
-            let _ = api_control::release_pinned_user_pages(pinned.id);
+            let _ = api_control::release_pinned_pages(pinned.id);
             return Ok(true);
         }
 
@@ -291,7 +291,7 @@ fn handle_memory_slot_page_fault_inner(
     };
 
     if result.is_err() {
-        let _ = api_control::release_pinned_user_pages(pinned.id);
+        let _ = api_control::release_pinned_pages(pinned.id);
     }
     if let Some(old_page) = replaced_page {
         old_page.pinned_pages.release();
@@ -308,67 +308,65 @@ fn handle_memory_slot_page_fault_inner(
         let count = ((slot_end.saturating_sub(page_gpa)) / abi::PAGE_SIZE_USIZE as u64)
             .saturating_sub(1)
             .min(63) as usize;
-        if count > 0 {
-            if let Ok(batch) = api_control::pin_user_pages(
+        if count > 0
+            && let Ok(batch) = api_control::pin_user_pages(
                 snapshot.user_address_space,
                 snapshot.page_hva + abi::PAGE_SIZE_USIZE,
                 count * abi::PAGE_SIZE_USIZE,
                 true,
-            ) {
-                if batch.pages.is_empty() {
-                    let _ = api_control::release_pinned_user_pages(batch.id);
-                    return result;
-                }
-                let group = PinnedPageGroup::new(batch.id, batch.pages.len());
-                let flags = MappingFlags::READ
-                    | MappingFlags::WRITE
-                    | MappingFlags::EXECUTE
-                    | MappingFlags::USER;
-                let mut failed = 0usize;
-                let mut control_files = CONTROL_FILES.lock();
-                if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
-                    if let Some(slot) = vm.memory_slots.get_mut(&snapshot.slot_id) {
-                        let mut regions = alloc::vec::Vec::with_capacity(batch.pages.len());
-                        for (index, page_hpa) in batch.pages.iter().enumerate() {
-                            let next_gpa =
-                                page_gpa + (index as u64 + 1) * abi::PAGE_SIZE_USIZE as u64;
-                            if snapshot.matches(slot) && !slot.mapped_pages.contains_key(&next_gpa)
-                            {
-                                regions.push((
-                                    GuestPhysAddr::from(next_gpa as usize),
-                                    HostPhysAddr::from(page_hpa.as_usize()),
-                                ));
-                            } else {
-                                failed += 1;
-                            }
-                        }
-                        if vm
-                            .vm
-                            .map_regions_linear(&regions, abi::PAGE_SIZE_USIZE, flags)
-                            .is_ok()
-                        {
-                            for (gpa, _) in regions {
-                                slot.mapped_pages.insert(
-                                    gpa.as_usize() as u64,
-                                    MappedMemoryPage {
-                                        pinned_pages: group.clone(),
-                                        writable: true,
-                                    },
-                                );
-                            }
+            )
+        {
+            if batch.pages.is_empty() {
+                let _ = api_control::release_pinned_pages(batch.id);
+                return result;
+            }
+            let group = PinnedPageGroup::new(batch.id, batch.pages.len());
+            let flags = MappingFlags::READ
+                | MappingFlags::WRITE
+                | MappingFlags::EXECUTE
+                | MappingFlags::USER;
+            let mut failed = 0usize;
+            let mut control_files = CONTROL_FILES.lock();
+            if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vm_file) {
+                if let Some(slot) = vm.memory_slots.get_mut(&snapshot.slot_id) {
+                    let mut regions = alloc::vec::Vec::with_capacity(batch.pages.len());
+                    for (index, page_hpa) in batch.pages.iter().enumerate() {
+                        let next_gpa = page_gpa + (index as u64 + 1) * abi::PAGE_SIZE_USIZE as u64;
+                        if snapshot.matches(slot) && !slot.mapped_pages.contains_key(&next_gpa) {
+                            regions.push((
+                                GuestPhysAddr::from(next_gpa as usize),
+                                HostPhysAddr::from(page_hpa.as_usize()),
+                            ));
                         } else {
-                            failed += regions.len();
+                            failed += 1;
+                        }
+                    }
+                    if vm
+                        .vm
+                        .map_regions_linear(&regions, abi::PAGE_SIZE_USIZE, flags)
+                        .is_ok()
+                    {
+                        for (gpa, _) in regions {
+                            slot.mapped_pages.insert(
+                                gpa.as_usize() as u64,
+                                MappedMemoryPage {
+                                    pinned_pages: group.clone(),
+                                    writable: true,
+                                },
+                            );
                         }
                     } else {
-                        failed = batch.pages.len();
+                        failed += regions.len();
                     }
                 } else {
                     failed = batch.pages.len();
                 }
-                drop(control_files);
-                for _ in 0..failed {
-                    group.release();
-                }
+            } else {
+                failed = batch.pages.len();
+            }
+            drop(control_files);
+            for _ in 0..failed {
+                group.release();
             }
         }
     }
@@ -417,7 +415,7 @@ impl From<UserspaceMemoryRegion> for MemorySlot {
 fn map_pinned_user_memory(
     vm: &AxVMRef,
     region: UserspaceMemoryRegion,
-    pinned: &api_control::PinnedUserPages,
+    pinned: &api_control::PinnedPages,
 ) -> AxResult {
     let page_count = region.memory_size as usize / abi::PAGE_SIZE_USIZE;
     if pinned.pages.len() != page_count {
@@ -454,7 +452,7 @@ pub(in crate::kvm) fn unmap_memory_slot(vm: &AxVMRef, slot: MemorySlot) {
             GuestPhysAddr::from(slot.guest_phys_addr as usize),
             slot.memory_size as usize,
         );
-        let _ = api_control::release_pinned_user_pages(slot.pinned_pages);
+        let _ = api_control::release_pinned_pages(slot.pinned_pages);
         if slot.user_address_space != 0 {
             let _ = api_control::release_user_address_space(slot.user_address_space);
         }

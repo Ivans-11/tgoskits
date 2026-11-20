@@ -153,53 +153,35 @@ pub trait AxArchVCpu: Sized {
         Err(AxError::Unsupported)
     }
 
-    /// Returns an x86 KVM MSR value from the architectural vCPU state.
-    fn get_kvm_msr(&self, _index: u32) -> AxResult<u64> {
+    /// Returns cached exit metadata, independent of the current resume RIP.
+    #[cfg(target_arch = "x86_64")]
+    fn exit_instruction(&self) -> AxResult<crate::x86_regs::ExitInstruction> {
         Err(AxError::Unsupported)
     }
 
-    /// Applies an x86 KVM MSR value to the architectural vCPU state.
-    fn set_kvm_msr(&mut self, _index: u32, _value: u64) -> AxResult {
+    /// Routes x86 INIT/SIPI requests to the frontend instead of starting CPUs internally.
+    #[cfg(target_arch = "x86_64")]
+    fn set_init_sipi_exiting(&mut self, _enabled: bool) -> AxResult {
         Err(AxError::Unsupported)
     }
 
-    /// Writes the x86 KVM debug-register state into `buf`.
-    fn get_kvm_debugregs(&self, _buf: &mut [u8]) -> AxResult {
+    /// Returns an x86 MSR value from the architectural vCPU state.
+    fn get_msr(&self, _index: u32) -> AxResult<u64> {
         Err(AxError::Unsupported)
     }
 
-    /// Reads the x86 KVM debug-register state from `buf`.
-    fn set_kvm_debugregs(&mut self, _buf: &[u8]) -> AxResult {
+    /// Applies an x86 MSR value to the architectural vCPU state.
+    fn set_msr(&mut self, _index: u32, _value: u64) -> AxResult {
         Err(AxError::Unsupported)
     }
 
     /// Writes the x86 local APIC register image into `buf`.
-    fn get_kvm_lapic(&self, _buf: &mut [u8]) -> AxResult {
+    fn get_lapic_state(&self, _buf: &mut [u8]) -> AxResult {
         Err(AxError::Unsupported)
     }
 
     /// Restores the x86 local APIC register image from `buf`.
-    fn set_kvm_lapic(&mut self, _buf: &[u8]) -> AxResult {
-        Err(AxError::Unsupported)
-    }
-
-    /// Writes the KVM-compatible general register state into `buf`.
-    fn get_kvm_regs(&self, _buf: &mut [u8]) -> AxResult {
-        Err(AxError::Unsupported)
-    }
-
-    /// Reads the KVM-compatible general register state from `buf`.
-    fn set_kvm_regs(&mut self, _buf: &[u8]) -> AxResult {
-        Err(AxError::Unsupported)
-    }
-
-    /// Writes the KVM-compatible special register state into `buf`.
-    fn get_kvm_sregs(&self, _buf: &mut [u8]) -> AxResult {
-        Err(AxError::Unsupported)
-    }
-
-    /// Reads the KVM-compatible special register state from `buf`.
-    fn set_kvm_sregs(&mut self, _buf: &[u8]) -> AxResult {
+    fn set_lapic_state(&mut self, _buf: &[u8]) -> AxResult {
         Err(AxError::Unsupported)
     }
 
