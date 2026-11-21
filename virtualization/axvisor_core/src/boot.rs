@@ -88,6 +88,8 @@ fn init_runtime() -> ax_errno::AxResult {
         })?;
         #[cfg(all(feature = "bhyve", target_arch = "x86_64"))]
         crate::bhyve::init()?;
+        #[cfg(all(feature = "vfio", target_arch = "x86_64"))]
+        crate::vfio::init()?;
     }
 
     Ok(())

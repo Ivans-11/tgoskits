@@ -108,7 +108,7 @@ fn target_matches(target: VcpuInterruptTarget, vm: &VMRef, vcpu_id: usize) -> bo
 ///
 /// If the target vCPU is the current bound vCPU, the interrupt is injected
 /// immediately. Otherwise it is queued to the static vCPU task model, falling
-/// back to the KVM host-control vCPU fd model when the VM is control-owned.
+/// back to shared userspace-managed vCPU state when the VM is control-owned.
 pub(crate) fn deliver_interrupt(route: InterruptRoute) {
     #[cfg(all(target_arch = "x86_64", feature = "posted-interrupt"))]
     if route.interrupt.level == InterruptLineLevel::Assert
@@ -153,13 +153,9 @@ pub(crate) fn deliver_interrupt(route: InterruptRoute) {
 
 #[cfg(feature = "control")]
 fn queue_control_interrupt(route: InterruptRoute) -> bool {
-    match crate::kvm::queue_control_vcpu_interrupt(route) {
+    match crate::control::queue_interrupt(route) {
         Ok(()) => true,
         Err(err) => {
-            #[cfg(all(target_arch = "x86_64", feature = "bhyve"))]
-            if err == ax_errno::AxError::NotFound && crate::bhyve::queue_interrupt(route) {
-                return true;
-            }
             warn!(
                 "Failed to queue interrupt {:?} to VM[{}] VCpu[{}]: {err:?}",
                 route.interrupt, route.vm_id, route.vcpu_id

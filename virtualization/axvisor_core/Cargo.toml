@@ -11,6 +11,7 @@ repository = "https://github.com/rcore-os/tgoskits"
 default = ["vmx", "shell"]
 control = ["axvisor_api/control", "riscv_vcpu/control", "dep:riscv_aia"]
 device = ["axvisor_api/device", "axvm/device", "dep:axdevice"]
+vfio = ["control", "device"]
 bhyve = ["control", "dep:x86_vlapic", "x86_vlapic/rtc"]
 aia = ["axvm/aia"]
 aia-hw = ["aia", "riscv_vcpu/aia-hw"]

@@ -271,6 +271,22 @@ impl PciFunction {
         })
     }
 
+    /// Read a validated scalar configuration access from a frontend.
+    pub fn config_read(&self, offset: usize, width: AccessWidth) -> AxResult<u64> {
+        if offset.checked_add(width.size()).is_none_or(|end| end > 256) {
+            return Err(AxError::InvalidInput);
+        }
+        Ok(self.read_config(offset, width.size()) as u64)
+    }
+
+    /// Write configuration without exposing physical PCI control registers.
+    pub fn config_write(&self, offset: usize, width: AccessWidth, value: u64) -> AxResult {
+        if offset.checked_add(width.size()).is_none_or(|end| end > 256) {
+            return Err(AxError::InvalidInput);
+        }
+        self.write_config(offset, width.size(), value as usize)
+    }
+
     fn read_config(&self, offset: usize, width: usize) -> usize {
         let config = self.state.lock();
         (0..width).fold(0, |value, i| {
@@ -305,19 +321,19 @@ impl PciFunction {
             self.backend.configure_msi(new_msi)?;
         }
         self.state.lock().bytes = bytes;
-        self.deliver_pending();
+        self.deliver_pending(false);
         Ok(())
     }
 
     /// Signal an interrupt, retaining it while MSI is disabled or masked.
     pub fn interrupt(&self) {
-        self.state.lock().pending = true;
-        self.deliver_pending();
+        self.deliver_pending(true);
     }
 
-    fn deliver_pending(&self) {
+    fn deliver_pending(&self, asserted: bool) {
         let message = {
             let mut config = self.state.lock();
+            config.pending |= asserted;
             if !config.pending {
                 return;
             }

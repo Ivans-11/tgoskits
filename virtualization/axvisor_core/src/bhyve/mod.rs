@@ -7,13 +7,8 @@ mod memory;
 mod platform;
 mod vcpu;
 
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    format,
-    string::String,
-    sync::Arc,
-};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use ax_errno::{AxError, AxResult};
 use ax_kspin::SpinNoIrq;
@@ -22,10 +17,9 @@ use axvm::{AxVM, AxVMRef, VMStatus, config::AxVMConfig};
 use memory::Memory;
 use spin::Mutex;
 
-use crate::control::OperationLock;
+use crate::control::{OperationLock, VcpuState, VmState};
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
-static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
 static VMS: SpinNoIrq<BTreeMap<usize, Arc<Vm>>> = SpinNoIrq::new(BTreeMap::new());
 static FILES: Mutex<BTreeMap<ControlFileId, File>> = Mutex::new(BTreeMap::new());
 
@@ -34,6 +28,7 @@ const OPS: ControlOps = ControlOps {
     close,
     ioctl,
     mmap: Some(mmap),
+    io: None,
 };
 
 struct Vm {
@@ -42,12 +37,12 @@ struct Vm {
     name: String,
     operation: Arc<OperationLock>,
     endpoint: Mutex<Option<EndpointId>>,
-    removed: AtomicBool,
     memory: Mutex<Memory>,
     resume_rip: Mutex<Option<u64>>,
     cpu_state: vcpu::State,
     rtc: Mutex<x86_vlapic::rtc::Rtc>,
-    pending_interrupts: SpinNoIrq<VecDeque<crate::vmm::interrupt::VirtualInterrupt>>,
+    runtime: Arc<VmState>,
+    vcpu_runtime: Arc<VcpuState>,
 }
 
 #[derive(Clone)]
@@ -74,9 +69,7 @@ pub fn init() -> AxResult {
 }
 
 fn new_file(file: File) -> AxResult<ControlFileId> {
-    let id = NEXT_FILE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map_err(|_| AxError::NoMemory)?;
+    let id = crate::control::next_file_id()?;
     FILES.lock().insert(id, file);
     Ok(id)
 }
@@ -90,7 +83,7 @@ fn open(context: u64) -> AxResult<ControlFileId> {
         .get(&(context as usize))
         .cloned()
         .ok_or(AxError::NoSuchDevice)?;
-    if vm.removed.load(Ordering::Acquire) {
+    if vm.runtime.removing.load(Ordering::Acquire) {
         return Err(AxError::NoSuchDevice);
     }
     new_file(File::Vm(vm))
@@ -116,17 +109,19 @@ fn create(name: &str) -> AxResult {
     let machine = AxVM::new(config)?;
     machine.init()?;
     machine.set_vm_status(VMStatus::Loaded);
+    let runtime = VmState::new(id, true)?;
+    let vcpu_runtime = runtime.add_vcpu(0, false, true)?;
     let vm = Arc::new(Vm {
         machine,
         name: name.into(),
         operation: OperationLock::new(),
         endpoint: Mutex::new(None),
-        removed: AtomicBool::new(false),
         memory: Mutex::new(Memory::default()),
         resume_rip: Mutex::new(None),
         cpu_state: vcpu::State::default(),
         rtc: Mutex::new(x86_vlapic::rtc::Rtc::default()),
-        pending_interrupts: SpinNoIrq::new(VecDeque::new()),
+        runtime,
+        vcpu_runtime,
     });
     {
         let mut vms = VMS.lock();
@@ -147,25 +142,6 @@ fn create(name: &str) -> AxResult {
     }
 }
 
-pub(crate) fn queue_interrupt(route: crate::vmm::interrupt::InterruptRoute) -> bool {
-    let Some(vm) = VMS.lock().get(&route.vm_id).cloned() else {
-        return false;
-    };
-    if route.vcpu_id == 0 && !vm.removed.load(Ordering::Acquire) {
-        let mut pending = vm.pending_interrupts.lock();
-        if !pending.contains(&route.interrupt) {
-            pending.push_back(route.interrupt);
-        }
-    }
-    true
-}
-
-pub(crate) fn active_vcpus(vm_id: usize) -> Option<usize> {
-    VMS.lock()
-        .get(&vm_id)
-        .map(|vm| usize::from(vm.cpu_state.active.load(Ordering::Acquire)))
-}
-
 fn destroy(name: &str) -> AxResult {
     let vm = VMS
         .lock()
@@ -174,10 +150,10 @@ fn destroy(name: &str) -> AxResult {
         .cloned()
         .ok_or(AxError::NotFound)?;
     // Endpoint publication may still be in progress in another create call.
-    if vm.endpoint.lock().is_none() && !vm.removed.load(Ordering::Acquire) {
+    if vm.endpoint.lock().is_none() && !vm.runtime.removing.load(Ordering::Acquire) {
         return Err(AxError::ResourceBusy);
     }
-    vm.removed.store(true, Ordering::Release);
+    vm.runtime.removing.store(true, Ordering::Release);
     let _guard = vm.operation.lock();
     // Another destroy may have completed while this request was waiting.
     // Copy under the operation lock, and release the endpoint mutex before
@@ -193,6 +169,7 @@ fn destroy(name: &str) -> AxResult {
         vm.memory.lock().forget_endpoint(segment);
         close(context)?;
     }
+    vm.runtime.close();
     VMS.lock().remove(&vm.machine.id());
     Ok(())
 }
@@ -212,7 +189,7 @@ fn ioctl(id: ControlFileId, command: u32, address: usize) -> AxResult<isize> {
             }
         }
         File::Vm(vm) => {
-            if vm.removed.load(Ordering::Acquire) {
+            if vm.runtime.removing.load(Ordering::Acquire) {
                 return Err(AxError::NoSuchDevice);
             }
             // These state transitions must also work while VM_RUN owns the
@@ -223,7 +200,7 @@ fn ioctl(id: ControlFileId, command: u32, address: usize) -> AxResult<isize> {
                 return Ok(0);
             }
             let _guard = vm.operation.lock();
-            if vm.removed.load(Ordering::Acquire) {
+            if vm.runtime.removing.load(Ordering::Acquire) {
                 return Err(AxError::NoSuchDevice);
             }
             match command {
@@ -256,7 +233,7 @@ fn mmap(
         File::Manager => return Err(AxError::NoSuchDevice),
     };
     let _guard = vm.operation.lock();
-    if vm.removed.load(Ordering::Acquire) {
+    if vm.runtime.removing.load(Ordering::Acquire) {
         return Err(AxError::NoSuchDevice);
     }
     // bhyve requires shared RAM/ROM; a private COW mapping would diverge from guest RAM.

@@ -20,18 +20,12 @@
 
 #[cfg(target_arch = "x86_64")]
 use alloc::collections::BTreeSet;
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 use axaddrspace::GuestPhysAddr;
 use axaddrspace::device::AccessWidth;
-#[cfg(target_arch = "aarch64")]
-use axvisor_api::sync::WaitQueue;
 use axvisor_api::{control as api_control, task::TaskHandle};
 use axvm::AxVMRef;
 #[cfg(target_arch = "x86_64")]
@@ -46,9 +40,9 @@ pub(in crate::kvm) use kvm_uapi::{
     KvmCpuidEntry2, KvmEnableCap, KvmIoEventFd, KvmIrqFd, OneReg, UserspaceMemoryRegion,
 };
 
+use crate::control::{VcpuState, VmState};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::abi;
-use crate::vmm::interrupt::VirtualInterrupt;
 
 #[derive(Clone)]
 pub(in crate::kvm) enum ControlFileState {
@@ -87,6 +81,7 @@ impl DeviceFileState {
 #[derive(Clone)]
 pub(in crate::kvm) struct VmFileState {
     pub(in crate::kvm) vm: AxVMRef,
+    pub(in crate::kvm) runtime: Arc<VmState>,
     /// Set once the VM file descriptor is closed.  The VM state must remain
     /// reachable while vCPU file descriptors are still open, matching Linux
     /// KVM's reference-counted VM lifetime.
@@ -126,8 +121,7 @@ pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) vcpu_id: u32,
     pub(in crate::kvm) mmap_area: alloc::sync::Arc<api_control::MmapArea>,
     pub(in crate::kvm) mp_state: u32,
-    pub(in crate::kvm) halted: bool,
-    pub(in crate::kvm) pending_interrupts: VecDeque<VirtualInterrupt>,
+    pub(in crate::kvm) runtime: Arc<VcpuState>,
     pub(in crate::kvm) pending_mmio_read: Option<PendingMmioRead>,
     pub(in crate::kvm) pending_io_read: Option<PendingIoRead>,
     #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
@@ -144,8 +138,6 @@ pub(in crate::kvm) struct VcpuFileState {
     #[cfg(target_arch = "aarch64")]
     pub(in crate::kvm) initialized: bool,
     #[cfg(target_arch = "aarch64")]
-    pub(in crate::kvm) arm_run_state: Arc<ArmRunState>,
-    #[cfg(target_arch = "aarch64")]
     pub(in crate::kvm) pending_arm_reset: Option<ArmPendingReset>,
 }
 
@@ -156,54 +148,6 @@ pub(in crate::kvm) struct ArmPendingReset {
     pub(in crate::kvm) pc: u64,
     pub(in crate::kvm) arg: u64,
     pub(in crate::kvm) be: bool,
-}
-
-/// Pairs the stop request with a CPU published in the IRQ-off entry window.
-/// Sequential consistency closes the store-buffering race: either the entry
-/// observes the request, or the requester observes and synchronously kicks
-/// the CPU. The ordinary MP state remains protected by CONTROL_FILES.
-#[cfg(target_arch = "aarch64")]
-pub(in crate::kvm) struct ArmRunState {
-    pub(in crate::kvm) entry_blocked: AtomicBool,
-    active_cpu: AtomicUsize,
-    pub(in crate::kvm) wait_queue: WaitQueue,
-}
-
-#[cfg(target_arch = "aarch64")]
-impl ArmRunState {
-    const OUTSIDE: usize = usize::MAX;
-
-    pub(in crate::kvm) fn new(stopped: bool) -> Arc<Self> {
-        Arc::new(Self {
-            entry_blocked: AtomicBool::new(stopped),
-            active_cpu: AtomicUsize::new(Self::OUTSIDE),
-            wait_queue: WaitQueue::new(),
-        })
-    }
-
-    pub(in crate::kvm) fn enter(&self) -> bool {
-        self.active_cpu
-            .store(axvisor_api::arch::current_cpu_id(), Ordering::SeqCst);
-        if self.entry_blocked.load(Ordering::SeqCst) {
-            self.leave();
-            false
-        } else {
-            true
-        }
-    }
-
-    /// Called after architectural host state has been restored.
-    pub(in crate::kvm) fn leave(&self) {
-        self.active_cpu.store(Self::OUTSIDE, Ordering::SeqCst);
-    }
-
-    pub(in crate::kvm) fn kick(&self) -> ax_errno::AxResult {
-        let cpu = self.active_cpu.load(Ordering::SeqCst);
-        if cpu != Self::OUTSIDE {
-            axvisor_api::arch::kick_cpu_wait(cpu)?;
-        }
-        Ok(())
-    }
 }
 
 pub(in crate::kvm) use crate::control::OperationLock as VcpuOperationLock;

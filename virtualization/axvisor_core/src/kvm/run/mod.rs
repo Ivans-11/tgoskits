@@ -39,7 +39,7 @@ use x86::{
 };
 use x86::{update_vcpu_run_interrupt_state, vcpu_run_irq_window_open};
 
-use super::{CONTROL_FILES, ControlFileState, take_control_vcpu_interrupts};
+use super::{CONTROL_FILES, ControlFileState};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::eventfd::is_userspace_eoi_vector;
 #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
@@ -66,6 +66,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         signal_mask,
         irqchip_created,
         pit2_created,
+        runtime,
     ) = {
         let mut control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
@@ -84,6 +85,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let pending_io_read = vcpu.pending_io_read;
         let signal_mask = vcpu.signal_mask.clone();
         let mmap_area = vcpu.mmap_area.clone();
+        let runtime = vcpu.runtime.clone();
         let Some(ControlFileState::Vcpu(vcpu_file_state)) = control_files.get_mut(&control_file)
         else {
             return ax_err!(NotFound);
@@ -105,20 +107,13 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             signal_mask,
             irqchip_created,
             pit2_created,
+            runtime,
         )
     };
     #[cfg(not(target_arch = "x86_64"))]
     let _ = (vm_file, irqchip_created, pit2_created);
 
     let _context_guard = crate::context::bind_current_vcpu_context(vm.id(), vcpu_id);
-    #[cfg(target_arch = "aarch64")]
-    let arm_run_state = {
-        let files = CONTROL_FILES.lock();
-        let Some(ControlFileState::Vcpu(state)) = files.get(&control_file) else {
-            return ax_err!(NotFound);
-        };
-        state.arm_run_state.clone()
-    };
 
     // `exit_reason` is only meaningful when KVM_RUN returns successfully. Do
     // not leave a previous userspace exit visible when this invocation is
@@ -168,7 +163,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         }
         #[cfg(target_arch = "aarch64")]
         apply_pending_arm_reset(control_file, &vcpu)?;
-        for interrupt in take_control_vcpu_interrupts(control_file) {
+        for interrupt in runtime.drain_interrupts() {
             inject_virtual_interrupt(interrupt, &vcpu)?;
         }
         if vcpu_run_interrupted(&mmap_area, &signal_mask)? {
@@ -183,8 +178,8 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let run_result = vm.run_vcpu_raw_control(
             vcpu_id,
             |_, _| Ok(false),
-            || arm_run_state.enter(),
-            || arm_run_state.leave(),
+            || runtime.enter(),
+            || runtime.leave(),
         );
         #[cfg(not(target_arch = "aarch64"))]
         let resolve_fault = |addr, access_flags| {
@@ -255,7 +250,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             }
             #[cfg(target_arch = "x86_64")]
             AxVCpuExitReason::Halt if irqchip_created => wait_for_halted_vcpu_wakeup(
-                control_file,
+                &runtime,
                 &mmap_area,
                 &vm,
                 &vcpu,
@@ -413,7 +408,7 @@ fn wait_until_vcpu_runnable(
                 let Some(ControlFileState::Vcpu(state)) = files.get(&control_file) else {
                     return ax_err!(NotFound);
                 };
-                state.arm_run_state.clone()
+                state.runtime.clone()
             };
             api_control::wait_control_until(
                 run_state.wait_queue.as_raw(),
@@ -453,8 +448,8 @@ pub(in crate::kvm) fn apply_pending_arm_reset(
             // Reset disables both guest timers. Remove stale timer assertions
             // while retaining unrelated device and interprocessor interrupts.
             state
-                .pending_interrupts
-                .retain(|irq| !matches!(irq.vector, 27 | 30));
+                .runtime
+                .retain_interrupts(|irq| !matches!(irq.vector, 27 | 30));
             state.pending_mmio_read = None;
             state.pending_io_read = None;
         } else if state.pending_arm_reset.is_none() {
@@ -463,7 +458,7 @@ pub(in crate::kvm) fn apply_pending_arm_reset(
             // invalidates this vCPU, so userspace must recreate it.
             state.mp_state = abi::KVM_MP_STATE_STOPPED;
         }
-        state.arm_run_state.entry_blocked.store(
+        state.runtime.entry_blocked.store(
             state.mp_state != abi::KVM_MP_STATE_RUNNABLE || state.pending_arm_reset.is_some(),
             core::sync::atomic::Ordering::SeqCst,
         );
@@ -495,7 +490,7 @@ fn set_current_vcpu_mp_state(control_file: api_control::ControlFileId, mp_state:
 
 #[cfg(target_arch = "x86_64")]
 fn wait_for_halted_vcpu_wakeup(
-    control_file: api_control::ControlFileId,
+    runtime: &crate::control::VcpuState,
     mmap_area: &api_control::MmapArea,
     vm: &axvm::AxVMRef,
     vcpu: &axvm::AxVCpuRef,
@@ -503,22 +498,19 @@ fn wait_for_halted_vcpu_wakeup(
     pit2_created: bool,
     signal_mask: &[u8],
 ) -> AxResult {
-    set_current_vcpu_halted(control_file, true)?;
+    runtime.set_halted(true);
     loop {
         if vcpu_run_interrupted(mmap_area, signal_mask)? {
-            set_current_vcpu_halted(control_file, false)?;
+            runtime.set_halted(false);
             return Err(AxErrorKind::Interrupted.into());
         }
         crate::vmm::timer::check_events();
-        if current_vcpu_has_pending_interrupt(control_file)? || vcpu.has_pending_event() {
-            set_current_vcpu_halted(control_file, false)?;
-            return Ok(());
-        }
-        if !current_vcpu_halted(control_file)? {
+        if runtime.wakeup_pending()? || vcpu.has_pending_event() {
+            runtime.set_halted(false);
             return Ok(());
         }
         if inject_in_kernel_device_irqs(vm, vcpu, irqchip_created, pit2_created) {
-            set_current_vcpu_halted(control_file, false)?;
+            runtime.set_halted(false);
             return Ok(());
         }
         axvisor_api::task::yield_now();
@@ -554,32 +546,4 @@ fn current_vcpu_mp_state(control_file: api_control::ControlFileId) -> AxResult<u
         return ax_err!(NotFound);
     };
     Ok(vcpu.mp_state)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn set_current_vcpu_halted(control_file: api_control::ControlFileId, halted: bool) -> AxResult {
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    vcpu.halted = halted;
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-fn current_vcpu_halted(control_file: api_control::ControlFileId) -> AxResult<bool> {
-    let control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    Ok(vcpu.halted)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn current_vcpu_has_pending_interrupt(control_file: api_control::ControlFileId) -> AxResult<bool> {
-    let control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    Ok(!vcpu.pending_interrupts.is_empty())
 }

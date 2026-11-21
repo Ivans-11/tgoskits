@@ -161,6 +161,22 @@ impl DeviceAssignment {
         Ok(())
     }
 
+    /// Attach to a DMA space owned by a userspace container. The container
+    /// retains the space and mappings until every assignment has closed.
+    pub fn attach_to(&mut self, space: DmaSpace) -> AxResult {
+        if self.attached || self.space.is_some() {
+            return Err(AxError::ResourceBusy);
+        }
+        device::attach_device(self.live_device()?, space)?;
+        self.attached = true;
+        Ok(())
+    }
+
+    /// Whether this assignment currently permits access through a DMA space.
+    pub fn is_attached(&self) -> bool {
+        self.attached
+    }
+
     /// Bind an initially masked source to a frontend-provided guest route.
     /// The callback must retain every object that it accesses.
     pub fn bind_interrupt(
@@ -185,6 +201,21 @@ impl DeviceAssignment {
             return Err(AxError::NotFound);
         }
         device::set_irq_mask(irq, masked)
+    }
+
+    /// Revoke a source before replacing its frontend notification endpoint.
+    pub fn unbind_interrupt(&mut self, irq: IrqHandle) -> AxResult {
+        self.live_device()?;
+        if !self.interrupts.contains(&irq) {
+            return Err(AxError::NotFound);
+        }
+        device::unbind_irq(irq)?;
+        self.interrupts.retain(|bound| *bound != irq);
+        self.access
+            .interrupts
+            .lock()
+            .retain(|_, bound| *bound != irq);
+        Ok(())
     }
 
     /// Forward a trapped, host-authorized register read.

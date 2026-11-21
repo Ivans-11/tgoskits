@@ -107,7 +107,11 @@ fn open_memory(context: u64) -> AxResult<ControlFileId> {
     let File::Memory(ref vm, _) = state else {
         return Err(AxError::NoSuchDevice);
     };
-    if vm.removed.load(core::sync::atomic::Ordering::Acquire) {
+    if vm
+        .runtime
+        .removing
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
         return Err(AxError::NoSuchDevice);
     }
     new_file(state)

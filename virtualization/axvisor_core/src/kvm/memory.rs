@@ -71,6 +71,7 @@ pub(in crate::kvm) fn set_user_memory_region(
             region.userspace_addr as usize,
             region.memory_size as usize,
             true,
+            false,
         );
         let release_result = api_control::release_user_address_space(user_address_space);
         let pinned = match pinned_result {
@@ -205,6 +206,7 @@ fn handle_memory_slot_page_fault_inner(
                 snapshot.page_hva,
                 abi::PAGE_SIZE_USIZE,
                 true,
+                false,
             )?,
             true,
         )
@@ -214,6 +216,7 @@ fn handle_memory_slot_page_fault_inner(
             snapshot.page_hva,
             abi::PAGE_SIZE_USIZE,
             true,
+            false,
         ) {
             Ok(pinned) => (pinned, true),
             Err(_) => (
@@ -221,6 +224,7 @@ fn handle_memory_slot_page_fault_inner(
                     snapshot.user_address_space,
                     snapshot.page_hva,
                     abi::PAGE_SIZE_USIZE,
+                    false,
                     false,
                 )?,
                 false,
@@ -314,6 +318,7 @@ fn handle_memory_slot_page_fault_inner(
                 snapshot.page_hva + abi::PAGE_SIZE_USIZE,
                 count * abi::PAGE_SIZE_USIZE,
                 true,
+                false,
             )
         {
             if batch.pages.is_empty() {

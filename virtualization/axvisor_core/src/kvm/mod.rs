@@ -30,7 +30,7 @@ mod vcpu;
 mod vm;
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use abi::public::*;
 use abi::*;
@@ -52,10 +52,7 @@ use state::*;
 use vcpu::*;
 use vm::*;
 
-use crate::vmm::interrupt::{InterruptRoute, VirtualInterrupt};
-
 static REGISTERED: AtomicBool = AtomicBool::new(false);
-static NEXT_CONTROL_FILE_ID: AtomicU64 = AtomicU64::new(1);
 pub(in crate::kvm) static CONTROL_FILES: Mutex<
     BTreeMap<api_control::ControlFileId, ControlFileState>,
 > = Mutex::new(BTreeMap::new());
@@ -64,6 +61,7 @@ const KVM_CONTROL_OPS: ControlOps = ControlOps {
     close,
     ioctl,
     mmap: Some(mmap),
+    io: None,
 };
 
 /// Registers the host-visible KVM-compatible control endpoint.
@@ -184,6 +182,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 let cleanup_vm =
                     if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file) {
                         vm.vcpu_files.remove(&vcpu.vcpu_id);
+                        vm.runtime.remove_vcpu(vcpu.vcpu_id as usize);
                         #[cfg(target_arch = "riscv64")]
                         let has_device = vm.aia_device.is_some();
                         #[cfg(not(target_arch = "riscv64"))]
@@ -261,6 +260,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 Some(ControlFileState::Vm(vm)) => vm,
                 _ => return ax_err!(NotFound),
             };
+            vm.runtime.close();
             let _ = vm.vm.shutdown();
             // KVM-created vCPUs are registered in the VMM task table.  Join
             // and remove them before dropping the VM so their stacks and VM
@@ -297,22 +297,6 @@ fn create_control_file(
     Ok(control_file)
 }
 
-pub(crate) fn queue_control_vcpu_interrupt(route: InterruptRoute) -> AxResult {
-    let mut control_files = CONTROL_FILES.lock();
-    let vcpu_file = control_vcpu_file_by_vm_id(&control_files, route.vm_id, route.vcpu_id)?;
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&vcpu_file) else {
-        return Err(AxError::NotFound);
-    };
-    vcpu.halted = false;
-    vcpu.pending_interrupts.push_back(route.interrupt);
-    #[cfg(target_arch = "aarch64")]
-    let run_state = vcpu.arm_run_state.clone();
-    drop(control_files);
-    #[cfg(target_arch = "aarch64")]
-    run_state.wait_queue.wake_all();
-    Ok(())
-}
-
 /// Changes the recoverable ARM power state without changing AxVM lifecycle.
 #[cfg(target_arch = "aarch64")]
 pub(in crate::kvm) fn set_arm_vcpu_mp_state(
@@ -325,15 +309,15 @@ pub(in crate::kvm) fn set_arm_vcpu_mp_state(
             return ax_err!(NotFound);
         };
         vcpu.mp_state = mp_state;
-        vcpu.halted = false;
+        vcpu.runtime.set_halted(false);
         if mp_state == KVM_MP_STATE_STOPPED {
             vcpu.pending_arm_reset = None;
         }
-        vcpu.arm_run_state.entry_blocked.store(
+        vcpu.runtime.entry_blocked.store(
             mp_state != KVM_MP_STATE_RUNNABLE || vcpu.pending_arm_reset.is_some(),
             Ordering::SeqCst,
         );
-        vcpu.arm_run_state.clone()
+        vcpu.runtime.clone()
     };
     // Never wait for a physical IPI while holding CONTROL_FILES, an operation
     // lock belonging to another vCPU, or an IRQ-off guard.
@@ -372,12 +356,10 @@ pub(in crate::kvm) fn prepare_system_event(
                 && vcpu.vm_file == vm_file
             {
                 vcpu.mp_state = KVM_MP_STATE_STOPPED;
-                vcpu.halted = false;
+                vcpu.runtime.set_halted(false);
                 vcpu.pending_arm_reset = None;
-                vcpu.arm_run_state
-                    .entry_blocked
-                    .store(true, Ordering::SeqCst);
-                run_states.push(vcpu.arm_run_state.clone());
+                vcpu.runtime.entry_blocked.store(true, Ordering::SeqCst);
+                run_states.push(vcpu.runtime.clone());
             }
         }
         run_states
@@ -428,47 +410,13 @@ pub(in crate::kvm) fn queue_arm_cpu_on(
         }
         target.pending_arm_reset = Some(ArmPendingReset { pc, arg, be });
         target.mp_state = KVM_MP_STATE_RUNNABLE;
-        target.halted = false;
+        target.runtime.set_halted(false);
         // Keep entry blocked until the target has consumed the reset.
-        target
-            .arm_run_state
-            .entry_blocked
-            .store(true, Ordering::SeqCst);
-        target.arm_run_state.clone()
+        target.runtime.entry_blocked.store(true, Ordering::SeqCst);
+        target.runtime.clone()
     };
     run_state.wait_queue.wake_all();
     Ok(0)
-}
-
-pub(crate) fn control_vcpu_mask(vm_id: usize) -> Option<usize> {
-    let control_files = CONTROL_FILES.lock();
-    let vm = control_files.iter().find_map(|(_, state)| match state {
-        ControlFileState::Vm(vm) if vm.vm.id() == vm_id => Some(vm),
-        _ => None,
-    })?;
-
-    Some(vm.vcpu_files.keys().fold(0usize, |mask, &vcpu_id| {
-        mask | 1usize.checked_shl(vcpu_id).unwrap_or(usize::MAX)
-    }))
-}
-
-fn control_vcpu_file_by_vm_id(
-    control_files: &BTreeMap<api_control::ControlFileId, ControlFileState>,
-    vm_id: usize,
-    vcpu_id: usize,
-) -> AxResult<api_control::ControlFileId> {
-    let vm_file = control_files
-        .iter()
-        .find_map(|(control_file, state)| match state {
-            ControlFileState::Vm(vm) if vm.vm.id() == vm_id => Some(*control_file),
-            _ => None,
-        })
-        .ok_or(AxError::NotFound)?;
-    match control_files.get(&vm_file) {
-        Some(ControlFileState::Vm(vm)) => vm.vcpu_files.get(&(vcpu_id as u32)).copied(),
-        _ => None,
-    }
-    .ok_or(AxError::NotFound)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
@@ -507,7 +455,7 @@ pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     };
     vcpu.mp_state = mp_state;
     if mp_state == KVM_MP_STATE_RUNNABLE {
-        vcpu.halted = false;
+        vcpu.runtime.set_halted(false);
     }
     Ok(())
 }
@@ -525,29 +473,12 @@ pub(in crate::kvm) fn queue_vcpu_startup_by_id(
     };
     vcpu.pending_startup_entry = Some(entry_point);
     vcpu.mp_state = KVM_MP_STATE_SIPI_RECEIVED;
-    vcpu.halted = false;
+    vcpu.runtime.set_halted(false);
     Ok(())
 }
 
-pub(in crate::kvm) fn take_control_vcpu_interrupts(
-    control_file: api_control::ControlFileId,
-) -> Vec<VirtualInterrupt> {
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
-        return Vec::new();
-    };
-    if !vcpu.pending_interrupts.is_empty() {
-        vcpu.halted = false;
-    }
-    vcpu.pending_interrupts.drain(..).collect()
-}
-
 fn next_control_file_id() -> AxResult<api_control::ControlFileId> {
-    let control_file = NEXT_CONTROL_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    if control_file == 0 {
-        return ax_err!(OutOfRange);
-    }
-    Ok(control_file)
+    crate::control::next_file_id()
 }
 
 fn control_file_state(control_file: api_control::ControlFileId) -> AxResult<ControlFileState> {

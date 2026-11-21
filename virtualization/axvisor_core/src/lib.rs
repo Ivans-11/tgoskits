@@ -58,4 +58,6 @@ pub mod device;
 pub mod kvm;
 #[cfg(feature = "shell")]
 pub mod shell;
+#[cfg(all(feature = "vfio", target_arch = "x86_64"))]
+pub mod vfio;
 pub mod vmm;

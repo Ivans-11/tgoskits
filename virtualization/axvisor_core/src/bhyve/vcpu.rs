@@ -16,7 +16,6 @@ use super::{
 
 #[derive(Default)]
 pub(super) struct State {
-    pub(super) active: AtomicBool,
     paused: AtomicBool,
     suspend: AtomicU32,
     halt_exit: AtomicBool,
@@ -29,9 +28,7 @@ pub(super) fn state_ioctl(vm: &Vm, command: u32, address: usize) -> AxResult<boo
             cpu(vm, u32::from_le_bytes(abi::read::<4>(address)?))?;
             match command {
                 abi::ACTIVATE_CPU => {
-                    if vm.cpu_state.active.swap(true, Ordering::AcqRel) {
-                        return Err(AxError::AlreadyExists);
-                    }
+                    vm.vcpu_runtime.activate()?;
                 }
                 abi::SUSPEND_CPU => vm.cpu_state.paused.store(true, Ordering::Release),
                 _ => vm.cpu_state.paused.store(false, Ordering::Release),
@@ -50,7 +47,7 @@ pub(super) fn state_ioctl(vm: &Vm, command: u32, address: usize) -> AxResult<boo
         abi::GET_CPUS => {
             let data = abi::read::<16>(address)?;
             let present = match abi::u32_at(&data, 0) {
-                0 => vm.cpu_state.active.load(Ordering::Acquire),
+                0 => vm.vcpu_runtime.active(),
                 1 => vm.cpu_state.paused.load(Ordering::Acquire),
                 2 => false,
                 _ => return Err(AxError::InvalidInput),
@@ -213,7 +210,7 @@ fn run(vm: &Vm, address: usize) -> AxResult {
     let cpuset_address = abi::u64_at(&input, 8) as usize;
     let cpuset_len = abi::u64_at(&input, 16) as usize;
     let destination = abi::u64_at(&input, 24) as usize;
-    if !vm.cpu_state.active.load(Ordering::Acquire) {
+    if !vm.vcpu_runtime.active() {
         return Err(AxError::BadState);
     }
     if !vm.machine.running() {
@@ -225,7 +222,7 @@ fn run(vm: &Vm, address: usize) -> AxResult {
     }
     let mut halted = false;
     loop {
-        if vm.removed.load(Ordering::Acquire) {
+        if vm.runtime.removing.load(Ordering::Acquire) {
             return Err(AxError::NoSuchDevice);
         }
         if control::current_thread_has_pending_signal(&[])? {
@@ -247,7 +244,7 @@ fn run(vm: &Vm, address: usize) -> AxResult {
         }
         crate::vmm::timer::check_events();
         crate::vmm::devices::x86::inject_due_pit_irq_for_control(&vm.machine, &vcpu, 2);
-        let pending = core::mem::take(&mut *vm.pending_interrupts.lock());
+        let pending = vm.vcpu_runtime.take_interrupts();
         let interrupt_pending = !pending.is_empty();
         for interrupt in pending {
             crate::vmm::interrupt::inject_virtual_interrupt(interrupt, &vcpu)?;

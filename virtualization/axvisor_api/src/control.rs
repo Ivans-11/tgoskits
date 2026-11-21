@@ -25,7 +25,7 @@ use ax_errno::AxResult;
 
 use crate::memory::PhysAddr;
 
-/// A core-provided identifier for one open control file.
+/// A core-provided identifier, unique across all control frontends.
 pub type ControlFileId = u64;
 
 /// A userspace file descriptor returned to the current userspace task.
@@ -137,6 +137,16 @@ pub struct PinnedPages {
     pub pages: Vec<PhysAddr>,
 }
 
+/// Optional positioned byte I/O for a control file. The host copies between
+/// userspace and these buffers; the frontend interprets offsets and contents.
+#[derive(Clone, Copy)]
+pub struct FileIoOps {
+    /// Reads bytes at a file offset in sleepable task context.
+    pub read: fn(ControlFileId, u64, &mut [u8]) -> AxResult<usize>,
+    /// Writes bytes at a file offset in sleepable task context.
+    pub write: fn(ControlFileId, u64, &[u8]) -> AxResult<usize>,
+}
+
 /// Operations implemented by `axvisor-core` for one control file.
 #[derive(Clone, Copy)]
 pub struct ControlOps {
@@ -153,6 +163,8 @@ pub struct ControlOps {
     pub ioctl: fn(ControlFileId, u32, usize) -> AxResult<isize>,
     /// Selects backing storage; `None` means this file cannot be mapped.
     pub mmap: Option<MmapCallback>,
+    /// Optional byte I/O; `None` preserves ioctl/mmap-only file behavior.
+    pub io: Option<FileIoOps>,
 }
 
 /// The host control endpoint API required by AxVisor.
@@ -200,6 +212,12 @@ pub trait ControlIf {
     fn write_user_fd_ref(user_fd_ref: UserFdRefId, buf: &[u8]) -> AxResult<usize>;
 
     /// Reads raw bytes from a previously retained userspace fd.
+    ///
+    /// For a core frontend file, this internal operation returns its
+    /// [`ControlFileId`] as eight native-endian bytes without changing the file
+    /// offset. The buffer must have room for that value. This does not change
+    /// userspace `read` semantics. Other files retain their normal read behavior,
+    /// including consuming eventfd counts.
     ///
     /// If the fd is not currently readable, the host may wait for a readable
     /// event or return [`ax_errno::AxErrorKind::WouldBlock`]. The caller must
@@ -291,11 +309,17 @@ pub trait ControlIf {
     /// is called with the returned handle. The host may implement this by pinning
     /// frames, holding VM object references, or any other mechanism with the same
     /// lifetime semantics.
+    ///
+    /// With `dma`, the host must additionally validate long-term DMA suitability
+    /// and keep the backing stable across migration and COW. Unsupported hosts
+    /// must reject DMA requests. The caller must revoke device access before
+    /// releasing the pages.
     fn pin_user_pages(
         user_address_space: UserAddressSpaceId,
         addr: usize,
         len: usize,
         writable: bool,
+        dma: bool,
     ) -> AxResult<PinnedPages>;
 
     /// Pins pages directly from a mappable object without a user mapping.

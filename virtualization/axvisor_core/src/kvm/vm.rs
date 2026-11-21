@@ -12,28 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    format,
-    sync::Arc,
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, format, sync::Arc, vec, vec::Vec};
 
 use ax_errno::{AxError, AxResult, ax_err};
 use axvisor_api::control as api_control;
 use axvm::{AxVM, VMStatus, config::AxVMConfig};
 
-#[cfg(target_arch = "aarch64")]
-use super::state::ArmRunState;
 use super::{
     CONTROL_FILES, ControlFileState, KVM_CONTROL_OPS, VcpuFileState, VcpuOperationLock,
     VmFileState, next_control_file_id,
 };
-use crate::kvm::{
-    abi::raw as abi,
-    util::read_u32_user,
-    vcpu::{default_fpu, default_xcrs},
+use crate::{
+    control::VmState,
+    kvm::{
+        abi::raw as abi,
+        util::read_u32_user,
+        vcpu::{default_fpu, default_xcrs},
+    },
 };
 
 pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
@@ -48,6 +43,7 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
     CONTROL_FILES.lock().insert(
         control_file,
         ControlFileState::Vm(VmFileState {
+            runtime: VmState::new(vm_id, false)?,
             vm,
             vm_fd_closed: false,
             #[cfg(target_arch = "riscv64")]
@@ -123,6 +119,7 @@ pub(in crate::kvm) fn create_vcpu_file(
         } else {
             abi::KVM_MP_STATE_STOPPED
         };
+        let runtime = vm.runtime.add_vcpu(vcpu_id as usize, true, false)?;
         vm.vcpu_files.insert(vcpu_id, vcpu_file);
         control_files.insert(
             vcpu_file,
@@ -131,8 +128,7 @@ pub(in crate::kvm) fn create_vcpu_file(
                 vcpu_id,
                 mmap_area,
                 mp_state,
-                halted: false,
-                pending_interrupts: VecDeque::new(),
+                runtime,
                 pending_mmio_read: None,
                 pending_io_read: None,
                 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
@@ -148,8 +144,6 @@ pub(in crate::kvm) fn create_vcpu_file(
                 operation_lock: VcpuOperationLock::new(),
                 #[cfg(target_arch = "aarch64")]
                 initialized: false,
-                #[cfg(target_arch = "aarch64")]
-                arm_run_state: ArmRunState::new(true),
                 #[cfg(target_arch = "aarch64")]
                 pending_arm_reset: None,
             }),
@@ -386,6 +380,7 @@ fn remove_vcpu_file(vcpu_file: api_control::ControlFileId) -> AxResult {
     };
     if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file) {
         vm.vcpu_files.remove(&vcpu.vcpu_id);
+        vm.runtime.remove_vcpu(vcpu.vcpu_id as usize);
     }
     drop(vcpu.mmap_area);
     Ok(())

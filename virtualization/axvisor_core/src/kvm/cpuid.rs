@@ -336,7 +336,7 @@ fn host_cpuid(function: u32, index: u32) -> KvmCpuidEntry2 {
             const CPUID_MTRR: u32 = 1 << 12;
             const CPUID_MCA: u32 = 1 << 14;
             entry.ecx |= 1 << 31; // hypervisor present
-            entry.ecx &= !(1 << 5); // VMX
+            entry.ecx &= !((1 << 5) | (1 << 6)); // VMX, SMX
             #[cfg(feature = "svm")]
             {
                 entry.ecx &= !((1 << 17) | (1 << 24)); // PCID, TSC deadline
@@ -347,6 +347,9 @@ fn host_cpuid(function: u32, index: u32) -> KvmCpuidEntry2 {
             entry.ecx &= !(1 << 2); // SVM
         }
         7 => {
+            if index == 0 {
+                entry.edx &= !(1 << 19); // Architectural LBR MSRs are not virtualized.
+            }
             #[cfg(feature = "svm")]
             if index == 0 {
                 const UNSUPPORTED_EBX: u32 = (1 << 0) | (1 << 7) | (1 << 20);

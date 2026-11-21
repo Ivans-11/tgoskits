@@ -158,11 +158,7 @@ impl api_vmm::VmmIf for VmmIfImpl {
 
     fn active_vcpus(vm_id: VMId) -> Option<usize> {
         #[cfg(feature = "control")]
-        if let Some(mask) = crate::kvm::control_vcpu_mask(vm_id) {
-            return Some(mask);
-        }
-        #[cfg(all(target_arch = "x86_64", feature = "bhyve"))]
-        if let Some(mask) = crate::bhyve::active_vcpus(vm_id) {
+        if let Some(mask) = crate::control::active_vcpus(vm_id) {
             return Some(mask);
         }
 
