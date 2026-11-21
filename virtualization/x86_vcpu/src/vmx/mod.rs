@@ -25,6 +25,8 @@ mod vmcs;
 
 use ax_errno::ax_err_type;
 use axaddrspace::HostPhysAddr;
+#[cfg(all(feature = "posted-interrupt", feature = "device"))]
+pub use posted_interrupt::hardware_interrupt_target;
 #[cfg(feature = "posted-interrupt")]
 pub use posted_interrupt::try_post_interrupt;
 use x86::vmx::vmcs::control::{PrimaryControls, SecondaryControls};

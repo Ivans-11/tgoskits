@@ -401,6 +401,19 @@ impl VmxVcpu {
 
     /// Run the guest. It returns when a vm-exit happens and returns the vm-exit if it cannot be handled by this [`VmxVcpu`] itself.
     fn inner_run(&mut self, first_entry: bool) -> Option<VmxExitInfo> {
+        #[cfg(all(feature = "posted-interrupt", feature = "device"))]
+        if let Some(pending) = self
+            .posted_interrupt
+            .as_ref()
+            .and_then(|pi| pi.take_hardware_pending())
+        {
+            for (word, mut bits) in pending.into_iter().enumerate() {
+                while bits != 0 {
+                    self.queue_event((word * 64 + bits.trailing_zeros() as usize) as u8, None);
+                    bits &= bits - 1;
+                }
+            }
+        }
         if self.transition_msrs_dirty {
             self.update_transition_msrs().unwrap();
         }
@@ -821,11 +834,14 @@ impl VmxVcpu {
             dtables::sgdt(&mut gdtp);
             dtables::sidt(&mut idtp);
         }
+        let (host_cr3_frame, host_cr3_flags) = Cr3::read_raw();
         let current = VmcsHostState {
             pat: Msr::IA32_PAT.read(),
             efer: Msr::IA32_EFER.read(),
             cr0: Cr0::read_raw() as _,
-            cr3: Cr3::read_raw().0.start_address().as_u64() as _,
+            // Preserve the host PCID (or PWT/PCD when PCIDE is clear). Loading
+            // only the page-table address breaks the host's TLB bookkeeping.
+            cr3: (host_cr3_frame.start_address().as_u64() | u64::from(host_cr3_flags)) as _,
             cr4: Cr4::read_raw() as _,
             es: x86::segmentation::es().bits(),
             cs: x86::segmentation::cs().bits(),
@@ -2639,6 +2655,14 @@ impl AxArchVCpu for VmxVcpu {
     }
 
     fn has_pending_event(&self) -> bool {
+        #[cfg(all(feature = "posted-interrupt", feature = "device"))]
+        if self
+            .posted_interrupt
+            .as_ref()
+            .is_some_and(|pi| pi.has_hardware_pending())
+        {
+            return true;
+        }
         // PI may already have moved an interrupt from PIR into virtual IRR.
         // It no longer appears in pending_events, but must prevent HLT sleep.
         !self.pending_events.is_empty() || self.vlapic.has_pending_interrupt()

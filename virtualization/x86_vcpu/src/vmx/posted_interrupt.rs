@@ -9,7 +9,12 @@ use alloc::{
     sync::{Arc, Weak},
 };
 mod descriptor;
+#[cfg(feature = "device")]
+mod hardware;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+#[cfg(feature = "device")]
+pub use hardware::hardware_interrupt_target;
 mod publication;
 use ax_errno::AxResult;
 use ax_kspin::SpinNoIrq;
@@ -34,10 +39,15 @@ pub(super) struct PostedInterrupt {
     eligible: [AtomicU64; 4],
     touched: AtomicBool,
     needs_sync: AtomicBool,
+    #[cfg(feature = "device")]
+    hardware: hardware::Hardware,
 }
 
 // A host-root notification needs only EOI. Host dispatch owns that operation.
-fn notification_handler(_vector: usize) {}
+fn notification_handler(_vector: usize) {
+    #[cfg(feature = "device")]
+    hardware::notify();
+}
 
 pub(super) fn available() -> bool {
     // x2APIC writes are atomic; an xAPIC ICR pair would need host serialization.
@@ -63,6 +73,8 @@ impl PostedInterrupt {
             eligible: [const { AtomicU64::new(0) }; 4],
             touched: AtomicBool::new(false),
             needs_sync: AtomicBool::new(false),
+            #[cfg(feature = "device")]
+            hardware: hardware::Hardware::new(),
         });
         unsafe {
             result
@@ -93,12 +105,19 @@ impl PostedInterrupt {
             slot.store(value, Ordering::Relaxed);
         }
         self.publication.enter();
+        #[cfg(feature = "device")]
+        self.hardware.enter(self.descriptor(), apic_id);
     }
 
-    /// Stop senders before migration or host IRQs become enabled. Reclaim bits
-    /// hardware did not consume (e.g. entry failed or raced with an exit).
+    /// Stop software senders before migration or host IRQs become enabled.
+    /// Reclaim unconsumed bits while device producers may still update PIR.
     pub(super) fn exit(&self) -> Option<[u64; 4]> {
         self.publication.exit();
+        #[cfg(feature = "device")]
+        if self.hardware.active() || self.descriptor().has_pending() {
+            self.needs_sync.store(true, Ordering::Relaxed);
+            self.touched.store(true, Ordering::Relaxed);
+        }
         if !self.needs_sync.load(Ordering::Relaxed) {
             return None;
         }
@@ -109,11 +128,24 @@ impl PostedInterrupt {
         Some(self.descriptor().reclaim())
     }
 
-    /// No sender is admitted between exit and the next enter. Continue ISR
-    /// synchronization until hardware has drained both virtual IRR and ISR.
+    /// Continue ISR synchronization until virtual IRR and ISR are drained.
+    /// Device arrivals remain pending in PIR until entry or exit consumes them.
     pub(super) fn finish_sync(&self, interrupt_status: u16) {
         self.needs_sync
             .store(interrupt_status != 0, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "device")]
+    pub(super) fn has_hardware_pending(&self) -> bool {
+        self.descriptor().has_pending()
+    }
+
+    /// Consume arrivals during host execution before preparing VM entry.
+    #[cfg(feature = "device")]
+    pub(super) fn take_hardware_pending(&self) -> Option<[u64; 4]> {
+        self.descriptor()
+            .has_pending()
+            .then(|| self.descriptor().reclaim())
     }
 }
 

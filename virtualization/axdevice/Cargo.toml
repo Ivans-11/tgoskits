@@ -35,6 +35,7 @@ riscv_vplic = { workspace = true }
 riscv_vcpu = { workspace = true, features = ["aia"], optional = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_vlapic = { workspace = true }
+axvisor_api = { workspace = true }
 
 [dev-dependencies]
 axvisor_api = { workspace = true }

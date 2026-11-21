@@ -30,6 +30,9 @@ static IOAPIC_IRQ_HANDLERS: [AtomicBool; IOAPIC_GSI_COUNT] =
     [const { AtomicBool::new(false) }; IOAPIC_GSI_COUNT];
 
 pub fn forward_passthrough_irq_from_vmexit(vm: &VMRef, vcpu: &VCpuRef, vector: usize) {
+    if cfg!(feature = "device") {
+        return;
+    }
     if !ioapic_irq_handler_registered(vector) {
         forward_passthrough_irq(vm, vcpu.id(), vector);
     }
@@ -165,6 +168,9 @@ pub fn drain_pending_ioapic_irqs(vm: &VMRef, vcpu: &VCpuRef) {
 }
 
 pub fn enable_ioapic_irq_forwarding(vm: &VMRef, vcpu: &VCpuRef) {
+    if cfg!(feature = "device") {
+        return;
+    }
     if vm.interrupt_mode() != VMInterruptMode::Passthrough {
         return;
     }
@@ -246,6 +252,13 @@ fn forward_passthrough_irq(vm: &VMRef, current_vcpu_id: usize, vector: usize) ->
         guest_irq.level_triggered,
         guest_irq.target_vcpu,
     )
+}
+
+#[cfg(feature = "device")]
+pub(super) fn inject_assigned_gsi(vm: &VMRef, gsi: usize) {
+    if let Some(irq) = vm.get_devices().x86_ioapic_assert_gsi(gsi) {
+        deliver_ioapic_interrupt(vm, 0, irq.vector, irq.level_triggered, irq.target_vcpu);
+    }
 }
 
 fn ioapic_gsi_targets_current_vcpu(vm: &VMRef, vcpu: &VCpuRef, gsi: usize) -> bool {

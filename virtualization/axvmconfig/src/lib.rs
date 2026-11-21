@@ -237,6 +237,7 @@ impl EmulatedDeviceType {
             0x23 => EmulatedDeviceType::X86IoApic,
             0x24 => EmulatedDeviceType::X86Pit,
             0x30 => EmulatedDeviceType::PPPTGlobal,
+            0x31 => EmulatedDeviceType::RiscvImsic,
             0xE1 => EmulatedDeviceType::VirtioBlk,
             0xE2 => EmulatedDeviceType::VirtioNet,
             0xE3 => EmulatedDeviceType::VirtioConsole,
@@ -288,6 +289,44 @@ pub struct PassThroughDeviceConfig {
     /// The IRQ (Interrupt Request) ID of the device.
     #[serde(default)]
     pub irq_id: usize,
+    /// Host device and resource selection when `device` is enabled.
+    #[serde(default)]
+    pub assignment: Option<DeviceAssignmentConfig>,
+}
+
+/// Device locator resolved by the host when opening an assignment.
+#[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceIdConfig {
+    /// PCI address: [segment, bus, device, function].
+    Pci([u16; 4]),
+    /// Absolute path in the host's device tree.
+    DeviceTreePath(String),
+    /// Absolute path in the host's ACPI namespace.
+    AcpiPath(String),
+    /// Identifier defined by the host's device manager.
+    Host(String),
+}
+
+/// Binding of a configured guest MMIO window to an authorized host resource.
+#[cfg_attr(all(feature = "std", any(windows, unix)), derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceAssignmentConfig {
+    /// Host device locator, independent of the guest-visible device name.
+    pub id: DeviceIdConfig,
+    /// Resource index returned by DeviceIf (for Linux PCI devices, a BAR).
+    pub region: u32,
+    /// Optional physical source, routed to the enclosing guest `irq_id`, or
+    /// to the guest-programmed MSI when `guest_pci` is present.
+    /// Specify it on only one window for each source.
+    #[serde(default)]
+    pub irq_source: Option<u32>,
+    /// Present this resource as a BAR of a guest PCI function [bus, device, function].
+    /// Repeat the same address on all windows of one device. The current frontend
+    /// supports bus zero, single-function endpoints and one MSI source.
+    #[serde(default)]
+    pub guest_pci: Option<[u8; 3]>,
 }
 
 /// A part of `AxVMConfig`, which represents the configuration of a pass-through address for a virtual machine.

@@ -30,6 +30,12 @@ mod vm;
 pub mod config;
 
 pub use vm::{AxVCpuRef, AxVM, AxVMRef, VMMemoryRegion, VMStatus};
+#[cfg(all(
+    target_arch = "x86_64",
+    feature = "posted-interrupt",
+    feature = "device"
+))]
+pub use x86_vcpu::hardware_interrupt_target;
 #[cfg(all(target_arch = "x86_64", feature = "posted-interrupt"))]
 pub use x86_vcpu::try_post_interrupt;
 

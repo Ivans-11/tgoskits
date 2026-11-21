@@ -52,6 +52,8 @@ pub mod boot;
 pub mod context;
 #[cfg(feature = "control")]
 mod control;
+#[cfg(feature = "device")]
+pub mod device;
 #[cfg(feature = "control")]
 pub mod kvm;
 #[cfg(feature = "shell")]

@@ -27,10 +27,36 @@ impl Descriptor {
         self.control.fetch_or(ON, Ordering::SeqCst) & ON == 0
     }
 
-    /// Called after hardware execution and senders have both stopped.
+    /// Called with guest execution stopped. Clearing ON before draining PIR
+    /// lets a concurrent IOMMU producer notify again. Atomic swaps consume
+    /// each bit either here or on the next entry, without overwriting arrivals.
     pub(super) fn reclaim(&self) -> [u64; 4] {
         self.control.fetch_and(!ON, Ordering::SeqCst);
         core::array::from_fn(|i| self.pir[i].swap(0, Ordering::SeqCst))
+    }
+
+    #[cfg(feature = "device")]
+    pub(super) fn set_destination(&self, apic_id: u32) {
+        let _ = self
+            .control
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+                Some((old & 0xffff_ffff) | ((apic_id as u64) << 32))
+            });
+    }
+
+    #[cfg(feature = "device")]
+    pub(super) fn has_pending(&self) -> bool {
+        self.pir.iter().any(|word| word.load(Ordering::SeqCst) != 0)
+    }
+
+    #[cfg(feature = "device")]
+    pub(super) fn clear_notification(&self) {
+        self.control.fetch_and(!ON, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "device")]
+    pub(super) fn arm_notification(&self) {
+        self.control.fetch_or(ON, Ordering::SeqCst);
     }
 }
 
@@ -66,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_senders_preserve_every_vector() {
+    fn concurrent_senders_and_drain_preserve_every_vector() {
         let d = std::sync::Arc::new(Descriptor::new(0xf2));
         let threads: std::vec::Vec<_> = (0..4)
             .map(|word| {
@@ -74,13 +100,44 @@ mod tests {
                 std::thread::spawn(move || {
                     for bit in 0..64 {
                         d.post((word * 64 + bit) as u8);
+                        std::thread::yield_now();
                     }
                 })
             })
             .collect();
+        let mut seen = [0; 4];
+        while threads.iter().any(|thread| !thread.is_finished()) {
+            for (seen, bits) in seen.iter_mut().zip(d.reclaim()) {
+                *seen |= bits;
+            }
+        }
         for thread in threads {
             thread.join().unwrap();
         }
-        assert_eq!(d.reclaim(), [u64::MAX; 4]);
+        for (seen, bits) in seen.iter_mut().zip(d.reclaim()) {
+            *seen |= bits;
+        }
+        assert_eq!(seen, [u64::MAX; 4]);
+    }
+
+    #[cfg(feature = "device")]
+    #[test]
+    fn migration_preserves_notification_and_pending_bits() {
+        let d = Descriptor::new(0xf2);
+        d.post(69);
+        d.set_destination(0x1234);
+        assert_eq!(
+            d.control.load(Ordering::SeqCst),
+            (0x1234 << 32) | (0xf2 << 16) | ON
+        );
+        d.clear_notification();
+        assert!(d.has_pending());
+        d.set_destination(0x5678);
+        d.arm_notification();
+        assert_eq!(d.reclaim(), [0, 1 << 5, 0, 0]);
+        assert_eq!(
+            d.control.load(Ordering::SeqCst),
+            (0x5678 << 32) | (0xf2 << 16)
+        );
     }
 }

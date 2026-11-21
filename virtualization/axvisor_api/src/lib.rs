@@ -143,7 +143,7 @@
 //!
 
 #![no_std]
-#![cfg_attr(feature = "control", feature(linkage))]
+#![cfg_attr(any(feature = "control", feature = "device"), feature(linkage))]
 
 extern crate alloc;
 
@@ -153,6 +153,8 @@ pub mod arch;
 pub mod console;
 #[cfg(feature = "control")]
 pub mod control;
+#[cfg(feature = "device")]
+pub mod device;
 #[cfg(feature = "fs")]
 pub mod fs;
 pub mod host;

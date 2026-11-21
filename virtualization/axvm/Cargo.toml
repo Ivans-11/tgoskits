@@ -10,6 +10,7 @@ keywords = ["vm", "hypervisor", "arceos"]
 license = "Apache-2.0"
 
 [features]
+device = ["axvisor_api/device", "x86_vcpu/device"]
 aia = ["axdevice/aia", "riscv_vcpu/aia"]
 default = ["vmx"]
 vmx = ["axaddrspace/vmx", "x86_vcpu/vmx"]

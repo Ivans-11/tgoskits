@@ -230,6 +230,20 @@ impl AxVM {
     /// Returns an error if the configuration is invalid.
     /// The VM is not started until `boot` is called.
     pub fn new(config: AxVMConfig) -> AxResult<AxVMRef> {
+        if cfg!(feature = "device") {
+            if !config.pass_through_addresses().is_empty() {
+                return ax_err!(
+                    InvalidInput,
+                    "device requires authorized resources, not raw passthrough addresses"
+                );
+            }
+        } else if config
+            .pass_through_devices()
+            .iter()
+            .any(|d| d.assignment.is_some())
+        {
+            return ax_err!(Unsupported, "device assignments require the device feature");
+        }
         let address_space = AddrSpace::new_empty(
             crate::vcpu::max_guest_page_table_levels(),
             GuestPhysAddr::from(VM_ASPACE_BASE),
@@ -274,7 +288,34 @@ impl AxVM {
 
     /// Sets up the VM before booting.
     pub fn init(&self) -> AxResult {
+        self.init_inner(Vec::new(), Vec::new())
+    }
+
+    /// Initializes authorized MMIO windows and frontend-owned port devices.
+    #[cfg(feature = "device")]
+    pub fn init_with_assigned_devices(
+        &self,
+        mmio: Vec<Arc<dyn axdevice_base::BaseMmioDeviceOps>>,
+        ports: Vec<Arc<dyn axdevice_base::BasePortDeviceOps>>,
+    ) -> AxResult {
+        self.init_inner(mmio, ports)
+    }
+
+    fn init_inner(
+        &self,
+        mmio_devices: Vec<Arc<dyn axdevice_base::BaseMmioDeviceOps>>,
+        port_devices: Vec<Arc<dyn axdevice_base::BasePortDeviceOps>>,
+    ) -> AxResult {
         let mut inner_mut = self.inner_mut.lock();
+
+        if cfg!(feature = "device")
+            && mmio_devices.len() != inner_mut.config.pass_through_devices().len()
+        {
+            return ax_err!(
+                PermissionDenied,
+                "configured devices require DeviceIf preparation"
+            );
+        }
 
         let dtb_addr = inner_mut.config.image_config().dtb_load_gpa;
         let vcpu_id_pcpu_sets = inner_mut.config.phys_cpu_ls.get_vcpu_affinities_pcpu_ids();
@@ -324,40 +365,40 @@ impl AxVM {
             )?));
         }
 
-        let mut pt_dev_region = Vec::new();
-        for pt_device in inner_mut.config.pass_through_devices() {
-            trace!(
-                "PT dev {:?} region: [{:#x}~{:#x}] -> [{:#x}~{:#x}]",
-                pt_device.name,
-                pt_device.base_gpa,
-                pt_device.base_gpa + pt_device.length,
-                pt_device.base_hpa,
-                pt_device.base_hpa + pt_device.length
-            );
-            // Align the base address and length to 4K boundaries.
-            pt_dev_region.push((
-                align_down_4k(pt_device.base_gpa),
-                align_up_4k(pt_device.length),
-            ));
-        }
+        if !cfg!(feature = "device") {
+            let mut pt_dev_region = Vec::new();
+            for pt_device in inner_mut.config.pass_through_devices() {
+                trace!(
+                    "PT dev {:?} region: [{:#x}~{:#x}] -> [{:#x}~{:#x}]",
+                    pt_device.name,
+                    pt_device.base_gpa,
+                    pt_device.base_gpa + pt_device.length,
+                    pt_device.base_hpa,
+                    pt_device.base_hpa + pt_device.length
+                );
+                // Align the base address and length to 4K boundaries.
+                pt_dev_region.push((
+                    align_down_4k(pt_device.base_gpa),
+                    align_up_4k(pt_device.length),
+                ));
+            }
 
-        for pt_addr in inner_mut.config.pass_through_addresses() {
-            debug!(
-                "PT addr region: [{:#x}~{:#x}]",
-                pt_addr.base_gpa,
-                pt_addr.base_gpa + pt_addr.length,
-            );
-            // Align the base address and length to 4K boundaries.
-            pt_dev_region.push((align_down_4k(pt_addr.base_gpa), align_up_4k(pt_addr.length)));
-        }
+            for pt_addr in inner_mut.config.pass_through_addresses() {
+                debug!(
+                    "PT addr region: [{:#x}~{:#x}]",
+                    pt_addr.base_gpa,
+                    pt_addr.base_gpa + pt_addr.length,
+                );
+                // Align the base address and length to 4K boundaries.
+                pt_dev_region.push((align_down_4k(pt_addr.base_gpa), align_up_4k(pt_addr.length)));
+            }
 
-        pt_dev_region.sort_by_key(|(gpa, _)| *gpa);
+            pt_dev_region.sort_by_key(|(gpa, _)| *gpa);
 
-        // Merge overlapping regions.
-        let pt_dev_region =
-            pt_dev_region
-                .into_iter()
-                .fold(Vec::<(usize, usize)>::new(), |mut acc, (gpa, len)| {
+            // Merge overlapping regions.
+            let pt_dev_region = pt_dev_region.into_iter().fold(
+                Vec::<(usize, usize)>::new(),
+                |mut acc, (gpa, len)| {
                     if let Some(last) = acc.last_mut() {
                         if last.0 + last.1 >= gpa {
                             // Merge with the last region.
@@ -369,18 +410,20 @@ impl AxVM {
                         acc.push((gpa, len));
                     }
                     acc
-                });
+                },
+            );
 
-        for (gpa, len) in &pt_dev_region {
-            inner_mut.address_space.map_linear(
-                GuestPhysAddr::from(*gpa),
-                HostPhysAddr::from(*gpa),
-                *len,
-                MappingFlags::DEVICE
-                    | MappingFlags::READ
-                    | MappingFlags::WRITE
-                    | MappingFlags::USER,
-            )?;
+            for (gpa, len) in &pt_dev_region {
+                inner_mut.address_space.map_linear(
+                    GuestPhysAddr::from(*gpa),
+                    HostPhysAddr::from(*gpa),
+                    *len,
+                    MappingFlags::DEVICE
+                        | MappingFlags::READ
+                        | MappingFlags::WRITE
+                        | MappingFlags::USER,
+                )?;
+            }
         }
 
         #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
@@ -395,12 +438,18 @@ impl AxVM {
             }
         }
 
-        #[cfg_attr(not(target_arch = "aarch64"), expect(unused_mut))]
         let mut devices = axdevice::AxVmDevices::new(AxVmDeviceConfig {
             interrupt_router: Some(Arc::new(AxVmInterruptRouter { vm_id: self.id() })),
             vcpu_topology: inner_mut.config.vcpu_topology(),
             emu_configs: inner_mut.config.emu_devices().to_vec(),
         });
+
+        for device in mmio_devices {
+            devices.add_mmio_dev(device);
+        }
+        for device in port_devices {
+            devices.add_port_dev(device);
+        }
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -502,14 +551,15 @@ impl AxVM {
             let setup_config = <AxArchVCpuImpl as axvcpu::AxArchVCpu>::SetupConfig::default();
             #[cfg(target_arch = "x86_64")]
             let setup_config = crate::vcpu::AxVCpuSetupConfig {
-                intercept_all_io: inner_mut.config.host_controlled(),
+                intercept_all_io: cfg!(feature = "device") || inner_mut.config.host_controlled(),
                 intercept_legacy_serial: !inner_mut.config.host_controlled(),
                 intercept_com1: inner_mut
                     .config
                     .emu_devices()
                     .iter()
                     .any(|dev| dev.emu_type == axvmconfig::EmulatedDeviceType::Console),
-                filter_pci_config: !inner_mut.config.host_controlled()
+                filter_pci_config: !cfg!(feature = "device")
+                    && !inner_mut.config.host_controlled()
                     && !inner_mut.config.pci_intx_routes().is_empty(),
                 pci_config_max_bus: inner_mut
                     .config
@@ -991,7 +1041,7 @@ impl AxVM {
                         continue;
                     }
                     AxVCpuExitReason::IoRead { port, width } => {
-                        let val = self.get_devices().handle_port_read(port, width)?;
+                        let val = self.read_guest_port(port, width)?;
                         #[cfg(not(target_arch = "riscv64"))]
                         vcpu.set_gpr(0, val); // The target is always eax/ax/al, todo: handle access_width correctly
 
@@ -1001,8 +1051,7 @@ impl AxVM {
                         continue;
                     }
                     AxVCpuExitReason::IoWrite { port, width, data } => {
-                        self.get_devices()
-                            .handle_port_write(port, width, data as usize)?;
+                        self.write_guest_port(port, width, data as usize)?;
                         continue;
                     }
                     AxVCpuExitReason::SysRegRead { addr, reg } => {
@@ -1077,13 +1126,12 @@ impl AxVM {
                         continue;
                     }
                     AxVCpuExitReason::IoRead { port, width } => {
-                        let val = self.get_devices().handle_port_read(port, width)?;
+                        let val = self.read_guest_port(port, width)?;
                         vcpu.set_gpr(0, val);
                         continue;
                     }
                     AxVCpuExitReason::IoWrite { port, width, data } => {
-                        self.get_devices()
-                            .handle_port_write(port, width, data as usize)?;
+                        self.write_guest_port(port, width, data as usize)?;
                         continue;
                     }
                     AxVCpuExitReason::SysRegRead { addr, reg } => {
@@ -1123,6 +1171,29 @@ impl AxVM {
                 Err(err)
             }
         }
+    }
+
+    fn read_guest_port(
+        &self,
+        port: axaddrspace::device::Port,
+        width: AccessWidth,
+    ) -> AxResult<usize> {
+        if cfg!(feature = "device") && self.get_devices().find_port_dev(port).is_none() {
+            return Ok(width_mask(width));
+        }
+        self.get_devices().handle_port_read(port, width)
+    }
+
+    fn write_guest_port(
+        &self,
+        port: axaddrspace::device::Port,
+        width: AccessWidth,
+        value: usize,
+    ) -> AxResult {
+        if cfg!(feature = "device") && self.get_devices().find_port_dev(port).is_none() {
+            return Ok(());
+        }
+        self.get_devices().handle_port_write(port, width, value)
     }
 
     fn handle_nested_page_fault(&self, addr: GuestPhysAddr, access_flags: MappingFlags) -> bool {

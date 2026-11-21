@@ -190,6 +190,11 @@ pub fn init_guest_vm(raw_cfg: &str) -> AxResult<usize> {
     #[allow(unused_mut)]
     let mut vm_config = AxVMConfig::from(vm_create_config.clone());
 
+    #[cfg(feature = "device")]
+    if super::vm_list::get_vm_by_id(vm_config.id()).is_some() {
+        return Err(ax_errno::AxError::ResourceBusy);
+    }
+
     // Handle FDT-related operations for architectures that boot guests with DTB.
     #[cfg(any(
         target_arch = "aarch64",
@@ -235,6 +240,9 @@ pub fn init_guest_vm(raw_cfg: &str) -> AxResult<usize> {
     let mut loader = ImageLoader::new(main_mem, vm_create_config, vm.clone());
     loader.load()?;
 
+    #[cfg(feature = "device")]
+    super::devices::assigned::init(&vm)?;
+    #[cfg(not(feature = "device"))]
     vm.init()
         .map_err(|e| ax_err_type!(InvalidData, format!("VM[{}] setup failed: {e:?}", vm.id())))?;
 

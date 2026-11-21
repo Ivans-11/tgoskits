@@ -112,7 +112,11 @@ pub fn handle_fdt_operations(
     if let Some(dtb_arc) = get_vm_dtb_arc(vm_config) {
         let dtb = dtb_arc.as_ref();
         parse_reserved_memory_regions(vm_create_config, dtb)?;
-        parse_passthrough_devices_address(vm_config, vm_create_config, dtb)?;
+        // DeviceIf resources come from explicit host authorization. FDT-derived
+        // raw address windows must not replace those bindings.
+        if !cfg!(feature = "device") {
+            parse_passthrough_devices_address(vm_config, vm_create_config, dtb)?;
+        }
         #[cfg(target_arch = "aarch64")]
         parse_vm_interrupt(vm_config, dtb)?;
     } else {

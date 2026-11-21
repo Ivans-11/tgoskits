@@ -10,6 +10,7 @@ repository = "https://github.com/rcore-os/tgoskits"
 [features]
 default = ["vmx", "shell"]
 control = ["axvisor_api/control", "riscv_vcpu/control", "dep:riscv_aia"]
+device = ["axvisor_api/device", "axvm/device", "dep:axdevice"]
 bhyve = ["control", "dep:x86_vlapic", "x86_vlapic/rtc"]
 aia = ["axvm/aia"]
 aia-hw = ["aia", "riscv_vcpu/aia-hw"]
@@ -38,6 +39,7 @@ ax-memory-addr = { workspace = true }
 ax-page-table-multiarch = { workspace = true }
 axaddrspace = { workspace = true }
 axdevice_base = { workspace = true }
+axdevice = { workspace = true, optional = true }
 axhvc = { workspace = true }
 axvcpu = { workspace = true }
 axvm = { workspace = true }

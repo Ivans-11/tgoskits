@@ -19,9 +19,9 @@ use alloc::{string::String, vec::Vec};
 
 use axaddrspace::GuestPhysAddr;
 pub use axvmconfig::{
-    AxVMCrateConfig, EmulatedDeviceConfig, EmulatedDeviceType, PassThroughAddressConfig,
-    PassThroughDeviceConfig, VMBootProtocol, VMInterruptMode, VMType, VmMemConfig,
-    VmMemMappingType,
+    AxVMCrateConfig, DeviceIdConfig, EmulatedDeviceConfig, EmulatedDeviceType,
+    PassThroughAddressConfig, PassThroughDeviceConfig, VMBootProtocol, VMInterruptMode, VMType,
+    VmMemConfig, VmMemMappingType,
 };
 
 use crate::VMMemoryRegion;
@@ -398,17 +398,15 @@ fn host_controlled_emu_devices() -> Vec<EmulatedDeviceConfig> {
     Vec::new()
 }
 
-#[cfg(target_arch = "x86_64")]
 fn host_controlled_passthrough_addresses() -> Vec<PassThroughAddressConfig> {
-    alloc::vec![PassThroughAddressConfig {
-        base_gpa: 0xfed8_0000,
-        length: 0x1000,
-    }]
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn host_controlled_passthrough_addresses() -> Vec<PassThroughAddressConfig> {
-    Vec::new()
+    if cfg!(all(target_arch = "x86_64", not(feature = "device"))) {
+        alloc::vec![PassThroughAddressConfig {
+            base_gpa: 0xfed8_0000,
+            length: 0x1000,
+        }]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Represents the list of physical CPUs available for the VM.

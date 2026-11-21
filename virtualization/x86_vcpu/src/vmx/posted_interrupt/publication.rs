@@ -15,6 +15,11 @@ impl Publication {
         self.0.store(RUNNING, Ordering::Release);
     }
 
+    #[cfg(feature = "device")]
+    pub(super) fn is_running(&self) -> bool {
+        self.0.load(Ordering::Acquire) & RUNNING != 0
+    }
+
     pub(super) fn try_post(&self) -> Option<Posting<'_>> {
         self.0
             .compare_exchange(

@@ -45,6 +45,7 @@ memoffset = "0.9"
 
 [features]
 default = ["vmx"]
+device = ["axvisor_api/device"]
 tracing = []
 vmx = []
 posted-interrupt = ["vmx", "dep:ax-kspin"]

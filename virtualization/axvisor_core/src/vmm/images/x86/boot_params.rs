@@ -132,7 +132,10 @@ impl<'a> BootParamsBuilder<'a> {
     }
 
     fn patch_setup_header(&self, boot_params: &mut [u8]) -> Result<(), BootParamsError> {
-        write_u8(boot_params, SENTINEL_OFFSET, 0xff);
+        // build() zeroes the entire page and copies only setup_header. Keep
+        // sentinel clear so Linux does not sanitize away the extended fields
+        // or the command line stored in the zero page's trailing padding.
+        write_u8(boot_params, SENTINEL_OFFSET, 0);
         write_u8(
             boot_params,
             TYPE_OF_LOADER_OFFSET,
@@ -362,7 +365,7 @@ fn write_u64(buffer: &mut [u8], offset: usize, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        linux::{BOOT_PARAMS_GPA, BOOT_STUB_GPA, BOOT_STUB_SIZE},
+        super::linux::{BOOT_PARAMS_GPA, BOOT_STUB_GPA, BOOT_STUB_SIZE},
         *,
     };
 
@@ -439,7 +442,7 @@ mod tests {
             .unwrap();
         let params = builder.build().unwrap();
 
-        assert_eq!(read_u8(&params, SENTINEL_OFFSET), 0xff);
+        assert_eq!(read_u8(&params, SENTINEL_OFFSET), 0);
         assert_eq!(
             read_u8(&params, TYPE_OF_LOADER_OFFSET),
             TYPE_OF_LOADER_UNSPECIFIED

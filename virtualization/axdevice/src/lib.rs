@@ -36,6 +36,9 @@ mod config;
 mod device;
 mod range_alloc;
 
+#[cfg(target_arch = "x86_64")]
+pub mod pci;
+
 pub use config::AxVmDeviceConfig;
 pub use device::AxVmDevices;
 // pub use virtio_dev::*;

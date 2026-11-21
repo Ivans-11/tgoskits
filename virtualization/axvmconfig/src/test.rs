@@ -20,6 +20,46 @@ use crate::{
 };
 
 #[test]
+fn test_assignment_device_locators() {
+    use crate::{DeviceAssignmentConfig, DeviceIdConfig};
+
+    for (locator, expected) in [
+        ("pci = [0, 1, 0, 0]", DeviceIdConfig::Pci([0, 1, 0, 0])),
+        (
+            "device_tree_path = '/soc/npu@1000'",
+            DeviceIdConfig::DeviceTreePath("/soc/npu@1000".into()),
+        ),
+        (
+            "acpi_path = '\\_SB.NPU0'",
+            DeviceIdConfig::AcpiPath("\\_SB.NPU0".into()),
+        ),
+        (
+            "host = 'platform-device'",
+            DeviceIdConfig::Host("platform-device".into()),
+        ),
+    ] {
+        let text = format!("id = {{ {locator} }}\nregion = 0");
+        let config: DeviceAssignmentConfig = toml::from_str(&text).unwrap();
+        assert_eq!(config.id, expected);
+        assert_eq!(config.guest_pci, None);
+        assert_eq!(
+            toml::from_str::<DeviceAssignmentConfig>(&toml::to_string(&config).unwrap()).unwrap(),
+            config
+        );
+    }
+    let pci: DeviceAssignmentConfig =
+        toml::from_str("id = { pci = [0, 0, 11, 0] }\nregion = 4\nguest_pci = [0, 1, 0]").unwrap();
+    assert_eq!(pci.id, DeviceIdConfig::Pci([0, 0, 11, 0]));
+    assert_eq!(pci.guest_pci, Some([0, 1, 0]));
+    assert!(
+        toml::from_str::<DeviceAssignmentConfig>(
+            "id = { pci = [0, 1, 0, 0], host = 'platform-device' }\nregion = 0"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn test_config_deser() {
     const EXAMPLE_CONFIG: &str = r#"
 [base]
@@ -143,7 +183,7 @@ memory_regions = []
     assert_eq!(uefi_config.boot_protocol, Some(VMBootProtocol::Uefi));
     assert_eq!(uefi_config.effective_boot_protocol(), VMBootProtocol::Uefi);
     assert_eq!(uefi_config.boot_firmware_path(), Some("OVMF_CODE.fd"));
-    assert!(uefi_config.validate_boot_config().is_ok());
+    assert!(uefi_config.validate_boot_config_for_arch("x86_64").is_ok());
 
     let legacy_uefi_config = crate::VMKernelConfig {
         enable_bios: true,
@@ -156,7 +196,11 @@ memory_regions = []
         legacy_uefi_config.boot_firmware_path(),
         Some("OVMF_CODE.fd")
     );
-    assert!(legacy_uefi_config.validate_boot_config().is_ok());
+    assert!(
+        legacy_uefi_config
+            .validate_boot_config_for_arch("x86_64")
+            .is_ok()
+    );
 
     let direct_config = crate::VMKernelConfig {
         enable_bios: false,
@@ -186,10 +230,18 @@ fn test_boot_config_validation_requires_uefi_inputs() {
         ..Default::default()
     };
 
-    assert!(missing_firmware.validate_boot_config().is_err());
+    assert!(
+        missing_firmware
+            .validate_boot_config_for_arch("x86_64")
+            .is_err()
+    );
 
     missing_firmware.uefi_firmware_path = Some("OVMF_CODE.fd".to_string());
-    assert!(missing_firmware.validate_boot_config().is_ok());
+    assert!(
+        missing_firmware
+            .validate_boot_config_for_arch("x86_64")
+            .is_ok()
+    );
 }
 
 #[test]
@@ -272,11 +324,7 @@ emu_devices = []
     assert_eq!(device_config.interrupt_mode, VMInterruptMode::default());
 
     fn test_deser(s: &str, expected: VMInterruptMode) {
-        let config_str = format!(
-            "{}{}",
-            EXAMPLE_DEVICE_CONFIG,
-            format!("interrupt_mode = \"{}\"", s)
-        );
+        let config_str = format!("{EXAMPLE_DEVICE_CONFIG}interrupt_mode = \"{s}\"");
         let device_config: VMDevicesConfig = toml::from_str(&config_str).unwrap();
         assert_eq!(device_config.interrupt_mode, expected);
     }

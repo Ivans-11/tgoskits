@@ -37,6 +37,21 @@ pub fn push_vm(vm: VMRef) {
 /// Removes a VM from the global VM list by its ID.
 #[allow(unused)]
 pub fn remove_vm(vm_id: usize) -> Option<VMRef> {
+    #[cfg(feature = "device")]
+    {
+        let vm = get_vm_by_id(vm_id)?;
+        if !matches!(
+            vm.vm_status(),
+            axvm::VMStatus::Loaded | axvm::VMStatus::Stopped
+        ) {
+            return None;
+        }
+        super::vcpus::cleanup_vm_vcpus(vm_id);
+        if let Err(error) = super::devices::assigned::close(vm_id) {
+            warn!("VM[{vm_id}] device release failed, retaining VM: {error:?}");
+            return None;
+        }
+    }
     GLOBAL_VM_LIST.lock().remove(&vm_id)
 }
 

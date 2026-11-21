@@ -470,6 +470,7 @@ fn add_device_address_config(
         base_hpa: base_address,
         length: size,
         irq_id: 0,
+        assignment: None,
     };
     vm_cfg.add_pass_through_device(pt_dev);
 }
@@ -505,6 +506,7 @@ fn add_pci_ranges_config(vm_cfg: &mut AxVMConfig, node_name: &str, range: &PciRa
         base_hpa: base_address,
         length: size,
         irq_id: 0,
+        assignment: None,
     };
     vm_cfg.add_pass_through_device(pt_dev);
 

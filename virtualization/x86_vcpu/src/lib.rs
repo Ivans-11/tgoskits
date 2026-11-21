@@ -23,6 +23,8 @@ extern crate log;
 
 extern crate alloc;
 
+#[cfg(all(feature = "posted-interrupt", feature = "device"))]
+pub use vmx::hardware_interrupt_target;
 #[cfg(feature = "posted-interrupt")]
 pub use vmx::try_post_interrupt;
 
