@@ -361,7 +361,10 @@ impl<A: AxArchVCpu> AxVCpu<A> {
                     self.get_arch_vcpu().unbind()
                 })
             } else {
-                Ok(())
+                // A failed backend run marks the vCPU Invalid. Binding still
+                // succeeded on this CPU, so release its VMCS/VMID lease here.
+                // Keep the Invalid state: a failed run is not retryable.
+                self.get_arch_vcpu().unbind()
             };
             match result {
                 Ok(value) => unbind.map(|()| value),

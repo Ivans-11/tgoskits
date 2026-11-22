@@ -23,6 +23,12 @@ impl GuestAccess {
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
+    /// A notifier may close the gate after a batch has acquired a reader.
+    /// Recheck on every re-entry: its one IPI can already have caused an
+    /// earlier exit in this batch.
+    pub(crate) fn blocked(&self) -> bool {
+        self.blockers.load(Ordering::SeqCst) != 0
+    }
     /// Caller must prevent preemption until the guard is dropped.
     pub fn enter(&self) -> AxResult<GuestAccessGuard<'_>> {
         if !self.enabled() {

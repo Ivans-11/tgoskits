@@ -859,7 +859,7 @@ impl AxVM {
                     let exit_reason = vcpu.with_running(|arch| {
                         let mut resumed_irq = false;
                         Self::run_vcpu_batch(BACKEND_EXIT_LIMIT, || {
-                            if !enter() {
+                            if self.guest_access.blocked() || !enter() {
                                 return Ok(ControlFlow::Break(AxVCpuExitReason::Nothing));
                             }
                             let result = arch.run();
@@ -927,7 +927,7 @@ impl AxVM {
             let exit_reason = self.with_bound_vcpu(&vcpu, |vcpu| {
                 vcpu.set_hlt_exiting(true)?;
                 Self::run_vcpu_batch(8, || {
-                    if !enter() {
+                    if self.guest_access.blocked() || !enter() {
                         return Ok(ControlFlow::Break(AxVCpuExitReason::Nothing));
                     }
                     let result = vcpu.run();

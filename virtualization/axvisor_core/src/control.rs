@@ -306,16 +306,27 @@ impl VcpuState {
     /// Called after binding with local IRQs disabled. A queued event makes the
     /// caller return to the outer loop to consume it before the next entry.
     pub(crate) fn enter_executor(&self) -> bool {
+        self.try_enter_on(axvisor_api::arch::translation_cpu_id())
+    }
+
+    fn try_enter_on(&self, cpu: Option<usize>) -> bool {
         let mut events = self.events.lock();
         if events.closed || !events.pending.is_empty() {
             return false;
         }
-        events.executor_cpu = axvisor_api::arch::translation_cpu_id();
+        events.executor_cpu = cpu;
         true
     }
 
     pub(crate) fn leave_executor(&self) {
-        self.events.lock().executor_cpu = None;
+        let mut events = self.events.lock();
+        #[cfg(feature = "revocable-test")]
+        assert_eq!(
+            events.executor_cpu,
+            axvisor_api::arch::translation_cpu_id(),
+            "host migrated a vCPU inside the hardware execution interval"
+        );
+        events.executor_cpu = None;
     }
 
     // Sequential consistency pairs stop publication with the IRQ-off guest
@@ -385,6 +396,24 @@ pub(crate) fn queue_interrupt(route: InterruptRoute) -> AxResult {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_work_and_cpu_publication_interlock() {
+        let state = VcpuState::new(true, false);
+        let irq = VirtualInterrupt::edge(48);
+        state.queue(irq).unwrap();
+        assert!(!state.try_enter_on(Some(0)));
+        assert_eq!(state.drain_interrupts(), alloc::vec![irq]);
+        assert!(state.try_enter_on(Some(0)));
+        assert_eq!(state.events.lock().executor_cpu, Some(0));
+        state.queue(irq).unwrap();
+        assert_eq!(state.events.lock().executor_cpu.take(), Some(0));
+        assert!(!state.try_enter_on(Some(1)));
+        assert_eq!(state.drain_interrupts(), alloc::vec![irq]);
+        assert!(state.try_enter_on(Some(1)));
+        state.close();
+        assert!(!state.try_enter_on(Some(0)));
+    }
 
     #[test]
     fn retirement_does_not_deliver_to_reused_ids() {
