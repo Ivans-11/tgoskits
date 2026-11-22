@@ -1346,6 +1346,28 @@ impl VmxVcpu {
             && block_state == 0
     }
 
+    /// A demand fault can interrupt an IDT fetch or the implicit stack push.
+    /// Hardware already consumed the entry event. Replay its type and payload
+    /// after the mapping is installed, before considering fresh interrupts.
+    fn resume_interrupted_vectoring(&mut self) -> AxResult {
+        let info = VmcsReadOnly32::IDT_VECTORING_INFO.read()?;
+        if info & (1 << 31) == 0 {
+            return Ok(());
+        }
+        let kind = (info >> 8) & 7;
+        if kind == 2 {
+            let state = VmcsGuest32::INTERRUPTIBILITY_STATE.read()?;
+            VmcsGuest32::INTERRUPTIBILITY_STATE.write(state & !(1 << 3))?;
+        }
+        if info & (1 << 11) != 0 {
+            VmcsControl32::VMENTRY_EXCEPTION_ERR_CODE.write(VmcsReadOnly32::IDT_VECTORING_ERR_CODE.read()?)?;
+        }
+        if (4..=6).contains(&kind) {
+            VmcsControl32::VMENTRY_INSTRUCTION_LEN.write(VmcsReadOnly32::VMEXIT_INSTRUCTION_LEN.read()?)?;
+        }
+        VmcsControl32::VMENTRY_INTERRUPTION_INFO_FIELD.write(info & 0x8000_0fff)
+    }
+
     /// Try to inject a pending event before next VM entry.
     fn inject_pending_events(&mut self) -> AxResult {
         if self.pending_events.is_empty() {
@@ -2998,6 +3020,7 @@ impl AxArchVCpu for VmxVcpu {
                             }
                         }
                         VmxExitReason::EPT_VIOLATION => {
+                            self.resume_interrupted_vectoring()?;
                             let info = self.nested_page_fault_info()?;
                             AxVCpuExitReason::NestedPageFault {
                                 addr: info.fault_guest_paddr,

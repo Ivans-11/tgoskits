@@ -104,6 +104,13 @@ pub trait ArchIf {
     #[cfg(target_arch = "x86_64")]
     fn host_tsc_frequency_mhz() -> Option<u32>;
 
+    /// Calibrated, stable TSC rate for guests using an unscaled host TSC.
+    /// Hosts without a stability guarantee leave frequency reporting disabled.
+    #[cfg(target_arch = "x86_64")]
+    fn guest_tsc_frequency_khz() -> Option<u32> {
+        None
+    }
+
     /// Flushes guest VS-stage address-translation caches on all host CPUs.
     ///
     /// RISC-V SBI RFENCE calls require the firmware/hypervisor to complete
