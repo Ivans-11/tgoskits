@@ -187,8 +187,20 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let run_result = vm.run_vcpu_raw_control(
             vcpu_id,
             |addr, flags| handle_memory_slot_page_fault(vm_file, addr, flags),
-            || runtime.enter(),
-            || runtime.leave(),
+            || {
+                if !runtime.enter() {
+                    return false;
+                }
+                if !runtime.enter_executor() {
+                    runtime.leave();
+                    return false;
+                }
+                true
+            },
+            || {
+                runtime.leave_executor();
+                runtime.leave();
+            },
         );
         #[cfg(not(target_arch = "aarch64"))]
         let resolve_fault = |addr, access_flags| {
@@ -203,9 +215,13 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             }
         };
         #[cfg(not(target_arch = "aarch64"))]
-        let run_result = vm.run_vcpu_raw_with_mmio(vcpu_id, resolve_fault, |addr| {
-            crate::kvm::memory::outside_memory_slots(vm_file, addr)
-        });
+        let run_result = vm.run_vcpu_with_entry(
+            vcpu_id,
+            resolve_fault,
+            |addr| crate::kvm::memory::outside_memory_slots(vm_file, addr),
+            || runtime.enter_executor(),
+            || runtime.leave_executor(),
+        );
         let exit_reason = match run_result {
             Ok(exit_reason) => exit_reason,
             Err(err) if err == ax_errno::AxError::WouldBlock => {

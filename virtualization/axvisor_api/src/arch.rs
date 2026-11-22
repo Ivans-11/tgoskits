@@ -61,6 +61,16 @@ pub trait ArchIf {
         None
     }
 
+    /// Nonblocking doorbell for a published, CPU-pinned guest executor.
+    /// The provider may be called from IRQ context. It must arrange an exit
+    /// on the specified host CPU without waiting for an IPI acknowledgement.
+    /// A delayed IPI after unbind may be spurious. Pending work is owned by
+    /// the vCPU and is checked again at entry. This does not invalidate a TLB.
+    /// Providers of this operation must also supply `translation_cpu_id`.
+    fn guest_exit_ipi() -> Option<fn(usize)> {
+        None
+    }
+
     /// Returns the current physical CPU. The caller must prevent migration
     /// throughout publication and guest entry, not merely during this call.
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]

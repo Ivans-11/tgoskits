@@ -183,6 +183,9 @@ impl Drop for VmState {
 struct Events {
     pending: VecDeque<VirtualInterrupt>,
     halted: bool,
+    // Published only inside the pinned hardware-entry scope. Queue insertion
+    // and entry use the same lock so neither can miss the other.
+    executor_cpu: Option<usize>,
     closed: bool,
 }
 
@@ -208,6 +211,7 @@ impl VcpuState {
             events: SpinNoIrq::new(Events {
                 pending: VecDeque::new(),
                 halted: false,
+                executor_cpu: None,
                 closed: false,
             }),
             #[cfg(target_arch = "aarch64")]
@@ -240,7 +244,13 @@ impl VcpuState {
         if !self.coalesce || !events.pending.contains(&interrupt) {
             events.pending.push_back(interrupt);
         }
+        let cpu = events.executor_cpu;
         drop(events);
+        if let Some(cpu) = cpu
+            && let Some(kick) = axvisor_api::arch::guest_exit_ipi()
+        {
+            kick(cpu);
+        }
         #[cfg(target_arch = "aarch64")]
         self.wait_queue.wake_all();
         Ok(())
@@ -278,9 +288,34 @@ impl VcpuState {
     }
 
     fn close(&self) {
+        let cpu = {
+            let mut events = self.events.lock();
+            events.closed = true;
+            events.pending.clear();
+            events.executor_cpu
+        };
+        if let Some(cpu) = cpu
+            && let Some(kick) = axvisor_api::arch::guest_exit_ipi()
+        {
+            kick(cpu);
+        }
+        #[cfg(target_arch = "aarch64")]
+        self.wait_queue.wake_all();
+    }
+
+    /// Called after binding with local IRQs disabled. A queued event makes the
+    /// caller return to the outer loop to consume it before the next entry.
+    pub(crate) fn enter_executor(&self) -> bool {
         let mut events = self.events.lock();
-        events.closed = true;
-        events.pending.clear();
+        if events.closed || !events.pending.is_empty() {
+            return false;
+        }
+        events.executor_cpu = axvisor_api::arch::translation_cpu_id();
+        true
+    }
+
+    pub(crate) fn leave_executor(&self) {
+        self.events.lock().executor_cpu = None;
     }
 
     // Sequential consistency pairs stop publication with the IRQ-off guest

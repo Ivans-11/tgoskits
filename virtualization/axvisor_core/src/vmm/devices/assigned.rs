@@ -156,6 +156,9 @@ fn validate(vm: &VMRef, configs: &[PassThroughDeviceConfig]) -> AxResult {
 }
 
 fn map_ram(vm: &VMRef, assignment: &mut DeviceAssignment) -> AxResult {
+    if vm.guest_access.enabled() {
+        return Err(ax_errno::AxError::Unsupported);
+    }
     if !assignment.info().dma {
         return Ok(());
     }

@@ -387,6 +387,11 @@ fn container_ioctl(registry: &mut Registry, id: u64, command: u32, arg: usize) -
             Ok(0)
         }
         IOMMU_MAP_DMA => {
+            // A CPU stage-2 shootdown cannot retire an IOMMU translation.
+            // This provider selects notified RAM for all new control VMs.
+            if api::revocable_memory_ops().is_some() {
+                return Err(AxError::Unsupported);
+            }
             let bytes = payload::<32>(arg)?;
             let flags = u32_at(&bytes, 4);
             let address = u64_at(&bytes, 8);

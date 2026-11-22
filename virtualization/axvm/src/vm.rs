@@ -814,9 +814,34 @@ impl AxVM {
         F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
         M: FnMut(GuestPhysAddr) -> AxResult<bool>,
     {
+        self.run_vcpu_with_entry(
+            vcpu_id,
+            external_page_fault_handler,
+            is_mmio,
+            || true,
+            || {},
+        )
+    }
+
+    /// Control frontend entry callbacks run in the same IRQ-off binding as
+    /// the hardware instruction. Sleeping fault resolution stays outside it.
+    pub fn run_vcpu_with_entry<F, M, E, L>(
+        &self,
+        vcpu_id: usize,
+        external_page_fault_handler: F,
+        is_mmio: M,
+        mut enter: E,
+        mut leave: L,
+    ) -> AxResult<AxVCpuExitReason>
+    where
+        F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
+        M: FnMut(GuestPhysAddr) -> AxResult<bool>,
+        E: FnMut() -> bool,
+        L: FnMut(),
+    {
         #[cfg(feature = "svm")]
         {
-            let _ = is_mmio;
+            let _ = (&mut enter, &mut leave, is_mmio);
             self.run_vcpu_raw_svm(vcpu_id, external_page_fault_handler)
         }
 
@@ -834,7 +859,12 @@ impl AxVM {
                     let exit_reason = vcpu.with_running(|arch| {
                         let mut resumed_irq = false;
                         Self::run_vcpu_batch(BACKEND_EXIT_LIMIT, || {
-                            let exit = arch.run()?;
+                            if !enter() {
+                                return Ok(ControlFlow::Break(AxVCpuExitReason::Nothing));
+                            }
+                            let result = arch.run();
+                            leave();
+                            let exit = result?;
                             // A pending guest IRQ can be delivered without
                             // tearing down this binding and task association.
                             // Permit only one such retry per batch: a second
@@ -863,10 +893,9 @@ impl AxVM {
                         {
                             continue;
                         }
-                        return Ok(self.with_bound_vcpu(&vcpu, |vcpu| {
-                            vcpu.decode_nested_page_fault()
-                        })?
-                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
+                        return Ok(self
+                            .with_bound_vcpu(&vcpu, |vcpu| vcpu.decode_nested_page_fault())?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
                     }
                     exit_reason => return Ok(exit_reason),
                 }
@@ -913,10 +942,9 @@ impl AxVM {
                     {
                         continue;
                     }
-                    return Ok(self.with_bound_vcpu(&vcpu, |vcpu| {
-                        vcpu.decode_nested_page_fault()
-                    })?
-                    .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
+                    return Ok(self
+                        .with_bound_vcpu(&vcpu, |vcpu| vcpu.decode_nested_page_fault())?
+                        .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }));
                 }
                 exit_reason => return Ok(exit_reason),
             }
