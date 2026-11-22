@@ -129,6 +129,19 @@ pub trait AxArchVCpu: Sized {
     /// to prepare the VCpu for execution on the current physical CPU.
     fn bind(&mut self) -> AxResult;
 
+    /// Whether the backend supports the quiesced, host-notified backing protocol.
+    /// This includes retryable RAM faults and synchronization before every guest
+    /// access (including instruction decoding), not merely a TLB instruction.
+    const SUPPORTS_NOTIFIED_BACKING: bool = false;
+
+    /// Synchronize translations to this generation on the bound CPU before access.
+    /// Return whether hardware invalidation was needed. A backend may skip it only
+    /// with proof that this CPU has already observed this mapping generation.
+    /// Required only by hosts enabling notified backing; unsupported by default.
+    fn sync_guest_translation(&mut self, _generation: u64) -> AxResult<bool> {
+        Err(ax_errno::AxError::Unsupported)
+    }
+
     /// Unbinds the VCpu from the current physical CPU.
     ///
     /// This method performs cleanup and state preservation when moving

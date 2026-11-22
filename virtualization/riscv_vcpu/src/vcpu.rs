@@ -196,7 +196,7 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             #[cfg(feature = "aia")]
             aia: None,
             #[cfg(feature = "control")]
-            translation: crate::vmid::TranslationContext::default(),
+            translation: crate::vmid::TranslationContext::new(_vm_id),
             #[cfg(feature = "m-mode")]
             machine_state: host::MachineState::default(),
         })
@@ -409,6 +409,14 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
         Ok(())
     }
 
+    #[cfg(feature = "control")]
+    const SUPPORTS_NOTIFIED_BACKING: bool = true;
+
+    #[cfg(feature = "control")]
+    fn sync_guest_translation(&mut self, generation: u64) -> AxResult<bool> {
+        Ok(self.translation.sync_notified(generation))
+    }
+
     fn unbind(&mut self) -> AxResult {
         self.sbi.pmu.backend_unbind();
         // Store the vCPU's CSRs to the stored state.
@@ -443,6 +451,8 @@ impl axvcpu::AxArchVCpu for RISCVVCpu {
             #[cfg(feature = "sstc")]
             vstimecmp::write(usize::MAX);
             core::arch::asm!("csrw hgatp, x0");
+            #[cfg(feature = "control")]
+            self.translation.unbind();
             // Host execution does not use G-stage translation. VMID-tagged
             // translations remain available to a validated later binding.
         }

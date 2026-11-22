@@ -57,6 +57,9 @@ pub struct Aarch64VCpu {
     fp_state: Box<FpState>,
     /// The MPIDR_EL1 value for the vCPU.
     mpidr: u64,
+    translation: crate::vmid::TranslationContext,
+    notified_backing: bool,
+    pending_abort: Option<crate::notified::GuestAbort>,
 }
 
 /// Configuration for creating a new `Aarch64VCpu`
@@ -101,6 +104,9 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
             // SAFETY: FpState contains only integers and has no invalid bit patterns.
             fp_state: unsafe { fp_state.assume_init() },
             mpidr: config.mpidr_el1,
+            translation: crate::vmid::TranslationContext::new(_vm_id),
+            notified_backing: false,
+            pending_abort: None,
         })
     }
 
@@ -118,6 +124,7 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
     fn set_ept_root(&mut self, ept_root: HostPhysAddr) -> AxResult {
         debug!("set vcpu ept root:{ept_root:#x}");
         self.guest_system_regs.vttbr_el2 = ept_root.as_usize() as u64;
+        self.translation.invalidate();
         Ok(())
     }
 
@@ -125,6 +132,7 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
         let mut host_system_regs = HostSystemRegisters::default();
         let mut host_fp_state = FpState::default();
         let host_vhe;
+        let mut abort = Ok(None);
 
         // Run guest.
         let exit_reson = unsafe {
@@ -136,7 +144,13 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
             self.restore_vm_system_regs(host_vhe);
             self.virtual_gic_state.restore();
             self.fp_state.restore();
-            self.run_guest()
+            let reason = self.run_guest();
+            // Capture translation/permission faults while guest EL1 registers
+            // are selected; AT-based IPA recovery must not use host registers.
+            if self.notified_backing && reason == 0 {
+                abort = crate::notified::GuestAbort::capture();
+            }
+            reason
         };
 
         unsafe {
@@ -151,15 +165,40 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
             host_system_regs.restore_daif();
         };
 
+        if let Some(fault) = abort? {
+            let exit = fault.exit();
+            self.pending_abort = Some(fault);
+            return Ok(exit);
+        }
+        self.pending_abort = None;
         let trap_kind = TrapKind::try_from(exit_reson as u8).expect("Invalid TrapKind");
         self.vmexit_handler(trap_kind)
     }
 
+    const SUPPORTS_NOTIFIED_BACKING: bool = true;
+
+    fn sync_guest_translation(&mut self, generation: u64) -> AxResult<bool> {
+        self.notified_backing = true;
+        Ok(self.translation.sync_notified(generation))
+    }
+
+    fn decode_nested_page_fault(&mut self) -> AxResult<Option<AxVCpuExitReason>> {
+        self.pending_abort
+            .take()
+            .map(|fault| fault.decode(&mut self.ctx))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     fn bind(&mut self) -> AxResult {
+        // Use the architectural baseline 8-bit VMID format on every CPU.
+        self.guest_system_regs.vtcr_el2 &= !(1 << 19);
+        self.guest_system_regs.vttbr_el2 = self.translation.bind(self.guest_system_regs.vttbr_el2);
         Ok(())
     }
 
     fn unbind(&mut self) -> AxResult {
+        self.translation.unbind();
         Ok(())
     }
 
@@ -345,14 +384,8 @@ impl Aarch64VCpu {
                  isb",
                 hcr = in(reg) 1u64,
             );
-            core::arch::asm!(
-                "
-                ic  iallu
-                tlbi	alle2
-                tlbi	alle1         // Flush tlb
-                dsb	nsh
-                isb"
-            );
+            // TranslationContext validated the VMID incarnation and mapping
+            // epoch during bind; unchanged bindings retain their translations.
         }
     }
 

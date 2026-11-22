@@ -1,18 +1,25 @@
 //! Describe the virtual LAPIC's 1 GHz clock without changing the TSC rate.
 use raw_cpuid::CpuIdResult;
 
-pub(super) fn virtual_timer_leaf(host: CpuIdResult) -> CpuIdResult {
+pub(super) fn virtual_timer_leaf(host: CpuIdResult, host_tsc_mhz: Option<u32>) -> CpuIdResult {
     let unavailable = CpuIdResult {
         eax: 0,
         ebx: 0,
         ecx: 0,
         edx: 0,
     };
-    if host.eax == 0 || host.ebx == 0 || host.ecx == 0 {
+    // Nested hosts may hide CPUID.15 while the native kernel has calibrated
+    // TSC. Use only that explicit provider, never a guessed frequency.
+    let (numerator, denominator) = if host.eax != 0 && host.ebx != 0 && host.ecx != 0 {
+        (
+            u64::from(host.ecx) * u64::from(host.ebx),
+            1_000_000_000u64 * u64::from(host.eax),
+        )
+    } else if let Some(mhz) = host_tsc_mhz.filter(|mhz| *mhz != 0) {
+        (u64::from(mhz) * 1_000_000, 1_000_000_000)
+    } else {
         return unavailable;
-    }
-    let numerator = u64::from(host.ecx) * u64::from(host.ebx);
-    let denominator = 1_000_000_000u64 * u64::from(host.eax);
+    };
     let (mut a, mut b) = (numerator, denominator);
     while b != 0 {
         (a, b) = (b, a % b);
@@ -48,7 +55,7 @@ mod tests {
                 edx: 0,
             },
         ] {
-            let guest = virtual_timer_leaf(host);
+            let guest = virtual_timer_leaf(host, None);
             assert_eq!(guest.ecx, 1_000_000_000);
             assert_eq!(
                 u128::from(guest.ecx) * u128::from(guest.ebx) * u128::from(host.eax),
@@ -59,12 +66,52 @@ mod tests {
 
     #[test]
     fn unknown_crystal_requires_guest_calibration() {
-        let guest = virtual_timer_leaf(CpuIdResult {
-            eax: 1,
-            ebx: 96,
-            ecx: 0,
-            edx: 0,
-        });
+        let guest = virtual_timer_leaf(
+            CpuIdResult {
+                eax: 1,
+                ebx: 96,
+                ecx: 0,
+                edx: 0,
+            },
+            None,
+        );
         assert_eq!((guest.eax, guest.ebx, guest.ecx), (0, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod native_frequency_tests {
+    use super::*;
+    #[test]
+    fn calibrated_host_frequency_without_cpuid() {
+        for mhz in [1, 2400, 4007, u32::MAX] {
+            let leaf = virtual_timer_leaf(
+                CpuIdResult {
+                    eax: 0,
+                    ebx: 0,
+                    ecx: 0,
+                    edx: 0,
+                },
+                Some(mhz),
+            );
+            assert_eq!(leaf.ecx, 1_000_000_000);
+            assert_eq!(
+                u128::from(leaf.ecx) * u128::from(leaf.ebx),
+                u128::from(mhz) * 1_000_000 * u128::from(leaf.eax)
+            );
+        }
+    }
+    #[test]
+    fn zero_frequency_is_not_a_clock() {
+        let leaf = virtual_timer_leaf(
+            CpuIdResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            Some(0),
+        );
+        assert_eq!((leaf.eax, leaf.ebx, leaf.ecx), (0, 0, 0));
     }
 }

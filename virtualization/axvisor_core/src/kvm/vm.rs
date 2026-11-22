@@ -40,10 +40,12 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
     vm.init()?;
     vm.set_vm_status(VMStatus::Loaded);
 
+    let revocable = super::revocable::RevocableMemory::new(vm.clone())?;
     CONTROL_FILES.lock().insert(
         control_file,
         ControlFileState::Vm(VmFileState {
             runtime: VmState::new(vm_id, false)?,
+            revocable,
             vm,
             vm_fd_closed: false,
             #[cfg(target_arch = "riscv64")]

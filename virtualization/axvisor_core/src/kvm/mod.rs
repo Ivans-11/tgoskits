@@ -23,6 +23,7 @@ mod device;
 mod eventfd;
 mod memory;
 mod registers;
+mod revocable;
 mod run;
 mod state;
 mod util;
@@ -261,6 +262,9 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 _ => return ax_err!(NotFound),
             };
             vm.runtime.close();
+            if let Some(memory) = &vm.revocable {
+                memory.close();
+            }
             let _ = vm.vm.shutdown();
             // KVM-created vCPUs are registered in the VMM task table.  Join
             // and remove them before dropping the VM so their stacks and VM

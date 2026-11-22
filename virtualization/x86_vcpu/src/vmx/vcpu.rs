@@ -196,6 +196,9 @@ pub struct VmxVcpu {
     entry_dirty: bool,
     /// The EPT root address.
     ept_root: Option<HostPhysAddr>,
+    // Valid only on this CPU and at this mapping generation. A migration,
+    // including A -> B -> A, forces another local INVEPT before access.
+    ept_sync: Option<(usize, u64)>,
     /// vCPU ID exposed as the local APIC ID in CPUID topology leaves.
     vcpu_id: VCpuId,
     /// Number of vCPUs exposed in CPUID topology leaves.
@@ -285,6 +288,7 @@ impl VmxVcpu {
             entry: None,
             entry_dirty: false,
             ept_root: None,
+            ept_sync: None,
             vcpu_id,
             vcpu_count: config.vcpu_count.max(1),
             kvm_pv: false,
@@ -2195,23 +2199,10 @@ impl VmxVcpu {
             0 if self.cpuid.is_empty() => self.cpuid_leaf0,
             // Linux derives its LAPIC rate from the crystal in leaf 0x15.
             // Match the emulated 1 GHz timer, preserving the physical TSC ratio.
-            0x15 => {
-                let mut host = self.cpuid_cache.host(0x15, 0);
-                // Nested VMX and some CPUs omit the crystal leaf. The host
-                // already calibrates the physical TSC used by this backend.
-                if (host.eax == 0 || host.ebx == 0 || host.ecx == 0)
-                    && let Some(mhz) = crate::host_tsc_frequency_mhz()
-                    && mhz != 0
-                {
-                    host = CpuIdResult {
-                        eax: 1,
-                        ebx: mhz,
-                        ecx: 1_000_000,
-                        edx: 0,
-                    };
-                }
-                super::timer_cpuid::virtual_timer_leaf(host)
-            }
+            0x15 => super::timer_cpuid::virtual_timer_leaf(
+                self.cpuid_cache.host(0x15, 0),
+                crate::host_tsc_frequency_mhz(),
+            ),
             LEAF_FEATURE_INFO => {
                 const FEATURE_VMX: u32 = 1 << 5;
                 const FEATURE_HYPERVISOR: u32 = 1 << 31;
@@ -2638,6 +2629,7 @@ impl AxArchVCpu for VmxVcpu {
 
     fn set_ept_root(&mut self, ept_root: HostPhysAddr) -> AxResult {
         self.ept_root = Some(ept_root);
+        self.ept_sync = None;
         Ok(())
     }
 
@@ -3075,6 +3067,23 @@ impl AxArchVCpu for VmxVcpu {
     fn bind(&mut self) -> AxResult {
         self.bind_to_current_processor()?;
         self.replay_dirty_entry_after_bind()
+    }
+
+    const SUPPORTS_NOTIFIED_BACKING: bool = true;
+
+    fn sync_guest_translation(&mut self, generation: u64) -> AxResult<bool> {
+        // AxVM holds an IRQ/preemption guard and the access gate here.
+        let stamp = axvisor_api::arch::translation_cpu_id().map(|cpu| (cpu, generation));
+        if stamp.is_some() && self.ept_sync == stamp {
+            return Ok(false);
+        }
+        let eptp = VmcsControl64::EPTP.read()?;
+        unsafe {
+            super::instructions::invept(super::instructions::InvEptType::SingleContext, eptp)
+                .map_err(as_axerr)?;
+        }
+        self.ept_sync = stamp; // never acknowledge a failed invalidation
+        Ok(true)
     }
 
     fn unbind(&mut self) -> AxResult {

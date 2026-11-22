@@ -46,3 +46,6 @@ pub use arch_vcpu::{AxArchVCpu, AxVCpuCpuidEntry, InterruptTriggerMode}; /* Arch
 pub use exit::AxVCpuExitReason;
 pub use percpu::*; // Per-CPU state management types
 pub use vcpu::*; // Main VCpu types and functions // VM exit reasons
+
+pub mod tag_pool;
+pub mod vmid;

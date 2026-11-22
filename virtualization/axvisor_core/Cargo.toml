@@ -8,6 +8,8 @@ license = "Apache-2.0"
 repository = "https://github.com/rcore-os/tgoskits"
 
 [features]
+# Diagnostic counters for revocable-backing integration tests only.
+revocable-test = ["axvm/revocable-test"]
 default = ["vmx", "shell"]
 control = ["axvisor_api/control", "riscv_vcpu/control", "dep:riscv_aia"]
 device = ["axvisor_api/device", "axvm/device", "dep:axdevice"]

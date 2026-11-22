@@ -58,3 +58,7 @@ pub fn has_hardware_support() -> bool {
     // Current just return true by default.
     true
 }
+
+mod notified;
+
+mod vmid;

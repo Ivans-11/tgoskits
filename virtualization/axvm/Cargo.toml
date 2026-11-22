@@ -11,6 +11,8 @@ license = "Apache-2.0"
 
 [features]
 device = ["axvisor_api/device", "x86_vcpu/device"]
+# Diagnostic counters for revocable-backing integration tests only.
+revocable-test = []
 aia = ["axdevice/aia", "riscv_vcpu/aia"]
 default = ["vmx"]
 vmx = ["axaddrspace/vmx", "x86_vcpu/vmx"]

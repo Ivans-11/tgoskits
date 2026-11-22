@@ -42,7 +42,11 @@ use x86::{update_vcpu_run_interrupt_state, vcpu_run_irq_window_open};
 use super::{CONTROL_FILES, ControlFileState};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::eventfd::is_userspace_eoi_vector;
-#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 use crate::kvm::memory::handle_memory_slot_page_fault;
 use crate::{
     kvm::{
@@ -68,7 +72,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         pit2_created,
         runtime,
     ) = {
-        let mut control_files = CONTROL_FILES.lock();
+        let control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
             return ax_err!(NotFound);
         };
@@ -86,12 +90,6 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         let signal_mask = vcpu.signal_mask.clone();
         let mmap_area = vcpu.mmap_area.clone();
         let runtime = vcpu.runtime.clone();
-        let Some(ControlFileState::Vcpu(vcpu_file_state)) = control_files.get_mut(&control_file)
-        else {
-            return ax_err!(NotFound);
-        };
-        vcpu_file_state.pending_mmio_read = None;
-        vcpu_file_state.pending_io_read = None;
         let Some(vcpu) = vm.vcpu(vcpu_id) else {
             return ax_err!(NotFound);
         };
@@ -140,9 +138,17 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
 
     if let Some(pending) = pending_mmio_read {
         complete_mmio_read(&mmap_area, &vcpu, pending)?;
+        if let Some(ControlFileState::Vcpu(state)) = CONTROL_FILES.lock().get_mut(&control_file) {
+            state.pending_mmio_read = None;
+        }
     }
     if let Some(pending) = pending_io_read {
+        // Revocation can temporarily reject a guest-memory copy. Keep the
+        // pending completion on failure so a caller retry cannot lose input.
         complete_io_read(&mmap_area, &vm, &vcpu, pending)?;
+        if let Some(ControlFileState::Vcpu(state)) = CONTROL_FILES.lock().get_mut(&control_file) {
+            state.pending_io_read = None;
+        }
     }
 
     if read_mmap_area_u8(&mmap_area, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
@@ -154,6 +160,9 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         // VM shutdown may be initiated by closing the VM fd while a vCPU fd
         // is still open.  Stop KVM_RUN promptly so the last AxVM reference is
         // released before a subsequent VM is created.
+        if super::revocable::for_vm(vm_file).is_some_and(|m| m.is_dead()) {
+            return Err(AxErrorKind::BadState.into());
+        }
         if vm.stopping() || vm.stopped() {
             update_vcpu_run_interrupt_state(&mmap_area, &vcpu)?;
             return Err(AxErrorKind::Interrupted.into());
@@ -177,7 +186,7 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         #[cfg(target_arch = "aarch64")]
         let run_result = vm.run_vcpu_raw_control(
             vcpu_id,
-            |_, _| Ok(false),
+            |addr, flags| handle_memory_slot_page_fault(vm_file, addr, flags),
             || runtime.enter(),
             || runtime.leave(),
         );
@@ -199,6 +208,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         });
         let exit_reason = match run_result {
             Ok(exit_reason) => exit_reason,
+            Err(err) if err == ax_errno::AxError::WouldBlock => {
+                axvisor_api::task::yield_now();
+                continue;
+            }
             Err(_) => {
                 write_mmap_area_u32(
                     &mmap_area,

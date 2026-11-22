@@ -80,6 +80,7 @@ impl DeviceFileState {
 
 #[derive(Clone)]
 pub(in crate::kvm) struct VmFileState {
+    pub(in crate::kvm) revocable: Option<Arc<super::revocable::RevocableMemory>>,
     pub(in crate::kvm) vm: AxVMRef,
     pub(in crate::kvm) runtime: Arc<VmState>,
     /// Set once the VM file descriptor is closed.  The VM state must remain

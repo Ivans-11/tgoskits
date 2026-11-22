@@ -37,7 +37,11 @@ use ax_memory_set::MappingError;
 pub use frame::PhysFrame;
 pub use hal::AxMmHal;
 pub use memory_accessor::GuestMemoryAccessor;
-#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv32",
+    target_arch = "riscv64"
+))]
 pub use npt::{guest_tlb_generation, invalidate_guest_tlbs};
 
 /// Information about nested page faults.

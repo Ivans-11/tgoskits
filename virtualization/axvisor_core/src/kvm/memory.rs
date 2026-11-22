@@ -46,6 +46,9 @@ pub(in crate::kvm) fn set_user_memory_region(
     region: UserspaceMemoryRegion,
 ) -> AxResult {
     validate_memory_region(region)?;
+    if let Some(memory) = super::revocable::for_vm(control_file) {
+        return memory.set_slot(region);
+    }
 
     let mut control_files = CONTROL_FILES.lock();
     let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
@@ -143,13 +146,23 @@ pub(in crate::kvm) fn set_user_memory_region(
 /// commit their entire userspace range. In particular, gVisor registers sparse
 /// ranges that are several GiB large. Resolve only the faulting page and retain
 /// its host pin until the slot is removed.
-#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "riscv64",
+    target_arch = "aarch64"
+))]
 pub(in crate::kvm) fn handle_memory_slot_page_fault(
     vm_file: api_control::ControlFileId,
     fault_addr: GuestPhysAddr,
     access_flags: MappingFlags,
 ) -> AxResult<bool> {
-    handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false)
+    if let Some(memory) = super::revocable::for_vm(vm_file) {
+        return memory.fault(fault_addr, access_flags);
+    }
+    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+    return handle_memory_slot_page_fault_inner(vm_file, fault_addr, access_flags, false);
+    #[cfg(target_arch = "aarch64")]
+    Ok(false)
 }
 
 /// Classifies a fault without pinning or allocating pages while a vCPU is bound.
@@ -158,6 +171,9 @@ pub(in crate::kvm) fn outside_memory_slots(
     vm_file: api_control::ControlFileId,
     addr: GuestPhysAddr,
 ) -> AxResult<bool> {
+    if let Some(memory) = super::revocable::for_vm(vm_file) {
+        return Ok(!memory.contains(addr));
+    }
     let files = CONTROL_FILES.lock();
     let Some(ControlFileState::Vm(vm)) = files.get(&vm_file) else {
         return ax_err!(NotFound);
