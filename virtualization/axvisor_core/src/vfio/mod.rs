@@ -9,6 +9,7 @@
 
 mod abi;
 mod irq;
+mod mmap;
 mod pci;
 
 use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
@@ -27,7 +28,7 @@ const OPS: api::ControlOps = api::ControlOps {
     open,
     close,
     ioctl,
-    mmap: None,
+    mmap: Some(mmap::map),
     io: Some(api::FileIoOps {
         read: read_file,
         write: write_file,
@@ -419,7 +420,7 @@ fn container_ioctl(registry: &mut Registry, id: u64, command: u32, arg: usize) -
             let _ = api::release_user_address_space(mm);
             let pinned = pinned?;
             let lease = Arc::new(DmaLease(pinned.id));
-            if pinned.pages.len().checked_mul(4096) != Some(len as usize) {
+            if pinned.is_device || pinned.pages.len().checked_mul(4096) != Some(len as usize) {
                 return Err(AxError::BadAddress);
             }
             let permissions = AccessPermissions {
@@ -568,39 +569,7 @@ fn device_ioctl(registry: &mut Registry, id: u64, command: u32, arg: usize) -> A
             api::copy_to_user(arg, &bytes)?;
         }
         DEVICE_GET_REGION_INFO => {
-            let mut bytes = payload::<32>(arg)?;
-            let index = u32_at(&bytes, 8);
-            if index >= 9 {
-                return Err(AxError::InvalidInput);
-            }
-            let (size, flags) = if index == CONFIG_REGION {
-                (256, 3)
-            } else if index < 6 {
-                device
-                    .assignment
-                    .info()
-                    .regions
-                    .iter()
-                    .find(|region| {
-                        region.index == index && region.kind != RegionKind::Configuration
-                    })
-                    .map(|region| {
-                        (
-                            region.size,
-                            u32::from(region.permissions.read)
-                                | (u32::from(region.permissions.write) << 1),
-                        )
-                    })
-                    .unwrap_or((0, 0))
-            } else {
-                (0, 0)
-            };
-            put32(&mut bytes, 0, 32);
-            put32(&mut bytes, 4, flags);
-            put32(&mut bytes, 12, 0);
-            put64(&mut bytes, 16, size);
-            put64(&mut bytes, 24, u64::from(index) << REGION_SHIFT);
-            api::copy_to_user(arg, &bytes)?;
+            mmap::region_info(device, arg)?;
         }
         DEVICE_GET_IRQ_INFO => {
             let mut bytes = payload::<16>(arg)?;

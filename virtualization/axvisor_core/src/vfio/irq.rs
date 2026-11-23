@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transfer physical notifications to eventfd in sleepable host context.
+//! Signal eventfds directly when supported, otherwise defer to a host task.
 
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use ax_errno::{AxError, AxResult};
+use ax_kspin::SpinNoIrq;
 use axvisor_api::{
     control,
     device::IrqHandle,
@@ -16,6 +17,8 @@ use axvisor_api::{
 use crate::device::DeviceAssignment;
 
 pub(super) struct Notification {
+    signal: Option<fn(control::UserFdRefId) -> AxResult>,
+    fd: SpinNoIrq<Option<control::UserFdRefId>>,
     pending: AtomicBool,
     stopped: AtomicBool,
     wait: WaitQueue,
@@ -24,6 +27,8 @@ pub(super) struct Notification {
 impl Notification {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
+            signal: control::eventfd_ops().and_then(|ops| ops.signal),
+            fd: SpinNoIrq::new(None),
             pending: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             wait: WaitQueue::new(),
@@ -31,6 +36,16 @@ impl Notification {
     }
 
     pub(super) fn signal(&self) {
+        if let Some(signal) = self.signal {
+            // Retain the binding through the nonblocking host call. Teardown
+            // clears it before releasing the fd, including software triggers.
+            let fd = self.fd.lock();
+            if let Some(fd) = *fd
+                && signal(fd).is_ok()
+            {
+                return;
+            }
+        }
         self.pending.store(true, Ordering::Release);
         self.wait.wake_one();
     }
@@ -58,6 +73,7 @@ impl Irq {
                 pci.interrupt();
             }),
         )?;
+        *notification.fd.lock() = Some(fd);
         let state = notification.clone();
         let task = task::spawn_task(
             TaskOptions {
@@ -101,6 +117,7 @@ impl Irq {
             assignment.unbind_interrupt(handle)?;
             self.handle = None;
         }
+        *self.notification.fd.lock() = None;
         self.notification.stopped.store(true, Ordering::Release);
         self.notification.wait.wake_one();
         if let Some(task) = self.task.take() {

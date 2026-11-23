@@ -247,7 +247,8 @@ fn handle_memory_slot_page_fault_inner(
             ),
         }
     };
-    if pinned.pages.len() != 1 {
+    if pinned.pages.len() != 1 || (pinned.is_device && access_flags.contains(MappingFlags::EXECUTE))
+    {
         let _ = api_control::release_pinned_pages(pinned.id);
         return ax_err!(InvalidInput);
     }
@@ -286,9 +287,21 @@ fn handle_memory_slot_page_fault_inner(
                 .unmap_region(GuestPhysAddr::from(page_gpa as usize), abi::PAGE_SIZE_USIZE)?;
             replaced_page = Some(old_page);
         }
-        let mut flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
+        let mut flags = MappingFlags::READ | MappingFlags::USER | MappingFlags::EXECUTE;
         if writable {
             flags |= MappingFlags::WRITE;
+        }
+        #[cfg(feature = "device")]
+        if pinned.is_device {
+            flags = crate::device::mapping::guest_flags(axvisor_api::device::AccessPermissions {
+                read: true,
+                write: writable,
+            });
+        }
+        #[cfg(not(feature = "device"))]
+        if pinned.is_device {
+            flags.remove(MappingFlags::EXECUTE);
+            flags.insert(MappingFlags::DEVICE);
         }
         match vm.vm.map_region(
             GuestPhysAddr::from(page_gpa as usize),
@@ -321,7 +334,7 @@ fn handle_memory_slot_page_fault_inner(
     // forward window. A successful writable pin resolves COW and proves that
     // the VMM mapping is writable, so the matching EPT entries can be writable
     // immediately instead of faulting again only to upgrade their permissions.
-    if result.is_ok() && !prefetched && write_fault {
+    if result.is_ok() && !prefetched && write_fault && !pinned.is_device {
         let slot_end = snapshot
             .guest_phys_addr
             .saturating_add(snapshot.memory_size);
@@ -337,7 +350,7 @@ fn handle_memory_slot_page_fault_inner(
                 false,
             )
         {
-            if batch.pages.is_empty() {
+            if batch.pages.is_empty() || batch.is_device {
                 let _ = api_control::release_pinned_pages(batch.id);
                 return result;
             }
@@ -443,8 +456,14 @@ fn map_pinned_user_memory(
         return ax_err!(InvalidInput);
     }
 
-    let flags =
-        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER;
+    let flags = MappingFlags::READ
+        | MappingFlags::WRITE
+        | MappingFlags::USER
+        | if pinned.is_device {
+            MappingFlags::DEVICE
+        } else {
+            MappingFlags::EXECUTE
+        };
     for (mapped_pages, (page_index, page_hpa)) in pinned.pages.iter().enumerate().enumerate() {
         let page_gpa = region.guest_phys_addr as usize + page_index * abi::PAGE_SIZE_USIZE;
         if let Err(err) = vm.map_region(

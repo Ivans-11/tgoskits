@@ -1350,6 +1350,8 @@ impl AxVM {
     // }
 
     /// Maps a region of host physical memory to guest physical memory.
+    ///
+    /// Updating a live VM also requires synchronizing guest translation caches.
     pub fn map_region(
         &self,
         gpa: GuestPhysAddr,
@@ -1391,6 +1393,20 @@ impl AxVM {
     pub fn unmap_region(&self, gpa: GuestPhysAddr, size: usize) -> AxResult {
         self.inner_mut.lock().address_space.unmap(gpa, size)?;
         Ok(())
+    }
+
+    /// Synchronize a direct PCI mapping change from the sole, pinned vCPU's
+    /// configuration-exit handler, before that vCPU can reenter the guest.
+    /// Multi-vCPU or migratable guests require remote invalidation instead.
+    #[cfg(all(target_arch = "x86_64", feature = "vmx", feature = "device"))]
+    pub fn invalidate_device_mappings(&self) -> AxResult {
+        let vcpu = self.vcpu(0).ok_or(AxError::BadState)?;
+        if self.vcpu_num() != 1 || !vcpu.phys_cpu_set().is_some_and(|set| set.count_ones() == 1) {
+            return Err(AxError::Unsupported);
+        }
+        self.with_bound_vcpu(&vcpu, |vcpu| {
+            vcpu.with_running(|arch| arch.invalidate_device_mappings())
+        })
     }
 
     /// Reads an object of type `T` from the guest physical address.

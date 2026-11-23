@@ -52,11 +52,18 @@ pub trait PciBackend: Send + Sync {
     fn configure_msi(&self, _message: Option<MsiMessage>) -> AxResult {
         Ok(())
     }
+    /// Enable or revoke direct mappings for BARs whose decoding changed.
+    /// A BAR decodes only at its fixed aperture with memory decoding enabled.
+    /// Runs outside the configuration lock, serialized with configuration writes.
+    fn configure_bars(&self, _changes: &[(u32, bool)]) -> AxResult {
+        Ok(())
+    }
 }
 
 const MSI: usize = 0x40;
 const PCIE: usize = 0x60;
 
+#[derive(Clone)]
 struct Bar {
     aperture: GuestPhysAddrRange,
     size: u64,
@@ -78,6 +85,10 @@ fn get32(bytes: &[u8], offset: usize) -> u32 {
 impl Config {
     fn memory_enabled(&self) -> bool {
         self.bytes[4] & 2 != 0
+    }
+
+    fn bar_enabled(&self, bar: &Bar) -> bool {
+        self.memory_enabled() && bar.address == bar.aperture.start.as_usize() as u64
     }
 
     fn msi(&self) -> Option<MsiMessage> {
@@ -307,20 +318,45 @@ impl PciFunction {
                 .wait_until(move || !busy.load(Ordering::Acquire));
         }
         let _guard = ConfigurationGuard(self);
-        let (old_msi, new_msi, bytes) = {
+        let (old_msi, new_msi, bytes, bars, changes) = {
             let mut config = self.state.lock();
             let previous = config.bytes;
+            let previous_bars = config.bars.clone();
+            let enabled: alloc::vec::Vec<_> = config
+                .bars
+                .iter()
+                .map(|(&index, bar)| (index, config.bar_enabled(bar)))
+                .collect();
             let old_msi = config.msi();
             config.write(offset, width, value as u64);
             let next = config.bytes;
             let new_msi = config.msi();
+            let changes: alloc::vec::Vec<_> = enabled
+                .into_iter()
+                .filter_map(|(index, old)| {
+                    let new = config.bar_enabled(&config.bars[&index]);
+                    (old != new).then_some((index, new))
+                })
+                .collect();
+            let bars = core::mem::replace(&mut config.bars, previous_bars);
             config.bytes = previous;
-            (old_msi, new_msi, next)
+            (old_msi, new_msi, next, bars, changes)
         };
         if old_msi != new_msi {
             self.backend.configure_msi(new_msi)?;
         }
-        self.state.lock().bytes = bytes;
+        if !changes.is_empty()
+            && let Err(error) = self.backend.configure_bars(&changes)
+        {
+            let rollback: alloc::vec::Vec<_> = changes.iter().map(|&(i, on)| (i, !on)).collect();
+            self.backend.configure_bars(&rollback)?;
+            return Err(error);
+        }
+        {
+            let mut config = self.state.lock();
+            config.bytes = bytes;
+            config.bars = bars;
+        }
         self.deliver_pending(false);
         Ok(())
     }
@@ -361,9 +397,7 @@ impl PciWindow {
         let config = self.function.state.lock();
         let bar = config.bars.get(&self.region)?;
         let offset = (addr.as_usize() as u64).checked_sub(bar.address)?;
-        (config.memory_enabled()
-            && bar.address == bar.aperture.start.as_usize() as u64
-            && offset.checked_add(width.size() as u64)? <= bar.size)
+        (config.bar_enabled(bar) && offset.checked_add(width.size() as u64)? <= bar.size)
             .then_some(offset)
     }
 }
@@ -503,9 +537,17 @@ mod tests {
         updating: AtomicBool,
         routes: std::sync::Mutex<Vec<Option<MsiMessage>>>,
         delivered: std::sync::Mutex<Vec<MsiMessage>>,
+        bars: std::sync::Mutex<Vec<(u32, bool)>>,
     }
 
     impl PciBackend for Backend {
+        fn configure_bars(&self, changes: &[(u32, bool)]) -> AxResult {
+            if self.reject.swap(false, Ordering::Relaxed) {
+                return Err(AxError::Io);
+            }
+            self.bars.lock().unwrap().extend_from_slice(changes);
+            Ok(())
+        }
         fn read_bar(&self, _: u32, _: u64, _: AccessWidth) -> AxResult<u64> {
             Ok(0)
         }
@@ -580,6 +622,65 @@ mod tests {
         );
         function.write_config(MSI + 16, 4, 1).unwrap();
         assert_eq!(*backend.routes.lock().unwrap().last().unwrap(), None);
+    }
+
+    #[test]
+    fn direct_bar_decoding_tracks_command_and_address_and_rolls_back_failure() {
+        let backend = Arc::new(Backend::default());
+        let function = Arc::new(PciFunction::new(
+            PciIdentity {
+                vendor_device: 0x1234_8086,
+                class_revision: 0,
+                subsystem: 0,
+            },
+            backend.clone(),
+        ));
+        let window = function
+            .add_bar(
+                0,
+                (0x8000_0000usize..0x8000_1000usize).try_into().unwrap(),
+                0,
+            )
+            .unwrap();
+        function.config_write(4, AccessWidth::Word, 2).unwrap();
+        assert_eq!(
+            window.offset(0x8000_0000usize.into(), AccessWidth::Dword),
+            Some(0)
+        );
+        function
+            .config_write(0x10, AccessWidth::Dword, u32::MAX.into())
+            .unwrap();
+        assert_eq!(*backend.bars.lock().unwrap(), [(0, true)]);
+        function
+            .config_write(0x10, AccessWidth::Dword, 0x9000_0000)
+            .unwrap();
+        assert_eq!(
+            window.offset(0x8000_0000usize.into(), AccessWidth::Dword),
+            None
+        );
+        assert_eq!(*backend.bars.lock().unwrap(), [(0, true), (0, false)]);
+        backend.reject.store(true, Ordering::Relaxed);
+        assert_eq!(
+            function.config_write(0x10, AccessWidth::Dword, 0x8000_0000),
+            Err(AxError::Io)
+        );
+        assert_eq!(
+            function.config_read(0x10, AccessWidth::Dword).unwrap(),
+            0x9000_0000
+        );
+        assert_eq!(
+            window.offset(0x8000_0000usize.into(), AccessWidth::Dword),
+            None
+        );
+        function
+            .config_write(0x10, AccessWidth::Dword, 0x8000_0000)
+            .unwrap();
+        function.config_write(4, AccessWidth::Word, 0).unwrap();
+        assert_eq!(
+            window.offset(0x8000_0000usize.into(), AccessWidth::Dword),
+            None
+        );
+        assert_eq!(*backend.bars.lock().unwrap().last().unwrap(), (0, false));
     }
 
     fn config() -> Config {

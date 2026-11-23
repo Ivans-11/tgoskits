@@ -20,8 +20,15 @@ use crate::{
 };
 
 // None reserves a VM ID while sleepable setup/teardown runs without this lock.
-static ASSIGNMENTS: SpinNoIrq<BTreeMap<usize, Option<Vec<DeviceAssignment>>>> =
+static ASSIGNMENTS: SpinNoIrq<BTreeMap<usize, Option<Assignments>>> =
     SpinNoIrq::new(BTreeMap::new());
+
+#[derive(Default)]
+struct Assignments {
+    devices: Vec<DeviceAssignment>,
+    #[cfg(target_arch = "x86_64")]
+    bars: Vec<Arc<pci::BarMappings>>,
+}
 
 struct MmioWindow {
     range: GuestPhysAddrRange,
@@ -203,7 +210,8 @@ pub fn init(vm: &VMRef) -> AxResult {
         }
         table.insert(vm.id(), None);
     }
-    let mut assignments = Vec::<DeviceAssignment>::new();
+    let mut resources = Assignments::default();
+    let assignments = &mut resources.devices;
     let result = (|| {
         let mut indices = BTreeMap::new();
         let mut windows: Vec<Arc<dyn BaseMmioDeviceOps>> = Vec::new();
@@ -244,7 +252,15 @@ pub fn init(vm: &VMRef) -> AxResult {
                             .filter_map(|c| c.assignment.as_ref())
                             .find_map(|a| (a.id == binding.id).then_some(a.irq_source).flatten())
                             .ok_or(AxError::InvalidInput)?;
-                        entry.insert(Arc::new(pci::new_function(assignment, vm, source)?))
+                        let device_configs: Vec<_> = configs
+                            .iter()
+                            .filter(|c| c.assignment.as_ref().is_some_and(|a| a.id == binding.id))
+                            .cloned()
+                            .collect();
+                        let (function, mappings) =
+                            pci::new_function(assignment, vm, source, &device_configs)?;
+                        resources.bars.push(mappings);
+                        entry.insert(Arc::new(function))
                     }
                     alloc::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 };
@@ -267,7 +283,7 @@ pub fn init(vm: &VMRef) -> AxResult {
             ports.push(Arc::new(axdevice::pci::PciBus::new(pci_functions.clone())?));
         }
         vm.init_with_assigned_devices(windows, core::mem::take(&mut ports))?;
-        for assignment in &mut assignments {
+        for assignment in &mut *assignments {
             map_ram(vm, assignment)?;
         }
         for config in &configs {
@@ -311,7 +327,7 @@ pub fn init(vm: &VMRef) -> AxResult {
         }
         Ok(())
     })();
-    *ASSIGNMENTS.lock().get_mut(&vm.id()).unwrap() = Some(assignments);
+    *ASSIGNMENTS.lock().get_mut(&vm.id()).unwrap() = Some(resources);
     if result.is_err() {
         // No vCPU has started. Keep failed cleanup in the table for retry;
         // host DMA leases keep its VM and RAM alive.
@@ -332,12 +348,19 @@ pub fn close(vm_id: usize) -> AxResult {
         };
         entry.take().ok_or(AxError::ResourceBusy)?
     };
-    while let Some(assignment) = assignments.last_mut() {
+    #[cfg(target_arch = "x86_64")]
+    for mappings in &assignments.bars {
+        if let Err(error) = mappings.revoke() {
+            *ASSIGNMENTS.lock().get_mut(&vm_id).unwrap() = Some(assignments);
+            return Err(error);
+        }
+    }
+    while let Some(assignment) = assignments.devices.last_mut() {
         if let Err(error) = assignment.close() {
             *ASSIGNMENTS.lock().get_mut(&vm_id).unwrap() = Some(assignments);
             return Err(error);
         }
-        assignments.pop();
+        assignments.devices.pop();
     }
     ASSIGNMENTS.lock().remove(&vm_id);
     Ok(())

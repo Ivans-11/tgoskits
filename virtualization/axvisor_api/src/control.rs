@@ -33,6 +33,22 @@ pub type ControlFileId = u64;
 /// On Unix-like hosts this is typically a file descriptor.
 pub type Fd = i32;
 
+/// Backing requested for a userspace-mappable memory area.
+pub enum MmapBacking {
+    /// Allocate new zero-initialized ordinary memory.
+    Anonymous,
+    /// Map an existing host-authorized device MMIO subrange.
+    #[cfg(feature = "device")]
+    Device {
+        /// An acquired device handle.
+        device: crate::device::DeviceHandle,
+        /// Device resource index.
+        region: u32,
+        /// Byte offset within the resource.
+        offset: u64,
+    },
+}
+
 /// A published host control-device endpoint.
 pub type EndpointId = u64;
 
@@ -54,11 +70,32 @@ impl Drop for MmapArea {
 }
 
 impl MmapArea {
+    /// Creates backing for a host-authorized device window. User mappings and
+    /// pins must retain the originating control file until they are removed.
+    #[cfg(feature = "device")]
+    pub fn device(
+        device: crate::device::DeviceHandle,
+        region: u32,
+        offset: u64,
+        len: usize,
+    ) -> AxResult<Self> {
+        Ok(Self {
+            raw: create_mmap_area(
+                len,
+                MmapBacking::Device {
+                    device,
+                    region,
+                    offset,
+                },
+            )?,
+        })
+    }
+
     /// Creates a zero-initialized host memory area and owns its release obligation.
     #[inline]
     pub fn new(len: usize) -> AxResult<Self> {
         Ok(Self {
-            raw: create_mmap_area(len)?,
+            raw: create_mmap_area(len, MmapBacking::Anonymous)?,
         })
     }
 
@@ -127,6 +164,12 @@ pub struct EventFdOps {
     /// Called once, in sleepable context, without core locks held. No callback
     /// may start or remain running after this operation returns.
     pub unregister: fn(u64),
+    /// Optionally signals one event without blocking, including in IRQ context.
+    /// The fd must remain retained throughout the call. This operation must not
+    /// invoke core callbacks inline; registered callbacks retain their task-context
+    /// contract. An error leaves the event unchanged so the caller can defer it
+    /// to a task using `write_user_fd_ref`.
+    pub signal: Option<fn(UserFdRefId) -> AxResult>,
 }
 
 /// One temporary reference obtained while resolving notified userspace RAM.
@@ -175,6 +218,9 @@ pub struct PinnedPages {
     pub id: PinnedPagesId,
     /// Page-sized host physical addresses, in requested range order.
     pub pages: Vec<PhysAddr>,
+    /// Device MMIO backing: map uncached, non-executable, and never use for DMA
+    /// or ordinary RAM access. Its lease retains the owning device file.
+    pub is_device: bool,
 }
 
 /// Optional positioned byte I/O for a control file. The host copies between
@@ -282,11 +328,16 @@ pub trait ControlIf {
 
     // Userspace-mappable memory areas.
 
-    /// Creates a zero-initialized userspace-mappable memory area.
+    /// Creates a userspace-mappable area with the requested backing.
     /// Returns a fresh host identifier with one release obligation. The backing
     /// must support cross-thread access. `MmapArea::new` wraps the identifier;
     /// callers share that ownership record through Arc.
-    fn create_mmap_area(len: usize) -> AxResult<usize>;
+    ///
+    /// Anonymous backing is zero-initialized. Device backing must satisfy page
+    /// alignment and `DeviceInfo::direct_mappings`, use device/uncached
+    /// attributes, and retain the owning control file through user mappings
+    /// and CPU pins. Hosts without device mapping support return Unsupported.
+    fn create_mmap_area(len: usize, backing: MmapBacking) -> AxResult<usize>;
 
     /// Reads bytes from a userspace-mappable memory area.
     fn read_mmap_area(area: &MmapArea, offset: usize, buf: &mut [u8]) -> AxResult;

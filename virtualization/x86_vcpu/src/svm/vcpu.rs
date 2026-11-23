@@ -349,7 +349,8 @@ impl SvmVcpu {
         state.rip.set(entry_state.rip as u64);
         state.rsp.set(0);
         state.efer.set(EFER_SVME);
-        state.g_pat.set(Msr::IA32_PAT.read());
+        // Guest reset state is independent of the host's cache-policy layout.
+        state.g_pat.set(0x0007_0406_0007_0406);
 
         Ok(())
     }

@@ -14,6 +14,8 @@ use ax_errno::{AxError, AxResult};
 use ax_kspin::SpinNoIrq;
 use axvisor_api::device::{self, *};
 
+pub(crate) mod mapping;
+
 /// Revocable register access retained by a trapped guest device model.
 pub struct DeviceAccess {
     handle: DeviceHandle,
@@ -109,6 +111,36 @@ impl DeviceAssignment {
     /// Obtain revocable register access for a guest device model.
     pub fn access(&self) -> Arc<DeviceAccess> {
         self.access.clone()
+    }
+
+    /// Common authorization and address rules for both BAR frontends.
+    pub(crate) fn bar_region(&self, region: u32) -> AxResult<mapping::BarRegion<'_>> {
+        self.live_device()?;
+        mapping::BarRegion::new(
+            self.info
+                .regions
+                .iter()
+                .find(|r| r.index == region)
+                .ok_or(AxError::InvalidInput)?,
+        )
+    }
+
+    /// Creates backing for an authorized userspace BAR mapping. The control
+    /// host retains its originating file until every mapping/pin is gone.
+    #[cfg(feature = "control")]
+    pub(crate) fn mmap(
+        &self,
+        region: u32,
+        offset: u64,
+        len: usize,
+        requested: AccessPermissions,
+    ) -> AxResult<(axvisor_api::control::MmapArea, AccessPermissions)> {
+        let bar = self.bar_region(region)?;
+        bar.slice(offset, len, requested)?;
+        Ok((
+            axvisor_api::control::MmapArea::device(self.live_device()?, region, offset, len)?,
+            bar.permissions,
+        ))
     }
 
     fn live_device(&self) -> AxResult<DeviceHandle> {

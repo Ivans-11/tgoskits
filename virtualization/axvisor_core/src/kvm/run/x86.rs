@@ -25,8 +25,6 @@ use axvm::AxVMRef;
 use crate::kvm::abi::raw as abi;
 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 use crate::kvm::queue_vcpu_startup_by_id;
-#[cfg(target_arch = "x86_64")]
-use crate::kvm::registers::KvmRegisters;
 #[cfg(all(target_arch = "x86_64", feature = "svm"))]
 use crate::kvm::set_vcpu_file_mp_state_by_id;
 #[cfg(target_arch = "x86_64")]
@@ -131,16 +129,10 @@ pub(super) fn update_vcpu_run_interrupt_state(
     mmap_area: &api_control::MmapArea,
     vcpu: &axvm::AxVCpuRef,
 ) -> AxResult {
-    let mut regs = [0u8; abi::KVM_X86_REGS_SIZE as usize];
-    let if_flag = if vcpu.get_kvm_regs(&mut regs).is_ok() {
-        let mut rflags_bytes = [0u8; 8];
-        rflags_bytes.copy_from_slice(
-            &regs[abi::KVM_X86_REGS_RFLAGS_OFFSET..abi::KVM_X86_REGS_RFLAGS_OFFSET + 8],
-        );
-        u8::from(u64::from_ne_bytes(rflags_bytes) & abi::X86_RFLAGS_IF != 0)
-    } else {
-        1
-    };
+    let if_flag = vcpu
+        .get_arch_reg(axvcpu::x86_regs::RFLAGS)
+        .map(|rflags| u8::from(rflags & abi::X86_RFLAGS_IF != 0))
+        .unwrap_or(1);
 
     write_mmap_area_u8(
         mmap_area,

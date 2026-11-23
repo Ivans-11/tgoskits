@@ -228,6 +228,9 @@ pub struct VmxVcpu {
     pending_fault_info: Option<NestedPageFaultInfo>,
     /// Last successfully applied HLT-exit policy. VMCLEAR preserves controls.
     hlt_exiting: Option<bool>,
+    /// Cached EOI-exit controls; hardware can complete edge EOIs itself.
+    #[cfg(feature = "posted-interrupt")]
+    eoi_exit_bitmap: [u64; 4],
     /// The I/O bitmap for the VMCS.
     io_bitmap: IOBitmap,
     pci_config_address: u32,
@@ -275,6 +278,12 @@ pub struct VmxVcpu {
 }
 
 impl VmxVcpu {
+    /// Invalidate this EPT context on the current CPU while the vCPU is bound.
+    #[cfg(feature = "device")]
+    pub fn invalidate_device_mappings(&mut self) -> AxResult {
+        vmcs::set_ept_pointer(self.ept_root.ok_or(ax_errno::AxError::BadState)?)
+    }
+
     /// Create a new [`VmxVcpu`].
     pub fn new(vm_id: VMId, vcpu_id: VCpuId, config: X86VCpuCreateConfig) -> AxResult<Self> {
         let vmcs_revision_id = super::read_vmcs_revision_id();
@@ -305,6 +314,8 @@ impl VmxVcpu {
             cached_rip: None,
             pending_fault_info: None,
             hlt_exiting: None,
+            #[cfg(feature = "posted-interrupt")]
+            eoi_exit_bitmap: [u64::MAX; 4],
             io_bitmap: IOBitmap::passthrough_all()?,
             pci_config_address: 0,
             filter_pci_config: false,
@@ -445,7 +456,24 @@ impl VmxVcpu {
 
         #[cfg(feature = "posted-interrupt")]
         if let Some(pi) = &self.posted_interrupt {
-            pi.enter(self.vlapic.posted_edge_masks());
+            let eligible = self.vlapic.posted_edge_masks();
+            // Posted vectors are edge-triggered and need no IOAPIC EOI
+            // notification. Retain exits for level-triggered interrupts.
+            // VMCLEAR preserves these controls; only rewrite changed words.
+            let fields = [
+                VmcsControl64::EOI_EXIT0,
+                VmcsControl64::EOI_EXIT1,
+                VmcsControl64::EOI_EXIT2,
+                VmcsControl64::EOI_EXIT3,
+            ];
+            for (index, field) in fields.into_iter().enumerate() {
+                let bitmap = !eligible[index];
+                if self.eoi_exit_bitmap[index] != bitmap {
+                    field.write(bitmap).unwrap();
+                    self.eoi_exit_bitmap[index] = bitmap;
+                }
+            }
+            pi.enter(eligible);
         }
         self.cached_exit = None;
         self.cached_rip = None;
@@ -462,16 +490,20 @@ impl VmxVcpu {
             }
         }
         #[cfg(feature = "posted-interrupt")]
-        if let Some(pi) = &self.posted_interrupt
-            && let Some(pending) = pi.exit()
-        {
+        if let Some(pi) = &self.posted_interrupt {
+            let pending = pi.exit();
+            // An edge EOI may have completed without exiting, including for
+            // an interrupt injected in software. Refresh cached ISR/PPR on
+            // every hardware exit before using the software LAPIC model.
             self.vlapic.sync_hardware_isr();
-            pi.finish_sync(VmcsGuest16::INTERRUPT_STATUS.read().unwrap());
-            for (word, mut bits) in pending.into_iter().enumerate() {
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    self.queue_event((word * 64 + bit) as u8, None);
-                    bits &= bits - 1;
+            if let Some(pending) = pending {
+                pi.finish_sync(VmcsGuest16::INTERRUPT_STATUS.read().unwrap());
+                for (word, mut bits) in pending.into_iter().enumerate() {
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        self.queue_event((word * 64 + bit) as u8, None);
+                        bits &= bits - 1;
+                    }
                 }
             }
         }
@@ -959,7 +991,10 @@ impl VmxVcpu {
 
         VmcsGuest64::LINK_PTR.write(u64::MAX)?; // SDM Vol. 3C, Section 24.4.2
         VmcsGuest64::IA32_DEBUGCTL.write(0)?;
-        VmcsGuest64::IA32_PAT.write(Msr::IA32_PAT.read())?;
+        // A new guest starts with the architectural reset layout, independent
+        // of the host's PAT policy. Guests without PAT initialization rely on
+        // slot 2 being UC-, not a host-specific write-combining slot.
+        VmcsGuest64::IA32_PAT.write(0x0007_0406_0007_0406)?;
         VmcsGuest64::IA32_EFER.write(0)?;
         // KVM userspace may previously have configured this vCPU for long
         // mode. A SIPI resets EFER, so the VM-entry IA-32e guest-mode control
@@ -1151,6 +1186,10 @@ impl VmxVcpu {
                 .write(EmulatedLocalApic::virtual_apic_access_addr().as_usize() as _)?;
         }
         if vid_supported {
+            #[cfg(feature = "posted-interrupt")]
+            {
+                self.eoi_exit_bitmap = [u64::MAX; 4];
+            }
             VmcsControl64::EOI_EXIT0.write(u64::MAX)?;
             VmcsControl64::EOI_EXIT1.write(u64::MAX)?;
             VmcsControl64::EOI_EXIT2.write(u64::MAX)?;
